@@ -165,6 +165,14 @@ const mkNat = (edgeX, extraPcs) => Bench.create({ devices: [
   const B = mkNat(NATX.pat); pc(B, "p1", "ping 198.51.100.10");
   ok(/Hits: 7  Misses: 1/.test(cli(B, "edge", "show ip nat statistics")), "show ip nat statistics after one Windows ping: Hits: 7  Misses: 1", cli(B, "edge", "show ip nat statistics")); }
 
+{ // regression: a router DHCP client whose server has no free address must not loop (the retry marker lives outside the config)
+  const B = Bench.create({ devices: [
+    { id:"e", kind:"router", label:"EDGE", x:0, y:0, config: cfg(["int g0/1","ip address dhcp","no shut"]) },
+    { id:"i", kind:"router", label:"ISP", x:300, y:0, config: cfg(["int g0/1","ip address 203.0.113.1 255.255.255.252","no shut","exit","ip dhcp excluded-address 203.0.113.1 203.0.113.2","ip dhcp pool C","network 203.0.113.0 255.255.255.252"]) } ],
+    cables: [{type:"cat6",a:"e:g1",b:"i:g1"}] });
+  for (let k = 0; k < 5; k++) cli(B, "e", "show ip interface brief");
+  ok(B._l3.sig.length < 20000 && /GigabitEthernet0\/1\s+unassigned\s+YES DHCP/.test(cli(B, "e", "show ip interface brief")), "exhausted ISP pool: EDGE stays unassigned, no retry loop", B._l3.sig.length); }
+
 // ---- Stage 3: NTP, syslog, DNS, TFTP, SNMP ----
 // HQ: R1 (LAN 192.168.10.0/24, server LAN 192.168.50.0/24 with SRV = DNS + TFTP + syslog + SNMP manager), link to branch router R2 (LAN 192.168.20.0/24)
 const mkSvc = (r1x, r2x) => Bench.create({ devices: [

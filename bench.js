@@ -993,7 +993,8 @@ function autoDhcp(B){
     const keep = [B.frames, B.log, B.step]; try { dora(B, d); } finally { [B.frames, B.log, B.step] = keep; } }
   for (const id of B.order){ const r = B.devs[id]; if (!r.env || r.kind!=="router" || r.on===false) continue;
     for (const [n, i] of Object.entries(r.env.intfs)){ if (!i.dhcpClient || i.ip || i.shut || !r.env.isUp(n)) continue;
-      const key = B._l3.sig + "|" + n; if (i._dhcpTried===key) continue; i._dhcpTried = key;
+      // remember the attempt OUTSIDE the router config: a marker in the config would change the network signature and retry forever
+      const T = B._rtrDhcpTried = B._rtrDhcpTried || {}, k = id + "|" + n; if (T[k]===B._l3.sig) continue; T[k] = B._l3.sig;
       const keep = [B.frames, B.log, B.step]; try { routerDora(B, r, n); } finally { [B.frames, B.log, B.step] = keep; } } }
 }
 const WDAY = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"], WMON = ["January","February","March","April","May","June","July","August","September","October","November","December"];
