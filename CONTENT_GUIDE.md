@@ -264,5 +264,12 @@ Run `node tools/validate.js` before every commit. It loads every data file the w
 and fails on broken JS, bad quiz answers, broken quick checks, unbalanced HTML and terminal tasks that throw.
 It also prints words per lesson so thin lessons are easy to spot.
 
+**Beginner continuity (non-negotiable):** run `node tools/terms.js --track <id> --mod <module id>` (or `--lesson <fragment.js>`,
+repeatable, for unassembled fragments in order). It lists every acronym or technical term a learner meets before the course
+has taught it — "never defined" (no earlier lesson and this lesson never explains it) or "defined later" (explained only well
+after first use). Fix each with a `K.g` at the first use (expansion + plain meaning; say which later module covers it if it's a
+forward reference). Brands, places and formats everyone knows go in the `NAMES`/`COMMON` lists in tools/terms.js. A module
+doesn't ship until this prints 0 for it. `--jargon` additionally checks multi-word glossary terms (noisier; review by hand).
+
 When you release, bump the `?v=` stamp on the script tags in `index.html` (e.g. `?v=20261012a`) so browsers fetch the
 new files instead of mixing cached old ones with new ones. Then open the site with `#selftest` on the end of the URL.

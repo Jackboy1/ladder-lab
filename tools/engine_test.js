@@ -124,8 +124,14 @@ ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0
   ok(!Bench.trunking(L,"s2","g8"),"nonegotiate: the auto side never hears DTP and stays access");
   L = two(["int g0/8","switchport mode trunk","switchport trunk allowed vlan 1,20"],["int g0/8","switchport mode trunk"]);
   ok(/timed out|unreachable/.test(out(L,["pc","a","ping 10.10.0.2"])),"VLAN pruned from the allowed list can't cross the trunk");
-  L = two(["int g0/8","switchport mode trunk","switchport trunk native vlan 99"],["int g0/8","switchport mode trunk"]);
+  L = two(["vlan 99","int g0/8","switchport mode trunk","switchport trunk native vlan 99"],["vlan 99","int g0/8","switchport mode trunk"]);
   out(L,["pc","a","ping 10.10.0.2"]); ok(Bench.logged(L,"s1",/NATIVE_VLAN_MISMATCH/),"native VLAN mismatch is logged by CDP");
+  { const st = L.devs.s1.env.exec("show spanning-tree vlan 99"), st1 = L.devs.s2.env.exec("show spanning-tree vlan 1");
+    ok(/BKN\*.*P2p \*PVID_Inc/.test(st) && /BKN\*.*P2p \*PVID_Inc/.test(st1) && Bench.logged(L,"s1",/BLOCK_PVID_LOCAL: Blocking GigabitEthernet0\/8 on VLAN0099/) && Bench.logged(L,"s1",/BLOCK_PVID_PEER: Blocking GigabitEthernet0\/8 on VLAN0001/),
+      "native VLAN mismatch: PVST+ blocks both native VLANs on the trunk (PVID_Inc) and logs BLOCK_PVID_LOCAL/PEER");
+    ok(/Reply from 10\.10\.0\.2/.test(out(L,["pc","a","ping 10.10.0.2"])), "a VLAN that isn't either native keeps working across the mismatched trunk");
+    for (const c of ["conf t","int g0/8","switchport trunk native vlan 99","end"]) Bench.act(L,["cli","s2",c]);
+    ok(Bench.logged(L,"s1",/UNBLOCK_CONSIST_PORT: Unblocking GigabitEthernet0\/8 on VLAN0099\. Port consistency restored/) && !/PVID_Inc/.test(L.devs.s1.env.exec("show spanning-tree vlan 99")), "fixing the native VLAN unblocks the port and logs UNBLOCK_CONSIST_PORT"); }
   // router-on-a-stick
   const roas = (swUplink) => Bench.create({devices:[
       {id:"r",kind:"router",label:"R1",config:cfgSw(["int g0/0","no shut","int g0/0.10","encapsulation dot1Q 10","ip add 10.10.0.1 255.255.255.0","int g0/0.20","encapsulation dot1Q 20","ip add 10.20.0.1 255.255.255.0"])},
@@ -134,6 +140,10 @@ ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0
     cables:[{type:"cat6",a:"a:eth",b:"s:g1"},{type:"cat6",a:"b:eth",b:"s:g2"},{type:"cat6",a:"s:g8",b:"r:g0"}]});
   L = roas([]); ok(/timed out|unreachable/.test(out(L,["pc","a","ping 10.20.0.5"])),"ROAS: the switch port to the router stays access (routers don't speak DTP) — no inter-VLAN routing");
   L = roas(["int g0/8","switchport mode trunk"]); ok(/Reply from 10\.20\.0\.5.*TTL=127/.test(out(L,["pc","a","ping 10.20.0.5"])),"ROAS: trunk to the router + dot1Q subinterfaces route between VLANs");
+  ok(/Encapsulation 802\.1Q Virtual LAN, Vlan ID  10\./.test(L.devs.r.env.exec("show interfaces g0/0.10")) && /Virtual LAN ID:  20 \(IEEE 802\.1Q Encapsulation\)/.test(L.devs.r.env.exec("show vlans")), "router: show interfaces on a subinterface and show vlans");
+  ok(/Reply from 10\.10\.0\.5.*TTL=255/.test(out(L,["cli","r","ping 10.10.0.5"])) || /!!!!!/.test(L.devs.r.env.exec("ping 10.10.0.5")), "router ping works across ROAS");
+  { const rows = L.devs.s.env.exec("show mac address-table").split("\n").filter(l=>/Gi0\/8/.test(l));
+    ok(rows.some(l=>/^ *10 /.test(l)) && rows.some(l=>/^ *20 /.test(l)), "ROAS: the router's MAC is learned in VLAN 10 AND VLAN 20 on the trunk (MAC table keyed by VLAN)"); }
   ok(/% Configuring IP routing on a LAN subinterface/.test((()=>{ const R = SIM.ios2Env({kind:"router"}); ["en","conf t","int g0/0.30"].forEach(c=>R.exec(c)); return R.exec("ip add 10.30.0.1 255.255.255.0"); })()),"IP on a subinterface without encapsulation is refused like real IOS");
   // Layer 3 switch
   L = Bench.create({devices:[{id:"s",kind:"switch",label:"L3SW",config:cfgSw(["ip routing","vlan 10","vlan 20","int g0/1","switchport mode access","switchport access vlan 10","int g0/2","switchport mode access","switchport access vlan 20","int vlan 10","ip add 10.10.0.1 255.255.255.0","no shut","int vlan 20","ip add 10.20.0.1 255.255.255.0","no shut"])},
@@ -166,7 +176,25 @@ ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0
   L = ec("active","passive");
   ok(Bench.bundled(L,"s1",1) && /Po1\(SU\)\s+LACP\s+Gi0\/7\(P\)\s+Gi0\/8\(P\)/.test(L.devs.s1.env.exec("show etherchannel summary")) && !/Altn/.test(L.devs.s2.env.exec("show spanning-tree")),"LACP active + passive bundles both links into Po1, which STP treats as one link");
   L = ec("passive","passive"); ok(!Bench.bundled(L,"s1",1) && /Altn BLK/.test(L.devs.s2.env.exec("show spanning-tree")),"passive + passive never bundles: two separate links, STP blocks one");
+  L = ec("active","active"); for (const c of ["conf t","int g0/8","switchport trunk allowed vlan 10","end"]) L.devs.s1.env.exec(c);
+  ok(/Po1\(SU\)\s+LACP\s+Gi0\/7\(P\)\s+Gi0\/8\(s\)/.test(L.devs.s1.env.exec("show etherchannel summary")),"a member configured differently from its Port-channel is suspended on its own; the bundle stays up");
+  ok(!/Invalid/.test(L.devs.s1.env.exec("conf t")+L.devs.s1.env.exec("interface port-channel 1")) && /config-if/.test(L.devs.s1.env.prompt()),"interface port-channel 1 (long hyphenated name) is accepted");
+  L.devs.s1.env.exec("end"); L.devs.s1.env.exec("conf t"); L.devs.s1.env.exec("port-channel load-balance src-dst-ip"); L.devs.s1.env.exec("end");
+  ok(/src-dst-ip/.test(L.devs.s1.env.exec("show etherchannel load-balance")) && /port-channel load-balance src-dst-ip/.test(L.devs.s1.env.exec("show run")),"port-channel load-balance is configurable and shown");
 }
+// 11a trunk allowed list, MAC table per VLAN, STP change flushes MACs, L2 switch routing table
+{ const e = SIM.ios2Env({kind:"switch"}); for (const c of ["en","conf t","int g0/1","switchport mode trunk","switchport trunk allowed vlan add 30","end"]) e.exec(c);
+  ok(e.intfs["GigabitEthernet0/1"].allowed==null, "allowed vlan add on an all-VLANs trunk keeps all VLANs (like IOS)");
+  e.exec("conf t"); e.exec("int g0/1"); e.exec("switchport trunk allowed vlan none"); ok(Array.isArray(e.intfs["GigabitEthernet0/1"].allowed) && !e.intfs["GigabitEthernet0/1"].allowed.length, "allowed vlan none"); e.exec("end");
+  ok(/Default gateway is not set/.test(e.exec("show ip route")), "a Layer 2 switch (no ip routing) shows the default-gateway view, not a routing table"); }
+// 11b VLAN lists and the extended range
+{ const e = SIM.ios2Env({kind:"switch"}); for (const c of ["en","conf t","vlan 10,20,30-32","name STAFF","exit"]) e.exec(c);
+  ok([10,20,30,31,32].every(v=>e.vlans[v]==="STAFF"), "vlan 10,20,30-32 creates all five and name applies to the list");
+  ok(/not allowed in current VTP mode/.test(e.exec("vlan 2000")) && !e.vlans[2000], "extended VLAN refused in VTP server mode");
+  e.exec("vtp mode transparent"); e.exec("vlan 2000"); e.exec("end");
+  ok(!!e.vlans[2000] && /2000 +VLAN2000 +active/.test(e.exec("show vlan brief")) && /^vlan 2000$/m.test(e.exec("show run")), "extended VLAN in transparent mode is active and in running-config");
+  e.exec("conf t"); ok(/out of the range/.test(e.exec("vlan 4095")), "vlan 4095 rejected"); e.exec("no vlan 30-32"); ok(!e.vlans[31], "no vlan with a range deletes them"); }
+
 // 12 topology builder templates: every starter network works, and survives export → import
 if (ctx.LLTOPO){ const T = ctx.LLTOPO.TEMPLATES;
   const tests = {soho:[["pc1","192.168.1.12"],["pc1","8.8.8.8"]], campus2:[["pc1","10.10.20.51"],["pc2","10.10.10.11"]], campus3:[["pc1","10.2.10.11"],["pc2","10.100.0.10"]], wan:[["hqpc","10.20.0.11"],["brpc","8.8.8.8"]], spineleaf:[["srv1","10.1.2.10"],["srv3","10.1.1.10"]]};

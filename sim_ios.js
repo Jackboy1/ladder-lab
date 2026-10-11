@@ -49,7 +49,7 @@ function ios2Env(opts){
     return { host: opts.host || (kind==="router"?"Router":"Switch"), enableSecret:null, enablePassword:null, servicePwEnc:false, banner:null,
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
-      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"",
+      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null,
       vlans: kind==="switch" ? {1:"default", 1002:"fddi-default", 1003:"token-ring-default", 1004:"fddinet-default", 1005:"trnet-default"} : {}, intfs };
   };
   const st = Object.assign(factory(), { kind, mode:"user", cur:null, curList:null, curLine:null, curVlan:null, history:[], savedOnce:false, startup:null, pending:null, noEcho:false, motd: opts.motd!=null?opts.motd:"" });
@@ -63,7 +63,7 @@ function ios2Env(opts){
 
   /* ---------- names ---------- */
   function parseIf(raw, create){
-    const m = String(raw||"").toLowerCase().match(/^([a-z]+)\s*([\d\/.]+)$/); if (!m) return null;
+    const m = String(raw||"").toLowerCase().match(/^([a-z][a-z-]*)\s*([\d\/.]+)$/); if (!m) return null;
     const [_, p, num] = m; let base = null;
     if ("gigabitethernet".startsWith(p) && p.length>=1) base = "GigabitEthernet";
     else if ("fastethernet".startsWith(p) && p.length>=2) base = "FastEthernet";
@@ -101,7 +101,7 @@ function ios2Env(opts){
   const pw = (p, type7) => p==null ? null : st.servicePwEnc ? `7 ${fakeHash(p,"7")}` : p;
 
   const compactList = arr => { const a = [...arr].sort((x,y)=>x-y), out = []; for (let k=0;k<a.length;k++){ let j = k; while (j+1<a.length && a[j+1]===a[j]+1) j++; out.push(j>k ? `${a[k]}-${a[j]}` : `${a[k]}`); k = j; } return out.join(","); };
-  const activeVlans = () => Object.keys(st.vlans).map(Number).filter(v=>v<1002).sort((a,b)=>a-b);
+  const activeVlans = () => Object.keys(st.vlans).map(Number).filter(v=>v<1002||v>1005).sort((a,b)=>a-b);
   function trunkTable(){
     const tr = Object.keys(st.intfs).filter(n=>!st.intfs[n].channel && (physical.includes(n)||n.startsWith("Port-channel")) && isTrunk(n) && up(n)).sort(sortIf);
     if (!tr.length) return "";
@@ -110,7 +110,7 @@ function ios2Env(opts){
     const fwd = (n, v) => { const s = hooks.stpState ? hooks.stpState(n, v) : "FWD"; return s==="FWD"; };
     let o = "Port        Mode             Encapsulation  Status        Native vlan\n";
     for (const n of tr) o += pad(short(n),12) + pad(modeOf(n),17) + pad("802.1q",15) + pad("trunking",14) + st.intfs[n].native + "\n";
-    o += "\nPort        Vlans allowed on trunk\n"; for (const n of tr) o += pad(short(n),12) + compactList(allowed(n)) + "\n";
+    o += "\nPort        Vlans allowed on trunk\n"; for (const n of tr) o += pad(short(n),12) + (compactList(allowed(n))||"none") + "\n";
     o += "\nPort        Vlans allowed and active in management domain\n"; for (const n of tr) o += pad(short(n),12) + (compactList(allowed(n).filter(v=>activeVlans().includes(v)))||"none") + "\n";
     o += "\nPort        Vlans in spanning tree forwarding state and not pruned\n"; for (const n of tr) o += pad(short(n),12) + (compactList(allowed(n).filter(v=>activeVlans().includes(v) && fwd(n,v)))||"none") + "\n";
     return o.trimEnd();
@@ -141,7 +141,7 @@ function ios2Env(opts){
     return blocks.join("\n\n") || "No spanning tree instance exists.";
   }
   function etherSummary(){
-    const groups = hooks.ether ? hooks.ether() : [];
+    const groups = hooks.ether ? hooks.ether() : (()=>{ const g = {}; for (const n of ifNames()){ const i = st.intfs[n]; if (!i.channel) continue; const x = g[i.channel.group] = g[i.channel.group] || {group:i.channel.group, proto:["active","passive"].includes(i.channel.mode)?"LACP":["desirable","auto"].includes(i.channel.mode)?"PAgP":"-", up:false, members:[]}; x.members.push({name:n, flag: up(n) ? "I" : "D"}); } return Object.values(g); })();
     let o = "Flags:  D - down        P - bundled in port-channel\n        I - stand-alone s - suspended\n        H - Hot-standby (LACP only)\n        R - Layer3      S - Layer2\n        U - in use      f - failed to allocate aggregator\n\n        M - not in use, minimum links not met\n        u - unsuitable for bundling\n        w - waiting to be aggregated\n        d - default port\n\n";
     o += `Number of channel-groups in use: ${groups.length}\nNumber of aggregators:           ${groups.length}\n\nGroup  Port-channel  Protocol    Ports\n------+-------------+-----------+-----------------------------------------------\n`;
     for (const g of groups) o += pad(g.group,7) + pad(`Po${g.group}(${g.up?"SU":"SD"})`,14) + pad(g.proto,12) + g.members.map(m=>`${short(m.name)}(${m.flag})`).join("  ") + "\n";
@@ -163,9 +163,9 @@ function ios2Env(opts){
     if (kind==="switch"){ L.push(`spanning-tree mode ${st.stpMode}`); if (st.pfDefault) L.push("spanning-tree portfast default"); if (st.bpduDefault) L.push("spanning-tree portfast bpduguard default"); L.push("spanning-tree extend system-id");
       for (const v of Object.keys(st.stpPrio).map(Number).sort((a,b)=>a-b)) L.push(`spanning-tree vlan ${v} priority ${st.stpPrio[v]}`);
       for (const v of Object.keys(st.stpOff).map(Number).sort((a,b)=>a-b)) if (st.stpOff[v]) L.push(`no spanning-tree vlan ${v}`);
-      if (st.vtpMode!=="server") L.push(`vtp mode ${st.vtpMode}`); if (st.ipRouting) L.push("ip routing"); }
+      if (st.vtpMode!=="server") L.push(`vtp mode ${st.vtpMode}`); if (st.ipRouting) L.push("ip routing"); if (st.lbMethod) L.push(`port-channel load-balance ${st.lbMethod}`); }
     L.push("!");
-    if (kind==="switch"){ for (const v of Object.keys(st.vlans).map(Number).sort((a,b)=>a-b)) if (v!==1 && v<1002){ L.push(`vlan ${v}`); if (st.vlans[v]!==`VLAN${String(v).padStart(4,"0")}`) L.push(` name ${st.vlans[v]}`); L.push("!"); } }
+    if (kind==="switch"){ for (const v of Object.keys(st.vlans).map(Number).sort((a,b)=>a-b)) if (v!==1 && (v<1002||v>1005)){ L.push(`vlan ${v}`); if (st.vlans[v]!==`VLAN${String(v).padStart(4,"0")}`) L.push(` name ${st.vlans[v]}`); L.push("!"); } }
     for (const n of ifNames()){
       const i = st.intfs[n]; L.push(`interface ${n}`);
       if (i.desc) L.push(` description ${i.desc}`);
@@ -188,7 +188,7 @@ function ios2Env(opts){
       if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
       if (i.speed!=="auto" && i.speed) L.push(` speed ${i.speed}`);
       if (i.duplex!=="auto" && i.duplex) L.push(` duplex ${i.duplex}`);
-      if (i.cdp===false && i.mode!=="svi" && !i.loop) L.push(" no cdp enable");
+      if (i.cdp===false && i.mode!=="svi" && !i.loop && !i.sub && !i.po) L.push(" no cdp enable");
       if (i.proxyArp===false) L.push(" no ip proxy-arp");
       if (i.shut) L.push(" shutdown");
       L.push("!");
@@ -237,8 +237,14 @@ function ios2Env(opts){
     if (i.desc) lines.push(`  Description: ${i.desc}`);
     if (i.ip) lines.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`);
     lines.push(`  MTU 1500 bytes, BW ${link?(c.speed||1000)*1000:1000000} Kbit/sec, DLY 10 usec,`, "     reliability 255/255, txload 1/255, rxload 1/255", "  Encapsulation ARPA, loopback not set");
+    if (i.sub){ const p = st.intfs[i.parent];
+      return [`${n} is ${p.shut||i.shut ? "administratively down" : up(i.parent) ? "up" : "down"}, line protocol is ${!p.shut && !i.shut && up(i.parent) ? "up" : "down"}`,
+        `  Hardware is ISR4331-3x1GE, address is ${p.mac} (bia ${p.mac})`, ...(i.desc?[`  Description: ${i.desc}`]:[]), ...(i.ip?[`  Internet address is ${i.ip}/${maskLen(i.mask)}`]:[]),
+        "  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,", "     reliability 255/255, txload 1/255, rxload 1/255",
+        i.encap ? `  Encapsulation 802.1Q Virtual LAN, Vlan ID  ${i.encap}.` : "  Encapsulation 802.1Q Virtual LAN, Vlan ID  (not set).",
+        "  ARP type: ARPA, ARP Timeout 04:00:00", "  Keepalive not supported", '  Last clearing of "show interface" counters never'].join("\n"); }
     if (i.mode!=="svi" && !i.loop){
-      const d = i.duplex==="auto" ? (c.duplex||"Full") : i.duplex; const sp = i.speed==="auto" ? (c.speed||1000) : i.speed;
+      const d = i.duplex==="auto" ? (c.duplex||"Full") : (i.duplex||"Full"); const sp = i.speed==="auto" ? (c.speed||1000) : i.speed;
       lines.push(link ? `  ${d[0].toUpperCase()+d.slice(1).toLowerCase()}-duplex, ${sp}Mb/s, media type is 10/100/1000BaseTX` : "  Auto-duplex, Auto-speed, media type is 10/100/1000BaseTX");
       lines.push(`  input flow-control is off, output flow-control is unsupported`, `  ARP type: ARPA, ARP Timeout 04:00:00`, `  Last input ${link?"00:00:01":"never"}, output ${link?"00:00:00":"never"}, output hang never`,
         `  5 minute input rate ${link?c.inRate||2000:0} bits/sec, ${link?3:0} packets/sec`, `  5 minute output rate ${link?c.outRate||4000:0} bits/sec, ${link?5:0} packets/sec`,
@@ -255,7 +261,7 @@ function ios2Env(opts){
       const ports = physical.filter(n=>{ const i = st.intfs[n]; return st.opMode(n)==="access" && !i.channel && (i.vlan===v || i.voiceVlan===v); }).map(short)
         .concat(Object.keys(st.intfs).filter(n=>n.startsWith("Port-channel") && st.opMode(n)==="access" && st.intfs[n].vlan===v).map(short));
       const chunks = []; for (let k=0;k<ports.length;k+=4) chunks.push(ports.slice(k,k+4).join(", "));
-      o += pad(v,5) + pad(st.vlans[v],33) + pad(v>=1002?"act/unsup":"active",10) + (chunks[0]||"") + "\n";
+      o += pad(v,5) + pad(st.vlans[v],33) + pad(v>=1002&&v<=1005?"act/unsup":"active",10) + (chunks[0]||"") + "\n";
       for (const ch of chunks.slice(1)) o += " ".repeat(48) + ch + "\n";
     }
     return o.trimEnd();
@@ -297,6 +303,7 @@ function ios2Env(opts){
     return o.trimEnd();
   }
   function routeTable(only){
+    if (kind==="switch" && !st.ipRouting) return `Default gateway is ${st.defaultGw||"not set"}\n\nHost               Gateway           Last Use    Total Uses  Interface\nICMP redirect cache is empty`;   // a Layer 2 switch has no routing table until "ip routing"
     const L = ["Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP","       O - OSPF, IA - OSPF inter area, * - candidate default","",
       (st.routes.find(r=>r.net==="0.0.0.0") ? `Gateway of last resort is ${st.routes.find(r=>r.net==="0.0.0.0").nh} to network 0.0.0.0` : "Gateway of last resort is not set"), ""];
     const rows = [];
@@ -346,6 +353,13 @@ function ios2Env(opts){
     X("show spanning-tree", ()=>stpShow(null)), X("show spanning-tree vlan A:NUM", a=>stpShow(a[0])),
     X("show spanning-tree summary", ()=>kind!=="switch"?inv():`Switch is in ${st.stpMode} mode\nRoot bridge for: ${activeVlans().filter(v=>!st.stpOff[v] && hooks.stp && (hooks.stp(v)||{}).isRoot).map(v=>"VLAN"+String(v).padStart(4,"0")).join(", ")||"none"}\nPortFast Default                        is ${st.pfDefault?"enabled":"disabled"}\nPortFast BPDU Guard Default             is ${st.bpduDefault?"enabled":"disabled"}`),
     X("show etherchannel summary", ()=>kind==="switch"?etherSummary():inv()),
+    X("show vlans", ()=>{ if (kind!=="router") return inv(); const subs = ifNames().filter(n=>st.intfs[n].sub && st.intfs[n].encap);
+      if (!subs.length) return "No Virtual LANs configured.";
+      return subs.map(n=>{ const i = st.intfs[n]; return `Virtual LAN ID:  ${i.encap} (IEEE 802.1Q Encapsulation)\n\n   vLAN Trunk Interface:   ${n}${i.encapNative?"\n\n This is configured as native Vlan for the following interface(s) :\n"+i.parent:""}\n\n   Protocols Configured:   Address:              Received:        Transmitted:\n${i.ip?`           IP              ${pad(i.ip,21)}${pad("0",17)}0`:""}`; }).join("\n\n"); }),
+    X("show etherchannel load-balance", ()=>{ if (kind!=="switch") return inv(); const m = st.lbMethod||"src-mac";
+      const mac = {"src-mac":"Source MAC address","dst-mac":"Destination MAC address","src-dst-mac":"Source XOR Destination MAC address","src-ip":"Source MAC address","dst-ip":"Destination MAC address","src-dst-ip":"Source XOR Destination MAC address"}[m];
+      const ip = {"src-mac":"Source MAC address","dst-mac":"Destination MAC address","src-dst-mac":"Source XOR Destination MAC address","src-ip":"Source IP address","dst-ip":"Destination IP address","src-dst-ip":"Source XOR Destination IP address"}[m];
+      return `EtherChannel Load-Balancing Configuration:\n        ${m}\n\nEtherChannel Load-Balancing Addresses Used Per-Protocol:\nNon-IP: ${mac}\n  IPv4: ${ip}\n  IPv6: ${ip}`; }),
     X("show vtp status", ()=>kind!=="switch"?inv():`VTP Version capable             : 1 to 3\nVTP version running             : 1\nVTP Domain Name                 : ${st.vtpDomain}\nVTP Pruning Mode                : Disabled\nVTP Traps Generation            : Disabled\nDevice ID                       : ${baseMac}.0000\nVTP Operating Mode              : ${st.vtpMode[0].toUpperCase()+st.vtpMode.slice(1)}\nMaximum VLANs supported locally : 1005\nNumber of existing VLANs        : ${Object.keys(st.vlans).length}`),
     X("show logging", ()=>{ const L = hooks.logs ? hooks.logs(st) : []; return "Syslog logging: enabled (0 messages dropped, 0 flushes, 0 overruns)\n    Console logging: level debugging\n    Buffer logging:  level debugging\n\nLog Buffer (8192 bytes):\n" + (L.length ? L.map(l=>"*Oct 11 10:"+l).join("\n") : ""); }),
     X("show mac address-table", ()=>macTable()||inv()), X("show mac address-table dynamic", ()=>macTable({type:"dynamic"})||inv()),
@@ -393,8 +407,12 @@ function ios2Env(opts){
       X("interface range A:LINE", a=>{ const list = parseRange(a[0]); if (!list) return "% Invalid input detected — try: interface range g0/1 - 4"; st.mode="config-if"; st.cur=list[0]; st.curList=list; return ""; }),
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.mode="config-if"; st.cur=n; st.curList=[n]; return ""; }),
       X("no interface A:IF", a=>{ const n = parseIf(a[0]); if (n && (n.startsWith("Vlan")||n.startsWith("Loopback")) && n!=="Vlan1"){ delete st.intfs[n]; return ""; } return "% Cannot remove a physical interface"; }),
-      X("vlan A:NUM", a=>{ if (kind!=="switch") return inv(); const v = +a[0]; if (!(v>=1&&v<=4094)) return "% Bad VLAN list"; if (v>=1002&&v<=1005) return "Default VLAN "+v+" may not have its name changed."; if (!st.vlans[v]) st.vlans[v] = `VLAN${String(v).padStart(4,"0")}`; st.mode="config-vlan"; st.curVlan=v; return ""; }),
-      X("no vlan A:NUM", a=>{ const v = +a[0]; if (v===1 || v>=1002) return `%Default VLAN ${v} may not be deleted.`; delete st.vlans[v]; return ""; }),
+      X("vlan A:WORD", a=>{ if (kind!=="switch") return inv(); if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(a[0])) return inv(); const vs = vlist(a[0]); if (!vs.length || vs.length !== vlistRaw(a[0]).length) return "% Bad VLAN list - a VLAN number is out of the range 1..4094.";
+        const def = vs.find(v=>v>=1002&&v<=1005); if (def && vs.length===1) return "Default VLAN "+def+" may not have its name changed.";
+        const ext = vs.filter(v=>v>1005); if (ext.length && /^(server|client)$/.test(st.vtpMode)) return "Extended VLAN(s) not allowed in current VTP mode.\n%Failed to commit extended VLAN(s) changes.\n(VTP version 1 or 2 only allows VLANs 1006-4094 in VTP transparent or off mode: vtp mode transparent)";
+        for (const v of vs) if (!st.vlans[v] && !(v>=1002&&v<=1005)) st.vlans[v] = `VLAN${String(v).padStart(4,"0")}`;
+        st.mode="config-vlan"; st.curVlans = vs.filter(v=>v<1002||v>1005); st.curVlan = st.curVlans[0]; return ""; }),
+      X("no vlan A:WORD", a=>{ if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(a[0])) return inv(); const vs = vlist(a[0]); const bad = vs.find(v=>v===1 || (v>=1002&&v<=1005)); if (bad) return `%Default VLAN ${bad} may not be deleted.`; for (const v of vs) delete st.vlans[v]; return ""; }),
       X("line console A:NUM", a=>{ if (a[0]!=="0") return "% Invalid input detected at '^' marker."; st.mode="config-line"; st.curLine="con"; return ""; }),
       X("line vty A:NUM A:NUM", a=>{ st.mode="config-line"; st.curLine="vty"; return ""; }),
       X("username A:WORD secret A:LINE", a=>{ st.users[a[0]] = {secret:a[1].replace(/^[05789] /,"")}; return ""; }),
@@ -421,6 +439,8 @@ function ios2Env(opts){
       X("spanning-tree portfast default", ()=>{ st.pfDefault = true; return "%Warning: this command enables portfast by default on all interfaces. You\n should now disable portfast explicitly on switched ports leading to hubs,\n switches and bridges as they may create temporary bridging loops."; }),
       X("no spanning-tree portfast default", ()=>{ st.pfDefault = false; return ""; }),
       X("spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = true; return ""; }), X("no spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = false; return ""; }),
+      X("port-channel load-balance A:WORD", a=>{ if (kind!=="switch") return inv(); const m = ["src-mac","dst-mac","src-dst-mac","src-ip","dst-ip","src-dst-ip"].find(x=>x===a[0].toLowerCase()); if (!m) return inv(); st.lbMethod = m; return ""; }),
+      X("no port-channel load-balance", ()=>{ st.lbMethod = null; return ""; }),
       X("ip routing", ()=>{ if (kind==="switch") st.ipRouting = true; return ""; }), X("no ip routing", ()=>{ if (kind==="switch") st.ipRouting = false; return ""; }),
       X("vtp mode A:WORD", a=>{ const m = a[0].toLowerCase(); if (!/^(server|client|transparent|off)$/.test(m)) return inv(); st.vtpMode = m; return `Setting device to VTP ${m.toUpperCase()} mode for VLANS.`; }),
       X("vtp domain A:WORD", a=>{ st.vtpDomain = a[0]; return `Changing VTP domain name from ${st.vtpDomain||"NULL"} to ${a[0]}`; }),
@@ -448,7 +468,7 @@ function ios2Env(opts){
       X("switchport", ()=>{ if (kind!=="switch" || (st.curList||[st.cur]).some(n=>!physical.includes(n))) return inv(); forCur(i=>{ if (i.mode==="routed"){ i.mode="dynamic"; i.ip=null; i.mask=null; } }); return ""; }),
       X("encapsulation dot1Q A:NUM", a=>{ const i = st.intfs[st.cur]; if (!i.sub) return "% Invalid input detected at '^' marker.\n(encapsulation dot1Q goes on a router subinterface, e.g. interface g0/0.10)"; const v = +a[0]; if (!(v>=1&&v<=4094)) return inv(); i.encap = v; i.encapNative = false; return ""; }),
       X("encapsulation dot1Q A:NUM native", a=>{ const i = st.intfs[st.cur]; if (!i.sub) return inv(); i.encap = +a[0]; i.encapNative = true; return ""; }),
-      X("spanning-tree portfast", ()=>{ const r = l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:true}); }); return r || "%Warning: portfast should only be enabled on ports connected to a single\n host. Connecting hubs, concentrators, switches, bridges, etc... to this\n interface  when portfast is enabled, can cause temporary bridging loops.\n Use with CAUTION"; }),
+      X("spanning-tree portfast", ()=>{ const r = l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:true}); }); return r || ((st.curList && st.curList.length>1) ? `%Portfast will be configured in ${st.curList.length} interfaces due to the range command\n but will only have effect when the interfaces are in a non-trunking mode.\n` : "") + "%Warning: portfast should only be enabled on ports connected to a single\n host. Connecting hubs, concentrators, switches, bridges, etc... to this\n interface  when portfast is enabled, can cause temporary bridging loops.\n Use with CAUTION"; }),
       X("spanning-tree portfast edge", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:true}); })),
       X("no spanning-tree portfast", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:false}); })),
       X("spanning-tree bpduguard enable", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {bpduguard:true}); })),
@@ -467,7 +487,7 @@ function ios2Env(opts){
       X("switchport access vlan A:NUM", a=>{ const v=+a[0]; if (!(v>=1&&v<=4094)) return "% Bad VLAN"; const r = l2(i=>{ i.vlan=v; }); if (r) return r; if (!st.vlans[v]){ st.vlans[v]=`VLAN${String(v).padStart(4,"0")}`; return `% Access VLAN does not exist. Creating vlan ${v}`; } return ""; }),
       X("switchport trunk allowed vlan A:LINE", a=>{ const s=a[0].trim(); let cur = st.intfs[st.cur].allowed;
         const parse = t=>t.split(",").flatMap(x=>{ const m=x.match(/^(\d+)-(\d+)$/); return m?[...Array(+m[2]-+m[1]+1)].map((_,k)=>+m[1]+k):[+x]; }).filter(n=>n>=1&&n<=4094);
-        let list; const m = s.match(/^(add|remove|except)\s+(.+)$/); if (s==="all") list=null; else if (m){ const set = parse(m[2]); const base = cur || [...Array(4094)].map((_,k)=>k+1); list = m[1]==="add" ? [...new Set([...(cur||[]), ...set])].sort((x,y)=>x-y) : m[1]==="remove" ? base.filter(x=>!set.includes(x)) : [...Array(4094)].map((_,k)=>k+1).filter(x=>!set.includes(x)); if (list.length===4094) list=null; } else list = parse(s);
+        let list; const m = s.match(/^(add|remove|except)\s+(.+)$/); if (s==="all") list=null; else if (s==="none") list=[]; else if (m){ const set = parse(m[2]); const base = cur || [...Array(4094)].map((_,k)=>k+1); list = m[1]==="add" ? (cur ? [...new Set([...cur, ...set])].sort((x,y)=>x-y) : null) : m[1]==="remove" ? base.filter(x=>!set.includes(x)) : [...Array(4094)].map((_,k)=>k+1).filter(x=>!set.includes(x)); if (list && list.length===4094) list=null; } else list = parse(s);
         return l2(i=>{ i.allowed = list; }); }),
       X("switchport trunk native vlan A:NUM", a=>l2(i=>{ i.native=+a[0]; })),
       X("switchport nonegotiate", ()=>{ if ((st.curList||[st.cur]).some(n=>st.intfs[n].mode==="dynamic")) return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."; return l2(i=>{ i.nonegotiate=true; }); }), X("switchport trunk encapsulation dot1q", ()=>""),
@@ -483,7 +503,7 @@ function ios2Env(opts){
       X("exec-timeout A:NUM A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} ${a[1]}`; return ""; }), X("exec-timeout A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} 0`; return ""; }),
       X("logging synchronous", ()=>{ st.lines[st.curLine].sync=true; return ""; }),
     ],
-    "config-vlan": [ X("name A:WORD", a=>{ st.vlans[st.curVlan]=a[0].slice(0,32); return ""; }), X("no name", ()=>{ st.vlans[st.curVlan]=`VLAN${String(st.curVlan).padStart(4,"0")}`; return ""; }) ],
+    "config-vlan": [ X("name A:WORD", a=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=a[0].slice(0,32); return ""; }), X("no name", ()=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=`VLAN${String(v).padStart(4,"0")}`; return ""; }) ],
   };
   const cfgDone = () => `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
@@ -494,6 +514,7 @@ function ios2Env(opts){
   function l2(fn){ const bad = (st.curList||[st.cur]).find(n=>st.intfs[n].mode==="routed"||st.intfs[n].mode==="svi"); if (bad || kind!=="switch") return inv(); forCur(fn);
     for (const n of (st.curList||[st.cur])) if (n.startsWith("Port-channel")){ const g = +n.slice(12); for (const m of physical){ const i = st.intfs[m]; if (i.channel && i.channel.group===g){ const keep = i.channel; fn(i, m); i.channel = keep; } } }
     return ""; }
+  function vlistRaw(s){ return String(s).split(",").flatMap(x=>{ const m = x.match(/^(\d+)-(\d+)$/); return m ? [...Array(Math.max(0,+m[2]-+m[1]+1))].map((_,k)=>+m[1]+k) : [+x]; }); }
   function vlist(s){ return String(s).split(",").flatMap(x=>{ const m = x.match(/^(\d+)-(\d+)$/); return m ? [...Array(+m[2]-+m[1]+1)].map((_,k)=>+m[1]+k) : [+x]; }).filter(v=>v>=1&&v<=4094); }
   // interface range: "g0/1 - 4", "g0/8", "g0/1 - 2 , g0/5 , g0/7 - 8" (like IOS)
   function parseRange(s){ const out = [];
@@ -529,7 +550,7 @@ function ios2Env(opts){
     const out = [];
     for (let i=0;i<t.length;i++){
       const prev = (out[out.length-1]||"").toLowerCase();
-      if ((("interfaces".startsWith(prev)&&prev.length>=2) || prev==="range") && /^[a-z]+$/i.test(t[i]) && t[i+1] && /^\d/.test(t[i+1]) && !/^(status|brief|trunk|counters)$/i.test(t[i])) { out.push(t[i]+t[i+1]); i++; }
+      if ((("interfaces".startsWith(prev)&&prev.length>=2) || prev==="range") && /^[a-z][a-z-]*$/i.test(t[i]) && t[i+1] && /^\d/.test(t[i+1]) && !/^(status|brief|trunk|counters)$/i.test(t[i])) { out.push(t[i]+t[i+1]); i++; }
       else out.push(t[i]);
     }
     return out;

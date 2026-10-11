@@ -37,6 +37,7 @@ function create(cfg){
   const B = { cfg, devs:{}, order:[], cables:[], pinged:{}, console:null, events:[], mac:{}, arp:{}, frames:[], log:[], remote:{}, syslog:{} };
   for (const d0 of cfg.devices) addDevice(B, d0);
   for (const c of (cfg.cables||[])){ const r = plug(B, c.type, c.a, c.b, true); if (r.ok && c.swapped) r.cable.swapped = true; }
+  if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}
   return B;
 }
 function addDevice(B, d0){
@@ -175,7 +176,8 @@ function computeBundles(B){
           const f = farOf(B, ref), fi = f && isSw(f.dev) && f.dev.env.intfs[f.port.ios];
           const fc = fi && fi.channel;
           const sameCfg = i2 => { const a = d.env.intfs[m.ios]; return a.mode===i2.mode && a.vlan===i2.vlan && a.native===i2.native && JSON.stringify(a.allowed)===JSON.stringify(i2.allowed); };
-          const memCfgOk = mem.every(o=>sameCfg(d.env.intfs[o.ios]));
+          const po = d.env.intfs["Port-channel"+g];
+          const memCfgOk = po ? sameCfg(po) : mem.every(o=>sameCfg(d.env.intfs[o.ios]));
           if (!fc) flag = m.mode==="on" ? "P" : "I";                         // nothing to negotiate with: LACP/PAgP ports stay stand-alone
           else if (!compatible(m.mode, fc.mode)) flag = m.mode==="on" ? "P" : "I";
           else if (!memCfgOk) flag = "s";                                   // members must have identical switchport settings
@@ -190,6 +192,13 @@ function computeBundles(B){
       if (firstUp){ const f = farOf(B, id+":"+firstUp.pid); if (f) G.peer = {dev:f.dev.id, group: (f.dev.env.intfs[f.port.ios].channel||{}).group}; }
     }
   }
+  for (let pass = 0; pass < 2; pass++) for (const id of B.order){ const d = B.devs[id]; if (!res[id]) continue;
+    for (const G of Object.values(res[id])){ if (G.proto==="-") continue;          // mode on doesn't negotiate: it keeps sending (a real black hole)
+      for (const m of G.members){ if (m.flag!=="P") continue; const f = farOf(B, id+":"+m.pid);
+        const fG = f && res[f.dev.id] && Object.values(res[f.dev.id]).find(x=>x.members.some(y=>y.pid===f.port.id));
+        const fm = fG && fG.members.find(y=>y.pid===f.port.id);
+        if (fm && fm.flag!=="P"){ m.flag = "s"; delete res.memberOf[id+":"+m.pid]; } }
+      G.up = G.members.some(x=>x.flag==="P"); } }
   return res;
 }
 // logical ports of a switch: physical L2 ports that aren't bundled, plus one "po<g>" per up bundle
@@ -204,9 +213,11 @@ function logicalPorts(B, d, S){
 }
 // a bundle's switchport settings are its members' (they must match to bundle at all)
 const memberOfGroup = (d, g) => d.ports.find(p=>{ const i = p.ios && d.env.intfs[p.ios]; return i && i.channel && i.channel.group===g; });
-function lpIntf(d, lp){ return lp.startsWith("po") ? d.env.intfs[memberOfGroup(d, +lp.slice(2)).ios] : d.env.intfs[d.ports.find(p=>p.id===lp).ios]; }
+const poMember = (d, g) => { const po = d.env.intfs["Port-channel"+g]; const same = p => { const a = d.env.intfs[p.ios], b = po; return a.mode===b.mode && a.vlan===b.vlan && a.native===b.native && JSON.stringify(a.allowed)===JSON.stringify(b.allowed); };
+  return (po && d.ports.find(p=>{ const i = p.ios && d.env.intfs[p.ios]; return i && i.channel && i.channel.group===g && same(p); })) || memberOfGroup(d, g); };
+function lpIntf(d, lp){ return lp.startsWith("po") ? (d.env.intfs["Port-channel"+lp.slice(2)] || d.env.intfs[memberOfGroup(d, +lp.slice(2)).ios]) : d.env.intfs[d.ports.find(p=>p.id===lp).ios]; }
 function lpIosName(d, lp){ return lp.startsWith("po") ? "Port-channel"+lp.slice(2) : d.ports.find(p=>p.id===lp).ios; }
-function lpOp(d, lp){ if (lp.startsWith("po")){ const m = memberOfGroup(d, +lp.slice(2)); return m ? d.env.opMode(m.ios) : "access"; } const p = d.ports.find(x=>x.id===lp); return d.env.opMode(p.ios); }
+function lpOp(d, lp){ if (lp.startsWith("po")){ const m = poMember(d, +lp.slice(2)); return m ? d.env.opMode(m.ios) : "access"; } const p = d.ports.find(x=>x.id===lp); return d.env.opMode(p.ios); }
 function carries(d, lp, v){ const i = lpIntf(d, lp), op = lpOp(d, lp); if (op==="trunk") return !i.allowed || i.allowed.includes(v); return op==="access" && (i.vlan===v || i.voiceVlan===v); }
 function lpUp(B, lpo){ return lpo.refs.some(r=>physUp(B, r)); }
 // the far end of a logical port (another switch's logical port), or a host/router
@@ -222,7 +233,7 @@ function evaluateGuards(B, S){
       const st = linkState(B, c); if (!st.up) continue;
       const f = farOf(B, ref); if (!f || !isSw(f.dev)) continue;
       const fi = f.dev.env.intfs[f.port.ios]; if (!fi || fi.mode==="routed") continue;
-      const sendsBpdu = Object.keys(f.dev.env.vlans).some(v=>+v<1002 && !f.dev.env.stpOff[v]);
+      const sendsBpdu = Object.keys(f.dev.env.vlans).some(v=>(+v<1002||+v>1005) && !f.dev.env.stpOff[v]);
       if (!sendsBpdu) continue;
       i.errdis = "bpduguard";
       syslog(B, d, `%SPANTREE-2-BLOCK_BPDUGUARD: Received BPDU on port ${p.ios} with BPDU Guard enabled. Disabling port.`);
@@ -236,7 +247,7 @@ function evaluateGuards(B, S){
 }
 
 function computeStp(B, S){
-  const vlans = new Set(); for (const id of B.order){ const d = B.devs[id]; if (isSw(d)) Object.keys(d.env.vlans).map(Number).filter(v=>v<1002).forEach(v=>vlans.add(v)); }
+  const vlans = new Set(); for (const id of B.order){ const d = B.devs[id]; if (isSw(d)) Object.keys(d.env.vlans).map(Number).filter(v=>v<1002||v>1005).forEach(v=>vlans.add(v)); }
   const out = {}, storms = new Set();
   for (const v of vlans){
     const sws = B.order.map(id=>B.devs[id]).filter(d=>isSw(d) && d.env.vlans[v]);
@@ -270,7 +281,7 @@ function computeStp(B, S){
         const vec = [rpc[nb.d.id] + portCost(d, me.l), bid(nb.d), np.prio, np.num, op.prio, op.num];
         if (!best || cmpVec(vec, best.vec)<0) best = {vec, lp:me.l.lp}; }
       if (best){ const g = lpIntf(d, best.lp).stp || {};
-        if (g.guard==="root"){ roles[d.id][best.lp] = {role:"Root", state:"BKN", inc:true}; syslog(B, d, `%SPANTREE-2-ROOTGUARD_BLOCK: Root guard blocking port ${lpIosName(d, best.lp)} on VLAN${String(v).padStart(4,"0")}.`); }
+        if (g.guard==="root"){ roles[d.id][best.lp] = {role:"Desg", state:"BKN*", inc:"ROOT"}; syslog(B, d, `%SPANTREE-2-ROOTGUARD_BLOCK: Root guard blocking port ${lpIosName(d, best.lp)} on VLAN${String(v).padStart(4,"0")}.`); }
         else { roles[d.id][best.lp] = {role:"Root", state:"FWD"}; rootPort[d.id] = best.lp; } } }
     // designated port per segment: the end with the better (root cost, BID, port id); the other end blocks unless it's the root port
     for (const e of edges){ if (!stpOn(e.a.d) || !stpOn(e.b.d)) continue;
@@ -279,6 +290,16 @@ function computeStp(B, S){
       const loser = cmpVec(va, vb) <= 0 ? e.b : e.a, winner = loser===e.a ? e.b : e.a;
       if (roles[winner.d.id][winner.l.lp].role!=="Root" || roles[winner.d.id][winner.l.lp].inc) roles[winner.d.id][winner.l.lp] = roles[winner.d.id][winner.l.lp].inc ? roles[winner.d.id][winner.l.lp] : {role:"Desg", state:"FWD"};
       if (rootPort[loser.d.id]!==loser.l.lp && !roles[loser.d.id][loser.l.lp].inc) roles[loser.d.id][loser.l.lp] = {role:"Altn", state:"BLK"}; }
+    const nowInc = new Set();
+    for (const e of edges){ if (!stpOn(e.a.d) || !stpOn(e.b.d) || lpOp(e.a.d, e.a.l.lp)!=="trunk" || lpOp(e.b.d, e.b.l.lp)!=="trunk") continue;
+      const na = lpIntf(e.a.d, e.a.l.lp).native || 1, nb = lpIntf(e.b.d, e.b.l.lp).native || 1; if (na===nb || (v!==na && v!==nb)) continue;
+      for (const [x, mine] of [[e.a, na], [e.b, nb]]){ roles[x.d.id][x.l.lp] = {role:"Desg", state:"BKN*", inc:"PVID"}; nowInc.add(x.d.id+"|"+x.l.lp+"|"+v);
+        B._pvid = B._pvid || {}; B._pvid[x.d.id+"|"+x.l.lp+"|"+v] = 1;
+        syslog(B, x.d, v===mine ? `%SPANTREE-2-BLOCK_PVID_LOCAL: Blocking ${lpIosName(x.d, x.l.lp)} on VLAN${String(v).padStart(4,"0")}. Inconsistent local vlan.`
+                                : `%SPANTREE-2-BLOCK_PVID_PEER: Blocking ${lpIosName(x.d, x.l.lp)} on VLAN${String(v).padStart(4,"0")}. Inconsistent peer vlan.`); } }
+    for (const k of Object.keys(B._pvid||{})){ const [did, lp, vv] = k.split("|"); if (+vv!==v || nowInc.has(k)) continue; delete B._pvid[k];
+      const d = B.devs[did]; if (!d) continue; const L = B.syslog[did] || []; for (let i=L.length-1;i>=0;i--) if (/BLOCK_PVID_(LOCAL|PEER): Blocking /.test(L[i].msg) && L[i].msg.includes(`${lpIosName(d, lp)} on VLAN${String(v).padStart(4,"0")}`)) L[i].msg += " ";   // allow a later re-block to log again
+      syslog(B, d, `%SPANTREE-2-UNBLOCK_CONSIST_PORT: Unblocking ${lpIosName(d, lp)} on VLAN${String(v).padStart(4,"0")}. Port consistency restored.`); }
     // forwarding graph → loop (broadcast storm) detection: union-find over forwarding links between switches
     const uf = {}; const f2 = x => uf[x]===undefined||uf[x]===x ? (uf[x]=x) : (uf[x]=f2(uf[x]));
     let loop = false;
@@ -290,7 +311,11 @@ function computeStp(B, S){
   }
   return {byDev: out, storms};
 }
-function l2State(B){ const S = {}; S.bundles = computeBundles(B); evaluateGuards(B, S); const t = computeStp(B, S); S.stp = t.byDev; S.storms = t.storms; return S; }
+function l2State(B){ const S = {}; S.bundles = computeBundles(B); evaluateGuards(B, S); const t = computeStp(B, S); S.stp = t.byDev; S.storms = t.storms;
+  // a Spanning Tree topology change makes real switches flush their learned MACs (RSTP TC / 802.1D short aging) so traffic follows the new tree
+  const sig = JSON.stringify(Object.entries(S.stp).map(([id,vs])=>[id, Object.entries(vs||{}).map(([v,x])=>[v, x && x.on ? Object.entries(x.roles||{}).map(([lp,r])=>lp+":"+r.role+":"+r.state).sort() : 0])]));
+  if (B._stpSig != null && B._stpSig !== sig) for (const id of B.order) if (B.mac[id] && isSw(B.devs[id])) B.mac[id] = {};
+  B._stpSig = sig; return S; }
 function stpStateOf(S, d, lp, v){ const x = S.stp[d.id] && S.stp[d.id][v]; if (!x || !x.on) return "FWD"; const r = x.roles[lp]; return r ? r.state : "FWD"; }
 
 /* ---- frame delivery on the wire: tags, DTP trunks, STP blocking, bundles, hubs, routers, hosts ---- */
@@ -309,15 +334,16 @@ function deliver(B, from, frame, step0){
     const key = sw.id+"|"+vlan; if (seen.has(key)){ storm = storm || {sw, vlan}; return; } seen.add(key);
     const T = B.mac[sw.id];
     for (const [m,e] of Object.entries(T)){ const lpo = logicalPorts(B, sw, S).find(l=>l.lp===e.port); if (!lpo || !lpUp(B, lpo)) delete T[m]; }
-    const had = inLp && T[frame.src] && T[frame.src].port===inLp && T[frame.src].vlan===vlan;
-    const moved = inLp && T[frame.src] && !had;
+    const sk = vlan+"|"+frame.src, dk = vlan+"|"+frame.dst;
+    const had = inLp && T[sk] && T[sk].port===inLp;
+    const moved = inLp && T[sk] && !had;
     const lpName = lp => lp.startsWith("po") ? "Po"+lp.slice(2) : shortIf(sw.ports.find(p=>p.id===lp).ios);
-    if (inLp) T[frame.src] = { port: inLp, vlan };
+    if (inLp) T[sk] = { port: inLp, vlan, mac: frame.src };
     if (inLp) pushNote(had ? `${sw.label} already knew ${frame.src} on ${lpName(inLp)} — refreshed its aging timer` : moved ? `${sw.label} saw ${frame.src} move to ${lpName(inLp)} — updated the table` : `${sw.label} learned ${frame.src} on ${lpName(inLp)} (VLAN ${vlan})`);
     const svi = sw.env.intfs["Vlan"+vlan];
     if (svi && !svi.shut && svi.ip && (frame.dst===BCAST || frame.dst===svi.mac)) recv.push({dev:sw, svi:"Vlan"+vlan, vlan});
     if (svi && frame.dst===svi.mac) return;
-    const known = frame.dst!==BCAST && T[frame.dst] && T[frame.dst].vlan===vlan ? T[frame.dst] : null;
+    const known = frame.dst!==BCAST && T[dk] ? T[dk] : null;
     const outs = [];
     for (const l of logicalPorts(B, sw, S)){
       if (l.lp===inLp) continue;
@@ -446,7 +472,7 @@ function hop(B, node, nhIp, label, ttl){
 // one direction: node → dstIp, hop by hop. returns {ok, kind, arpedFirst, frames, log, finalNode}
 function sendIp(B, node, dstIp, label){
   const res = {frames:[], log:[], ok:false, kind:"timeout"};
-  let cur = node, ttl = 128;
+  let cur = node, ttl = node.dev && node.dev.env ? 255 : 128;
   for (let n=0; n<8; n++){
     let nh;
     if (isRouterDev(cur.dev) && (cur.dev.kind==="router" || !cur.svi || cur.dev.env.ipRouting)){
@@ -512,7 +538,7 @@ function makeHooks(B, d){
       if (!svi) return {ok:false};
       return ping(B, sviNode(d, svi), ip);
     },
-    mac: () => Object.entries(B.mac[d.id]||{}).filter(([,e])=>e.port.startsWith("po") || linkUpAt(B, d.id+":"+e.port)).map(([mac,e])=>({vlan:e.vlan, mac, type:"DYNAMIC", port: e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios)})).sort((a,b)=>a.vlan-b.vlan||a.port.localeCompare(b.port)),
+    mac: () => Object.values(B.mac[d.id]||{}).filter(e=>e.port.startsWith("po") || linkUpAt(B, d.id+":"+e.port)).map(e=>({vlan:e.vlan, mac:e.mac, type:"DYNAMIC", port: e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios)})).sort((a,b)=>a.vlan-b.vlan||a.port.localeCompare(b.port)),
     clearMac: () => { B.mac[d.id] = {}; },
     arp: () => Object.entries(B.arp[d.id]||{}).map(([ip,e])=>({ip, mac:e.mac, intf:e.intf, age:"0"})),
     cdp: () => {
@@ -531,7 +557,7 @@ function makeHooks(B, d){
       const name = lp => lpIosName(d, lp);
       const ports = x.lps.map(l=>{ const r = x.roles[l.lp] || {role:"Desg", state:"FWD"}, inf = x.info[l.lp]; const i = lpIntf(d, l.lp);
         const edge = inf.edge && (i.stp && i.stp.portfast || (d.env.pfDefault && lpOp(d, l.lp)==="access"));
-        return {name: name(l.lp), role: r.role, state: r.state, cost: inf.cost, prio: `${inf.pid.prio}.${inf.pid.num}`, type: r.inc ? "P2p *ROOT_Inc" : edge ? "P2p Edge" : "P2p"}; })
+        return {name: name(l.lp), role: r.role, state: r.state, cost: inf.cost, prio: `${inf.pid.prio}.${inf.pid.num}`, type: r.inc ? `P2p *${r.inc===true ? "ROOT" : r.inc}_Inc` : edge ? "P2p Edge" : "P2p"}; })
         .sort((a,b)=>a.name.localeCompare(b.name, undefined, {numeric:true}));
       return { isRoot: x.isRoot, root: x.root, bridge: x.bridge, rootCost: x.rootCost, rootPort: x.rootLp ? name(x.rootLp) : null, rootPortNum: x.rootLp ? x.info[x.rootLp].pid.num : 0, ports }; },
     stpState: (name, v) => { const S = l2State(B); const p = d.ports.find(q=>q.ios===name); const lp = name.startsWith("Port-channel") ? "po"+name.slice(12) : p ? (S.bundles.memberOf[d.id+":"+p.id] || p.id) : null; return lp ? stpStateOf(S, d, lp, +v) : "FWD"; },
@@ -652,6 +678,7 @@ function act(B, a){
   else if (op==="cli"){ B.frames = []; const d = B.devs[x[0]]; r = {ok:true, out: d && d.env ? d.env.exec(x[1]) : "(no CLI on this device)"}; }
   else r = {ok:false, msg:"Unknown action "+op};
   B.events.push({a, ok:r.ok});
+  if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}   // link-up events log when they happen, like real switches
   return r;
 }
 function openConsole(B, laptopId, s){
@@ -723,7 +750,7 @@ function drawDevice(B, d, sel){
       if (c){ const s = linkState(B,c); const ii = d.env && p.ios && d.env.intfs[p.ios];
         if (ii && ii.errdis) led = "var(--warn)";
         else if (!s.up) led = "none";
-        else if (d.kind==="switch" && B._S && p.ios){ const lp = B._S.bundles.memberOf[ref] || p.id; const vls = Object.keys(d.env.vlans).map(Number).filter(v=>v<1002 && carries(d, lp, v));
+        else if (d.kind==="switch" && B._S && p.ios){ const lp = B._S.bundles.memberOf[ref] || p.id; const vls = Object.keys(d.env.vlans).map(Number).filter(v=>(v<1002||v>1005) && carries(d, lp, v));
           led = vls.length && vls.every(v=>stpStateOf(B._S, d, lp, v)!=="FWD") ? "var(--warn)" : "var(--ok)"; }
         else led = "var(--ok)"; }
       g += `<circle cx="${px+q.w/2}" cy="${py-6}" r="3" fill="${led==="none"?"var(--chip)":led}" stroke="var(--line)" stroke-width=".6"/>`;
@@ -793,6 +820,9 @@ function mount(el, cfg, tasks, onWin){
   const pcLines = {};
   const hintsShown = {};
   let won = false, showSol = false, play = null, watched = false;
+  // finished steps stay ticked (later steps may change the network on purpose); a challenge is judged live — every fault must stay fixed
+  let sticky = new Set();
+  const isDone = (t, ti) => { if (!cfg.challenge && sticky.has(ti)) return true; let ok = false; try { ok = !!t.done(B); } catch(e){} if (ok && !cfg.challenge) sticky.add(ti); return ok; };
   const cliLines = {};
   const changed = () => { if (cfg.onChange) try { cfg.onChange(B); } catch(e){} };
   // plain-English description of one solution step
@@ -813,13 +843,13 @@ function mount(el, cfg, tasks, onWin){
   const say = (m, kind) => { msg = m; msgKind = kind||""; };
   function draw(){
     const vb = cfg.builder ? (()=>{ let w = 900, h = 420; for (const id of B.order){ const d = B.devs[id], L = layout(d); w = Math.max(w, d.x+L.w+40); h = Math.max(h, d.y+L.h+60); } return `0 0 ${w} ${h}`; })() : (cfg.viewBox || "0 0 900 360");
-    const doneN = tasks.filter(t=>{ try{ return t.done(B); }catch(e){ return false; } }).length;
+    const doneN = tasks.filter((t,ti)=>isDone(t,ti)).length;
     if (!won && tasks.length && doneN===tasks.length){ won = true; if (onWin && !watched) onWin(); }   // watching the solution earns no points
     const selX = sel && P(B, sel), selC = sel && cableAt(B, sel);
     const frames = showFrames ? drawFrames(B) : "";
     B._S = l2State(B);   // Spanning Tree / EtherChannel state for the port lights
     el.innerHTML = `
-      ${tasks.length?(()=>{ const nx = tasks.find(t=>{ try{ return !t.done(B); }catch(e){ return true; } }); return `<div class="bn-prog"><span class="tag ${doneN===tasks.length?"ok":"acc"}">${doneN}/${tasks.length} ${cfg.challenge?"fixed":"tasks"}</span>${cfg.challenge?` <span class="qt-lvl l3">Challenge</span>`:""} ${nx?(cfg.challenge?`<span class="small">Find and fix every fault. Users' complaints are in the list below — the bench won't tell you what's wrong.</span>`:`<span class="small"><b>Next:</b> ${nx.text}</span>`):`<span class="small"><b>Lab complete.</b> ${cfg.win||"Everything is cabled, configured and verified."}</span>`}</div>`; })():""}
+      ${tasks.length?(()=>{ const nx = tasks.find((t,ti)=>!isDone(t,ti)); return `<div class="bn-prog"><span class="tag ${doneN===tasks.length?"ok":"acc"}">${doneN}/${tasks.length} ${cfg.challenge?"fixed":"tasks"}</span>${cfg.challenge?` <span class="qt-lvl l3">Challenge</span>`:""} ${nx?(cfg.challenge?`<span class="small">Find and fix every fault. Users' complaints are in the list below — the bench won't tell you what's wrong.</span>`:`<span class="small"><b>Next:</b> ${nx.text}</span>`):`<span class="small"><b>Lab complete.</b> ${cfg.win||"Everything is cabled, configured and verified."}</span>`}</div>`; })():""}
       ${cfg.builder?`<div class="bn-tray bn-palette"><span class="small muted">Add device:</span>${PALETTE.map(x=>`<button class="bn-item" data-add="${x.k}">＋ ${esc(x.label)}</button>`).join("")}</div>`:""}
       <div class="bn-tray"><span class="small muted">Tray:</span>
         ${(cfg.tray||["cat6","console"]).map(k=>CABLES[k]?`<button class="bn-item ${hand&&hand.cable===k?"on":""}" data-cable="${k}" title="${esc(CABLES[k].name)}"><i style="background:${CABLES[k].color}"></i>${esc(CABLES[k].short)}</button>`:SFPS[k]?`<button class="bn-item ${hand&&hand.sfp===k?"on":""}" data-sfp="${k}" title="${esc(SFPS[k].name)}"><i class="sfp"></i>${esc(SFPS[k].short)} SFP</button>`:"").join("")}
@@ -832,7 +862,7 @@ function mount(el, cfg, tasks, onWin){
       ${selX?`<div class="bn-sel"><b>${esc(portName(selX))}</b> <span class="small muted">· ${selX.port.type.toUpperCase()} port</span>
           ${selC?`<span class="small"> · ${esc(CABLES[selC.type].short)} cable to ${esc(portName(P(B,otherEnd(selC,sel))))} · ${(()=>{const s=linkState(B,selC); return s.console?"console connection":s.up?`<b style="color:${s.mismatch?"var(--bad)":"var(--ok)"}">link up</b>${s.speed?` · ${s.speed} Mb/s`:""}${s.why?` — ${esc(s.why)}`:""}`:`<b style="color:var(--warn)">link down</b> — ${esc(s.why)}`;})()}</span>`:""}
           ${(()=>{ if (selX.dev.kind!=="switch" || !selX.port.ios) return ""; const ii = selX.dev.env.intfs[selX.port.ios]; if (ii.errdis) return `<div class="small" style="color:var(--warn)">err-disabled (${esc(ii.errdis)}) — fix the cause, then <code>shutdown</code> and <code>no shutdown</code></div>`;
-            const lp = B._S.bundles.memberOf[sel] || selX.port.id; const vls = Object.keys(selX.dev.env.vlans).map(Number).filter(v=>v<1002 && carries(selX.dev, lp, v)); const x = B._S.stp[selX.dev.id] || {};
+            const lp = B._S.bundles.memberOf[sel] || selX.port.id; const vls = Object.keys(selX.dev.env.vlans).map(Number).filter(v=>(v<1002||v>1005) && carries(selX.dev, lp, v)); const x = B._S.stp[selX.dev.id] || {};
             const parts = vls.map(v=>{ const r = x[v] && x[v].on ? (x[v].roles[lp]||{role:"Desg",state:"FWD"}) : null; return r ? `VLAN ${v}: ${r.role} ${r.state}` : `VLAN ${v}: STP off`; });
             const mode = selX.dev.env.opMode(selX.port.ios);
             return `<div class="small muted">${lp.startsWith("po")?`member of Port-channel${lp.slice(2)} · `:""}${mode==="trunk"?"trunk":mode==="access"?`access VLAN ${ii.vlan}`:mode}${parts.length?` · Spanning Tree — ${parts.join(" · ")}`:""}</div>`; })()}
@@ -852,7 +882,7 @@ function mount(el, cfg, tasks, onWin){
           <div class="btnrow">${play?`<button class="btn sm" data-solstop>Stop</button>`:`<button class="btn sm" data-solplay>Watch it step by step</button>`}<button class="btn sm ghost" data-solhide>Hide solution</button></div>
           <p class="small muted">"Watch it" resets the bench and performs every step for you — the PC windows, the console and the frames on the wire — so you can see what right looks like. Then press <b>Reset bench</b> and do it yourself.</p></div>`
         : `<button class="btn sm ghost" data-solshow>${cfg.challenge?"Give up? Show the full solution (spoilers)":"Stuck? Show the solution"}</button>`}</div>` : ""}
-      ${tasks.length?`<details class="bn-tasks" ${doneN<tasks.length?"open":""}><summary>${cfg.challenge?"Complaints to resolve":"All tasks"} (${doneN}/${tasks.length})</summary><div class="mt-tasks">${tasks.map((t,ti)=>{ let ok=false; try{ ok=t.done(B); }catch(e){} return `<div class="mt-task ${ok?"ok":""}"><span class="check ${ok?"done":""}">✓</span><span>${t.text}${cfg.challenge&&t.hint&&!ok?` <button class="btn sm ghost bn-hint" data-hint="${ti}">${hintsShown[ti]?"Hide hint":"Hint"}</button>${hintsShown[ti]?`<div class="small bn-hinttext">💡 ${t.hint}</div>`:""}`:""}</span></div>`; }).join("")}</div></details>`:""}`;
+      ${tasks.length?`<details class="bn-tasks" ${doneN<tasks.length?"open":""}><summary>${cfg.challenge?"Complaints to resolve":"All tasks"} (${doneN}/${tasks.length})</summary><div class="mt-tasks">${tasks.map((t,ti)=>{ const ok = isDone(t,ti); return `<div class="mt-task ${ok?"ok":""}"><span class="check ${ok?"done":""}">✓</span><span>${t.text}${cfg.challenge&&t.hint&&!ok?` <button class="btn sm ghost bn-hint" data-hint="${ti}">${hintsShown[ti]?"Hide hint":"Hint"}</button>${hintsShown[ti]?`<div class="small bn-hinttext">💡 ${t.hint}</div>`:""}`:""}</span></div>`; }).join("")}</div></details>`:""}`;
     wire();
   }
   function termBox(lines, inputId, runId, placeholder, extra){
@@ -906,7 +936,7 @@ function mount(el, cfg, tasks, onWin){
   }
   function stopPlay(){ if (play && play.t) clearInterval(play.t); play = null; }
   function startPlay(){
-    stopPlay(); B = create(cfg); sel=null; hand=null; tool=null; won=false; watched = true; for (const k in pcLines) delete pcLines[k];
+    stopPlay(); B = create(cfg); sel=null; hand=null; tool=null; won=false; watched = true; sticky = new Set(); for (const k in pcLines) delete pcLines[k];
     play = { i:0 }; const steps = cfg.solve;
     play.t = setInterval(() => {
       if (!el.isConnected || !play){ stopPlay(); return; }
@@ -989,8 +1019,8 @@ function mount(el, cfg, tasks, onWin){
       wireTerm("#bn-tin", "#bn-trun", v => { runTerm(v); animKey++; draw(); focusSel("#bn-tin"); }, s.good ? t.env : null);
       el.querySelector("#bn-tclose").onclick = () => { B.console = null; draw(); }; }
   }
-  el.reset = () => { stopPlay(); watched = false; B = create(cfg); sel=null; hand=null; tool=null; won=false; for (const k in pcLines) delete pcLines[k]; say("Bench reset — everything is back as it started."); draw(); };
-  el.load = (newCfg) => { stopPlay(); cfg = Object.assign({}, cfg, newCfg); B = create(cfg); sel=null; hand=null; tool=null; for (const k in pcLines) delete pcLines[k]; for (const k in cliLines) delete cliLines[k]; say(newCfg.start || "Loaded."); draw(); };
+  el.reset = () => { stopPlay(); watched = false; sticky = new Set(); B = create(cfg); sel=null; hand=null; tool=null; won=false; for (const k in pcLines) delete pcLines[k]; say("Bench reset — everything is back as it started."); draw(); };
+  el.load = (newCfg) => { stopPlay(); sticky = new Set(); cfg = Object.assign({}, cfg, newCfg); B = create(cfg); sel=null; hand=null; tool=null; for (const k in pcLines) delete pcLines[k]; for (const k in cliLines) delete cliLines[k]; say(newCfg.start || "Loaded."); draw(); };
   draw();
   return { get bench(){ return B; } };
 }
@@ -1002,7 +1032,8 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   cableType: (B, ref) => { const c = cableAt(B, ref); return c ? c.type : null; },
   consoleOk: (B, dev) => !!(B.console && B.console.good && (!dev || B.console.target===dev)),
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
-  macKnown: (B, sw, mac) => !!(B.mac[sw] && B.mac[sw][mac]),
+  macKnown: (B, sw, mac, vlan) => Object.values(B.mac[sw]||{}).some(e=>e.mac===mac && (vlan==null || e.vlan===+vlan)),
+  macPort: (B, sw, mac, vlan) => { const e = Object.values(B.mac[sw]||{}).find(e=>e.mac===mac && (vlan==null || e.vlan===+vlan)); if (!e) return null; const d = B.devs[sw]; return e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios); },
   macCount: (B, sw) => Object.keys(B.mac[sw]||{}).length,
   arpHas: (B, dev, ip) => !!(B.arp[dev] && B.arp[dev][ip]),
   remoteTo: (B, pc) => B.remote[pc] && !B.remote[pc].pendingAuth ? B.remote[pc].host : null,

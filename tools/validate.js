@@ -147,8 +147,9 @@ if (K && K._benches && ctx.Bench){
     try { const B = ctx.Bench.create(cfg); const tasks = cfg.tasks||[];
       if (tasks.some(t=>t.done(B))) warn(`${where}: a task is already complete before the learner does anything`);
       if (!cfg.solve) warn(`${where}: no solve[] — can't prove it is completable`);
-      else { for (const a of cfg.solve){ const r = ctx.Bench.act(B, a); if (r.ok===false) err(`${where}: solve step ${JSON.stringify(a)} failed: ${r.msg}`); }
-        tasks.forEach(t=>{ if (!t.done(B)) err(`${where}: solution does not complete "${t.text.replace(/<[^>]+>/g,"")}"`); }); }
+      else { const hit = new Set();   // like the UI: a finished step stays ticked, except in a challenge (judged on the final state)
+        for (const a of cfg.solve){ const r = ctx.Bench.act(B, a); if (r.ok===false) err(`${where}: solve step ${JSON.stringify(a)} failed: ${r.msg}`); if (!cfg.challenge) tasks.forEach((t,ti)=>{ try { if (t.done(B)) hit.add(ti); } catch(e){} }); }
+        tasks.forEach((t,ti)=>{ if (!hit.has(ti) && !t.done(B)) err(`${where}: solution does not complete "${t.text.replace(/<[^>]+>/g,"")}"`); }); }
     } catch(e){ err(`${where}: ${e.message}`); }
   }
 }
