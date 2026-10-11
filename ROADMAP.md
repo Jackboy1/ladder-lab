@@ -69,6 +69,14 @@ This mode is how you get that proof before your first role:
 readiness meter (course progress + best Hard-mode exam). Aligned with the Infrastructure Ladder plan; exam facts
 checked Oct 2026 (CCNA v2.0 from Feb 2027, DevNet Associate → CCNA Automation, AWS Advanced Networking retiring).
 
+## Build order (agreed with the owner, 11 Oct 2026)
+1. Finish CCNA: M5 routing (OSPF, statics, HSRP) → M6 IPv6 → M7 IP services → M8 security → M9 wireless → M10 automation.
+   Every module ends with a portfolio project (built for real, with a write-up template).
+2. Finish the platform: Work Experience mode (simulated job: tickets, change requests, incidents, STAR stories),
+   portfolio projects for M1–M4, access points + firewalls in the topology builder, curated videos.
+3. The foundations ladder, rebuilt to the same standard: Git → Linux → AWS → Python.
+4. Then DevOps: Docker → Terraform → CI/CD → Kubernetes → SRE.
+
 ## Part E — Next big builds (from the owner's testing)
 - ✅ **Topology builder (sandbox)** — Labs → Topology builder: palette (router, L2 switch, multilayer switch, hub, PC,
   laptop, server, printer, Internet/ISP), drag to place, cable from the tray, CLI/IP settings/Command Prompt on each

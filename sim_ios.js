@@ -382,7 +382,12 @@ function ios2Env(opts){
     return e.nhs.map((h,k)=>(k ? ind : `${code}${pfx} `) + `[110/${e.metric}] via ${h.nh}, ${ageOf(pfx)}, ${h.ios}`).join("\n");
   }
   function routeEntryFor(ip){
-    const e = bestMatch(ribAll().filter(x=>x.len>0), ip);   // like IOS: the default route isn't shown as a match here
+    if (ip==="0.0.0.0"){ const d = ribAll().find(x=>x.len===0); if (!d) return "% Network not in table";   // asking for the default route itself
+      const blk = d.nhs.map((h,k)=>`  ${k?" ":"*"} ` + (d.code[0]==="S" ? (h.direct ? `directly connected, via ${h.ios}` : (h.cfgNh||h.nh) + (h.full ? `, via ${h.ios}` : "")) + "\n      Route metric is 0, traffic share count is 1"
+        : `${h.nh}, from ${h.from||h.nh}, ${ageOf("0.0.0.0/0")} ago, via ${h.ios}\n      Route metric is ${d.metric}, traffic share count is 1\n      Route tag 1`)).join("\n");
+      if (d.code[0]==="S") return `Routing entry for 0.0.0.0/0, supernet\n  Known via "static", distance ${d.ad}, metric 0, candidate default path\n  Routing Descriptor Blocks:\n` + blk;
+      return `Routing entry for 0.0.0.0/0, supernet\n  Known via "ospf ${st.ospf?st.ospf.pid:1}", distance 110, metric ${d.metric}, candidate default path\n  Tag 1, type extern 2, forward metric ${d.fwd||1}\n  Last update from ${d.nhs[0].nh} on ${d.nhs[0].ios}, ${ageOf("0.0.0.0/0")} ago\n  Routing Descriptor Blocks:\n` + blk; }
+    const e = bestMatch(ribAll().filter(x=>x.len>0), ip);   // like IOS: a host lookup that only the default matches is "not in table"
     if (!e) return "% Network not in table";
     const pfx = `${e.net}/${e.len}`, tail = "\n      Route metric is ";
     if (e.code==="C"||e.code==="L") return `Routing entry for ${pfx}\n  Known via "connected", distance 0, metric 0 (connected, via interface)\n  Routing Descriptor Blocks:\n  * directly connected, via ${e.nhs[0].ios}${tail}0, traffic share count is 1`;
@@ -406,7 +411,7 @@ function ios2Env(opts){
   function ospfIntBrief(){
     const fs = ospfIfaces(); if (!fs.length) return "";
     let o = "Interface    PID   Area            IP Address/Mask    Cost  State Nbrs F/C\n";
-    for (const f of fs){ const x = ospfIfState(f.ios, f); const st8 = !f.up ? "DOWN" : x.state;
+    for (const f of fs){ const x = ospfIfState(f.ios, f); const st8 = !f.up ? "DOWN" : x.state==="DROTHER" ? "DROTH" : x.state;   // the brief view's State column is 5 wide
       o += pad(short(f.ios),13) + pad(st.ospf.pid,6) + pad(areaStr(f.area),16) + pad(`${f.ip}/${f.loop && f.net==="LOOPBACK" ? 32 : f.len}`,19) + pad(f.cost,6) + pad(st8,6) + `${x.adj||0}/${(x.nbrs||[]).length}\n`; }
     return o.replace(/\n$/,"");
   }
@@ -783,7 +788,7 @@ function ios2Env(opts){
   function doPing(ip){
     if (!ipRe.test(ip)) return st.domainLookup ? `Translating "${ip}"...domain server (255.255.255.255)\n% Unrecognized host or address, or protocol not running.` : `% Unrecognized host or address, or protocol not running.`;
     const r = hooks.ping(ip) || {};
-    const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : ".....";
+    const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : r.kind==="netunreach" ? "U.U.U" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
     const n = (bar.match(/!/g)||[]).length;
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
@@ -891,7 +896,7 @@ function ios2Env(opts){
     if (t[0] && "do".startsWith(t[0].toLowerCase()) && t[0].length>=2 && t.length>1) t = t.slice(1);
     const out = new Set(); for (const mode of Object.keys(T)){ const m = match(T[mode], t); if (!m.err) out.add(m.def.p.map(p=>isArg(p) ? "*" : p).join(" ")); }
     return [...out]; };
-  st.baseline = () => { st.startup = snapshot(); };
+  st.baseline = () => { st.startup = snapshot(); st.ospfRidActive = null; };   // a pre-built device behaves as if it booted from this config (its router-id applies)
   st.exportConfig = () => snapshot();                                   // the whole config, for saving a topology
   st.importConfig = snap => { restore(snap); st.startup = snapshot(); };   // load it back as the saved startup-config
   st.isUp = n => up(n);        // for the bench: is this interface (incl. SVIs, subinterfaces, port-channels) up/up?

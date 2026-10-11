@@ -302,6 +302,8 @@ output earlier in the lesson or in earlier lessons; abbreviations count, argumen
 means the lab's own task introduces the command: fine only if the task says what the command does, in plain words, with a
 pointer to where it's covered properly. Aim for understanding, not memorising: teach the logic (how the device decides) so a
 learner can reason through a scenario the lesson never showed — end each section with a "same logic, new situation" practice.
+Labs, challenges and quiz scenarios are close cousins of the worked examples, never copies: change the addressing, names or
+topology, add a twist, or state the problem as a real ticket/symptom, so the learner applies the logic rather than repeating steps.
 
 When you release, bump the `?v=` stamp on the script tags in `index.html` (e.g. `?v=20261012a`) so browsers fetch the
 new files instead of mixing cached old ones with new ones. Then open the site with `#selftest` on the end of the URL.

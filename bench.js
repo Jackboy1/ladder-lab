@@ -151,7 +151,7 @@ function linkUpAt(B, ref){ const c = cableAt(B,ref); return !!(c && CABLES[c.typ
 /* ---- Layer 2 core: 802.1Q tagging, DTP, EtherChannel, Spanning Tree (PVST+/Rapid PVST+), BPDU guard, storms ---- */
 const isSw = d => d && d.kind==="switch";
 const isRouterDev = d => d && (d.kind==="router" || (d.kind==="switch" && d.env.ipRouting));
-function syslog(B, d, msg){ const L = B.syslog[d.id] = B.syslog[d.id] || []; if (L.some(x=>x.msg===msg)) return; B.clock = (B.clock||0) + 1; const t = 14*60 + B.clock*7; L.push({t:`${String(Math.floor(t/60)%60).padStart(2,"0")}:${String(t%60).padStart(2,"0")}.${String((B.clock*137)%1000).padStart(3,"0")}`, msg}); if (L.length>60) L.shift(); }
+function syslog(B, d, msg, force){ const L = B.syslog[d.id] = B.syslog[d.id] || []; if (!force && L.some(x=>x.msg===msg)) return; B.clock = (B.clock||0) + 1; const t = 14*60 + B.clock*7; L.push({t:`${String(Math.floor(t/60)%60).padStart(2,"0")}:${String(t%60).padStart(2,"0")}.${String((B.clock*137)%1000).padStart(3,"0")}`, msg}); if (L.length>60) L.shift(); }
 const portNum = (d, pid) => d.ports.findIndex(p=>p.id===pid) + 1;
 // physical link usable for frames: cable present and link up (speed/optics/admin/err-disabled)
 const physUp = (B, ref) => linkUpAt(B, ref);
@@ -476,7 +476,7 @@ function sendIp(B, node, dstIp, label){
       for (const [nm,i] of Object.entries(cur.dev.env.intfs)) if ((i.ip===dstIp || hsrpOwnsIp(B, cur.dev, nm, dstIp)) && !i.shut){ res.ok = true; res.final = {dev:cur.dev, ios:nm}; if (n>0) res.path.push(dstIp); return res; }
       const r = routeLookup(cur.dev, dstIp);
       if (!r){ if (n===0){ res.kind = "noroute"; res.log.push(`${cur.dev.label} has no route to ${dstIp}`); return res; }
-        res.kind = "netunreach"; res.unreachFrom = cur.inIp; res.log.push(`${cur.dev.label} has no route to ${dstIp} (no connected, static or default route) — it drops the packet and sends an ICMP <b>Destination net unreachable</b> back to the sender from ${cur.inIp}`); return res; }
+        res.kind = "netunreach"; res.unreachFrom = cur.inIp; res.log.push(`${cur.dev.label} has no route to ${dstIp} (no connected, static or default route) — it drops the packet and sends an ICMP <b>Destination Unreachable</b> (type 3, code 1 "host unreachable" — what Cisco routers send when they have no route) back to the sender from ${cur.inIp}`); return res; }
       cur = routerNodeFor(cur.dev, r.ios); nh = r.nh;
     } else {
       if (cur.ip===dstIp){ res.ok = true; res.final = cur; return res; }
@@ -591,8 +591,8 @@ function computeOspf(B, hears){
     const dre = sg.dr && byKey.get(sg.dr), bdre = sg.bdr && byKey.get(sg.bdr);
     out[e.d.id].ifs[e.f.ios] = {state: e.f.loop && e.f.net==="LOOPBACK" ? "LOOP" : sg.p2p ? "P2P" : (sg.dr ? me : "DROTHER"), dr: dre ? {rid:dre.x.rid, ip:dre.f.ip} : null, bdr: bdre ? {rid:bdre.x.rid, ip:bdre.f.ip} : null, nbrs:nb, adj: nb.filter(x=>x.full).length};
     out[e.d.id].nbrs.push(...nb); }
-  for (const [k, a] of Object.entries(nowAdj)) if (!prevAdj[k]) syslog(B, a.d, `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from LOADING to FULL, Loading Done`);
-  for (const [k, a] of Object.entries(prevAdj)) if (!nowAdj[k] && B.devs[a.d.id]) syslog(B, B.devs[a.d.id], `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from FULL to DOWN, Neighbor Down: ${B.devs[a.d.id].env.isUp(a.ios) ? "Dead timer expired" : "Interface down or detached"}`);
+  for (const [k, a] of Object.entries(nowAdj)) if (!prevAdj[k]) syslog(B, a.d, `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from LOADING to FULL, Loading Done`, true);
+  for (const [k, a] of Object.entries(prevAdj)) if (!nowAdj[k] && B.devs[a.d.id]) syslog(B, B.devs[a.d.id], `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from FULL to DOWN, Neighbor Down: ${(()=>{ const me = byKey.get(a.d.id+"|"+a.ios); return me && !me.f.passive ? "Dead timer expired" : "Interface down or detached"; })()}`, true);
   B._ospfAdj = nowAdj;
   // the link-state database of each area: router nodes, transit networks (with a DR) and stub networks
   const areas = [...new Set(ifs.map(e=>e.f.area))];
@@ -679,10 +679,10 @@ function computeHsrp(B, hears){
     if (prev) delete B._hsrpSeg[prev[0]]; B._hsrpSeg[sk] = {grp:m.grp, active:act.k, standby: sby ? sby.k : null};
     if (prev && prev[1].active!==act.k){ const vm = hsrpVmacOf(m.grp, act.ver); for (const id of B.order) if (B.mac[id]) for (const [mk, e] of Object.entries(B.mac[id])) if (e.mac===vm) delete B.mac[id][mk]; }   // the new active router's gratuitous ARP moves the virtual MAC
     for (const o of grp){ const state = o===act ? "Active" : o===sby ? "Standby" : "Listen", was = B._hsrpSt[o.k+"#"+o.grp];
-      if (was!==state){ const from = was || "Speak"; if (!was && state==="Active") syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state Speak -> Standby`);
-        if (!(was==null && state==="Listen")) syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state ${!was && state==="Active" ? "Standby" : from} -> ${state}`); B._hsrpSt[o.k+"#"+o.grp] = state; }
+      if (was!==state){ const from = was || "Speak"; if (!was && state==="Active") syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state Speak -> Standby`, true);
+        if (!(was==null && state==="Listen")) syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state ${!was && state==="Active" ? "Standby" : from} -> ${state}`, true); B._hsrpSt[o.k+"#"+o.grp] = state; }
       out[o.k+"#"+o.grp] = {state, active: o===act ? "local" : act.ip, standby: o===sby ? "local" : sby ? sby.ip : "unknown", activePrio: act.prio, standbyPrio: sby ? sby.prio : null, vmac: hsrpVmacOf(o.grp, o.ver), vip:o.vip, changes: 2}; } }
-  for (const k of Object.keys(B._hsrpSt)) if (!out[k]){ const [dk] = k.split("#"); const [did, ios] = dk.split("|"); const d = B.devs[did]; if (d && B._hsrpSt[k]!=="Init"){ syslog(B, d, `%HSRP-5-STATECHANGE: ${ios} Grp ${k.split("#")[1]} state ${B._hsrpSt[k]} -> Init`); } B._hsrpSt[k] = "Init"; }
+  for (const k of Object.keys(B._hsrpSt)) if (!out[k]){ const [dk] = k.split("#"); const [did, ios] = dk.split("|"); const d = B.devs[did]; if (d && B._hsrpSt[k]!=="Init"){ syslog(B, d, `%HSRP-5-STATECHANGE: ${ios} Grp ${k.split("#")[1]} state ${B._hsrpSt[k]} -> Init`, true); } B._hsrpSt[k] = "Init"; }
   return out;
 }
 // is this router interface the active HSRP gateway for ip / the owner of a virtual MAC?
@@ -699,13 +699,13 @@ function trace(B, node, dstIp){
 }
 function iosTraceText(t, dst){
   const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"];
-  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !N  !N  !N`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
+  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
   if (!t.ok && t.kind!=="netunreach") for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
   return L.join("\n");
 }
 function winTraceText(t, dst){
   const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""];
-  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination net unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination host unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
   if (!t.ok && t.kind!=="netunreach") for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
   L.push("", "Trace complete."); return L.join("\n");
 }
@@ -820,7 +820,7 @@ function pcExec(B, d, line){
     const stat = n => `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = ${n}, Lost = ${4-n} (${(4-n)*25}% loss),`;
     const ttl = res.ttl || 128;
     if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${ip}: bytes=32 time<1ms TTL=${ttl}`).join("\n") + stat(4);
-    if (res.kind==="netunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination net unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
+    if (res.kind==="netunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination host unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="general" || res.kind==="noroute") return head + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") + stat(0);
     if (res.kind==="unreach") return head + [...Array(4)].map(()=>`Reply from ${d.ip}: Destination host unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     return head + [...Array(4)].map(()=>"Request timed out.").join("\n") + stat(0);

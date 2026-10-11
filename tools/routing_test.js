@@ -115,7 +115,7 @@ const pair = (a, b) => Bench.create({ devices: [ R("x", "RX", ["int g0/0","ip ad
   ok(/O\s+10\.2\.0\.0\/24 \[110\/2\] via 10\.0\.23\.1/.test(rt) && !/S\s+10\.2\.0\.0/.test(rt), "floating static (AD 200) stays hidden while OSPF (110) has the route", rt);
   cli(B, "r2", "conf t"); cli(B, "r2", "int g0/2"); cli(B, "r2", "shutdown"); cli(B, "r2", "int g0/1"); cli(B, "r2", "shutdown"); cli(B, "r2", "end");
   ok(/S\s+10\.2\.0\.0\/24 \[200\/0\] via 10\.0\.13\.1/.test(cli(B, "r3", "show ip route")), "R2 isolated: the floating static installs [200/0]", cli(B, "r3", "show ip route"));
-  ok(/Known via "ospf 1", distance 110, metric 1, type extern 2, forward metric 1/.test(cli(B, "r3", "show ip route 0.0.0.0")) || /Network not in table/.test(cli(B, "r3", "show ip route 0.0.0.0")), "show ip route for the default");
+  ok(/Routing entry for 0\.0\.0\.0\/0, supernet\n  Known via "ospf 1", distance 110, metric 1, candidate default path\n  Tag 1, type extern 2, forward metric 1/.test(cli(B, "r3", "show ip route 0.0.0.0")), "show ip route 0.0.0.0 shows the O*E2 default (candidate default, extern 2)", cli(B, "r3", "show ip route 0.0.0.0"));
 }
 // ---------- 5. multi-area: R1 (area 0) — R2 (ABR) — R3 (area 1) ----------
 { const B = Bench.create({ devices: [

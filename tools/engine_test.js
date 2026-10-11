@@ -104,7 +104,7 @@ ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0
 { const B2 = Bench.create({devices:[{id:"r",kind:"router",label:"R1",config:e=>{for(const c of ["en","conf t","int g0/0","ip add 10.1.1.1 255.255.255.0","no shut","no ip proxy-arp","int g0/1","ip add 10.2.2.1 255.255.255.0","end"])e.exec(c)}},
     {id:"p",kind:"pc",label:"P",ip:"10.1.1.5",mask:"255.255.255.0",gw:"10.1.1.1"},{id:"q",kind:"pc",label:"Q",ip:"10.2.2.5",mask:"255.255.255.0",gw:"10.2.2.1"}],
     cables:[{type:"cat6",a:"p:eth",b:"r:g0"},{type:"cat6",a:"q:eth",b:"r:g1"}]});
-  ok(/Reply from 10\.1\.1\.1: Destination net unreachable\./.test(out(B2,["pc","p","ping 10.2.2.5"])),"router with the egress interface shut answers Destination net unreachable");
+  ok(/Reply from 10\.1\.1\.1: Destination host unreachable\./.test(out(B2,["pc","p","ping 10.2.2.5"])),"router with no route (egress interface shut) answers Destination host unreachable (ICMP 3/1, like real Cisco)");
   ok(Bench.act(B2,["ip","q","10.2.2.255","255.255.255.0","10.2.2.1"]).ok===false && Bench.act(B2,["ip","q","10.2.2.0","255.255.255.0","10.2.2.1"]).ok===false,"Windows refuses the subnet's network or broadcast address");
   ok(/Internet address is 10\.1\.1\.1\/24/.test(B2.devs.r.env.exec("show ip interface g0/0")) && /Proxy ARP is disabled/.test(B2.devs.r.env.exec("show ip interface g0/0")),"show ip interface shows the address and proxy ARP state"); }
 // 11 Layer 2: VLANs, DTP trunks, native VLAN, allowed lists, ROAS, L3 switch, STP, storms, BPDU guard, EtherChannel
