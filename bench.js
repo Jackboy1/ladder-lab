@@ -26,6 +26,7 @@ const BCAST = "ffff.ffff.ffff";
 function ipToInt(ip){ const p = String(ip||"").trim().split("."); if (p.length!==4 || p.some(x=>!/^\d{1,3}$/.test(x)||+x>255)) return null; return ((+p[0]<<24)>>>0)+(+p[1]<<16)+(+p[2]<<8)+(+p[3]); }
 function sameNet(a,b,mask){ const A=ipToInt(a),B=ipToInt(b),M=ipToInt(mask); if (A==null||B==null||M==null) return false; return ((A&M)>>>0)===((B&M)>>>0); }
 function validMask(m){ const M = ipToInt(m); if (M==null) return false; const inv = (~M)>>>0; return ((inv+1)&inv)===0 && M!==0; }
+function netOf(ip, mask){ const A = ipToInt(ip), M = ipToInt(mask); const n = (A & M)>>>0; return [24,16,8,0].map(s=>(n>>>s)&255).join("."); }
 function bcastOf(ip, mask){ const A = ipToInt(ip), M = ipToInt(mask); const b = ((A & M) | (~M>>>0))>>>0; return [24,16,8,0].map(s=>(b>>>s)&255).join("."); }
 function macFor(seed){ let h = 2166136261; for (const c of seed) h = Math.imul(h ^ c.charCodeAt(0), 16777619)>>>0; const hex = ("0050" + h.toString(16).padStart(8,"0")).slice(0,12); return hex.replace(/(.{4})(.{4})(.{4})/, "$1.$2.$3"); }
 const winMac = m => m.replace(/\./g,"").toUpperCase().replace(/(..)(?!$)/g,"$1-");
@@ -242,7 +243,9 @@ function sendIp(B, node, dstIp, label){
     if (cur.dev.kind==="router"){
       // a router: own address?
       for (const [nm,i] of Object.entries(cur.dev.env.intfs)) if (i.ip===dstIp && !i.shut){ res.ok = true; res.final = {dev:cur.dev, ios:nm}; return res; }
-      const r = routeLookup(cur.dev, dstIp); if (!r){ res.log.push(`${cur.dev.label} has no route to ${dstIp} — packet dropped`); res.kind = n===0 ? "noroute" : "timeout"; return res; }
+      const r = routeLookup(cur.dev, dstIp);
+      if (!r){ if (n===0){ res.kind = "noroute"; res.log.push(`${cur.dev.label} has no route to ${dstIp}`); return res; }
+        res.kind = "netunreach"; res.unreachFrom = cur.inIp; res.log.push(`${cur.dev.label} has no route to ${dstIp} (no connected, static or default route) — it drops the packet and sends an ICMP <b>Destination net unreachable</b> back to the sender from ${cur.inIp}`); return res; }
       cur = routerNodeFor(cur.dev, r.ios); nh = r.nh;
     } else {
       if (cur.ip===dstIp){ res.ok = true; res.final = cur; return res; }
@@ -260,7 +263,7 @@ function sendIp(B, node, dstIp, label){
     if (to.dev.kind==="router"){
       const own = Object.entries(to.dev.env.intfs).find(([nm,i])=>i.ip===dstIp && !i.shut);
       if (own){ res.ok = true; res.final = {dev:to.dev, ios:own[0]}; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)} — it's addressed to the router itself`); return res; }
-      cur = {dev:to.dev}; ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
+      cur = {dev:to.dev, inIp: to.dev.env.intfs[to.ios].ip}; ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
     if (to.dev.ip===dstIp){ res.ok = true; res.final = hostNode(to.dev); return res; }
     return res;
   }
@@ -285,7 +288,7 @@ function ping(B, node, dstIp){
     var replyTtl = (go.final.dev.env ? 255 : 128) - (back.routers||0);
   }
   B.frames = frames; B.log = log;
-  return {ok, kind, ttl: replyTtl, firstMiss: go.arpedFirst && node.dev.kind!=="pc" && node.dev.kind!=="server" && node.dev.kind!=="laptop"};
+  return {ok, kind, ttl: replyTtl, unreachFrom: go.unreachFrom, firstMiss: go.arpedFirst && node.dev.kind!=="pc" && node.dev.kind!=="server" && node.dev.kind!=="laptop"};
 }
 
 /* ---- hooks the IOS engine calls ---- */
@@ -370,6 +373,7 @@ function pcExec(B, d, line){
     const stat = n => `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = ${n}, Lost = ${4-n} (${(4-n)*25}% loss),`;
     const ttl = res.ttl || 128;
     if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${ip}: bytes=32 time<1ms TTL=${ttl}`).join("\n") + stat(4);
+    if (res.kind==="netunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination net unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="general" || res.kind==="noroute") return head + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") + stat(0);
     if (res.kind==="unreach") return head + [...Array(4)].map(()=>`Reply from ${d.ip}: Destination host unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     return head + [...Array(4)].map(()=>"Request timed out.").join("\n") + stat(0);
@@ -414,7 +418,10 @@ function act(B, a){
     if (x[1] && ipToInt(x[1])==null) r = {ok:false, msg:"That IP address isn't valid — four numbers 0–255 separated by dots."};
     else if (x[2] && !validMask(x[2])) r = {ok:false, msg:"That subnet mask isn't valid (e.g. 255.255.255.0)."};
     else if (x[3] && ipToInt(x[3])==null) r = {ok:false, msg:"The default gateway isn't a valid IP address."};
-    else { d.ip = x[1]||null; d.mask = x[2]||null; d.gw = x[3]||null; B.arp[d.id] = {}; r = {ok:true, msg:`${d.label}: IP settings saved.`}; } }
+    else if (x[1] && x[2] && ipToInt(x[2]) < 0xFFFFFFFE && (x[1]===netOf(x[1],x[2]) || x[1]===bcastOf(x[1],x[2]))) r = {ok:false, msg:`Windows won't accept ${x[1]} with mask ${x[2]}: it is the subnet's ${x[1]===netOf(x[1],x[2])?"network address (all host bits are 0)":"broadcast address (all host bits are 1)"}. Pick an address between them.`};
+    else { d.ip = x[1]||null; d.mask = x[2]||null; d.gw = x[3]||null; B.arp[d.id] = {};
+      const off = d.ip && d.mask && d.gw && !sameNet(d.ip, d.gw, d.mask);
+      r = {ok:true, msg: off ? `${d.label}: saved — but Windows warns: the default gateway ${d.gw} is not on the same network segment (subnet) as ${d.ip}/${d.mask}. (In this lab that gateway can't be used.)` : `${d.label}: IP settings saved.`}; } }
   else if (op==="pc"){ B.frames = []; r = {ok:true, out: pcExec(B, B.devs[x[0]], x[1])}; }
   else if (op==="power"){ const d = B.devs[x[0]]; d.on = x[1]!==false; if (!d.on && B.mac[d.id]) B.mac[d.id] = {}; r = {ok:true, msg:`${d.label} powered ${d.on?"on":"off"}.`}; }
   else if (op==="console"){ r = openConsole(B, x[0], x[1]||{}); }
@@ -520,12 +527,27 @@ function mount(el, cfg, tasks, onWin){
   const cons = { speed:"115200", data:"8", parity:"None", stop:"1", flow:"XON/XOFF" };
   const pcLines = {};
   const hintsShown = {};
-  let won = false;
+  let won = false, showSol = false, play = null, watched = false;
+  // plain-English description of one solution step
+  function describe(a){
+    const [op, ...x] = a, pn = ref => { const p = P(B, ref); return p ? portName(p) : ref; }, lab = id => (B.devs[id]||{}).label || id;
+    if (op==="plug") return `Take a <b>${esc(CABLES[x[0]].name)}</b> from the tray and plug it from <b>${esc(pn(x[1]))}</b> to <b>${esc(pn(x[2]))}</b>`;
+    if (op==="unplug") return `Unplug the cable from <b>${esc(pn(x[0]))}</b>`;
+    if (op==="insert") return `Insert a <b>${esc(SFPS[x[1]].name)}</b> into <b>${esc(pn(x[0]))}</b>`;
+    if (op==="remove") return `Remove the transceiver from <b>${esc(pn(x[0]))}</b>`;
+    if (op==="flip") return `Click <b>${esc(pn(x[0]))}</b> → <b>Flip Tx/Rx</b> (swap the LC connector polarity)`;
+    if (op==="ip") return `<b>${esc(lab(x[0]))} → IP settings</b>: IP <code>${esc(x[1]||"(blank)")}</code>, mask <code>${esc(x[2]||"(blank)")}</code>, gateway <code>${esc(x[3]||"(blank)")}</code> → OK`;
+    if (op==="pc") return `<b>${esc(lab(x[0]))} → Command Prompt</b>: <code>${esc(x[1]||"(press Enter)")}</code>`;
+    if (op==="console"){ const s = x[1]||{}; return `<b>${esc(lab(x[0]))} → Terminal app (PuTTY)</b>: Serial, COM3, speed <code>${esc(s.speed)}</code>, data bits <code>${esc(s.data)}</code>, parity <code>${esc(s.parity)}</code>, stop bits <code>${esc(s.stop)}</code>, flow control <code>${esc(s.flow)}</code> → Open`; }
+    if (op==="term") return x[0] ? `Console: <code>${esc(x[0])}</code>` : `Console: press <b>Enter</b> (answers the prompt with its default)`;
+    if (op==="power") return `Power ${x[1]===false?"off":"on"} <b>${esc(lab(x[0]))}</b>`;
+    return esc(op);
+  }
   const say = (m, kind) => { msg = m; msgKind = kind||""; };
   function draw(){
     const vb = cfg.viewBox || "0 0 900 360";
     const doneN = tasks.filter(t=>{ try{ return t.done(B); }catch(e){ return false; } }).length;
-    if (!won && tasks.length && doneN===tasks.length){ won = true; if (onWin) onWin(); }
+    if (!won && tasks.length && doneN===tasks.length){ won = true; if (onWin && !watched) onWin(); }   // watching the solution earns no points
     const selX = sel && P(B, sel), selC = sel && cableAt(B, sel);
     const frames = showFrames ? drawFrames(B) : "";
     el.innerHTML = `
@@ -548,6 +570,12 @@ function mount(el, cfg, tasks, onWin){
         if (cfg.power) btns.push(`<button class="btn sm ghost" data-power="${id}">${d.on?"Power off":"Power on"}</button>`);
         return btns.length?`<div class="bn-dev"><b>${esc(d.label)}</b> ${btns.join("")}</div>`:""; }).join("")}</div>
       <div class="bn-tool">${toolHtml()}</div>
+      <p class="small muted bn-labnote">Lab note: interface names are shortened to Gi0/x. Real kit numbers them by slot: a Catalyst 9200 uses Gi1/0/1, an ISR 1000/4000 router uses Gi0/0/0 — the commands are identical.</p>
+      ${cfg.solve && cfg.solve.length ? `<div class="bn-solbox">${showSol ? `<div class="kbox"><div class="kbox-h">Worked solution${cfg.challenge?" — spoilers":""}</div>
+          <ol class="small sol-list">${cfg.solve.map((a,k)=>`<li class="${play && k<play.i?"done":""}${play && k===play.i-1?" cur":""}">${describe(a)}</li>`).join("")}</ol>
+          <div class="btnrow">${play?`<button class="btn sm" data-solstop>Stop</button>`:`<button class="btn sm" data-solplay>Watch it step by step</button>`}<button class="btn sm ghost" data-solhide>Hide solution</button></div>
+          <p class="small muted">"Watch it" resets the bench and performs every step for you — the PC windows, the console and the frames on the wire — so you can see what right looks like. Then press <b>Reset bench</b> and do it yourself.</p></div>`
+        : `<button class="btn sm ghost" data-solshow>${cfg.challenge?"Give up? Show the full solution (spoilers)":"Stuck? Show the solution"}</button>`}</div>` : ""}
       ${tasks.length?`<details class="bn-tasks" ${doneN<tasks.length?"open":""}><summary>${cfg.challenge?"Complaints to resolve":"All tasks"} (${doneN}/${tasks.length})</summary><div class="mt-tasks">${tasks.map((t,ti)=>{ let ok=false; try{ ok=t.done(B); }catch(e){} return `<div class="mt-task ${ok?"ok":""}"><span class="check ${ok?"done":""}">✓</span><span>${t.text}${cfg.challenge&&t.hint&&!ok?` <button class="btn sm ghost bn-hint" data-hint="${ti}">${hintsShown[ti]?"Hide hint":"Hint"}</button>${hintsShown[ti]?`<div class="small bn-hinttext">💡 ${t.hint}</div>`:""}`:""}</span></div>`; }).join("")}</div></details>`:""}`;
     wire();
   }
@@ -584,6 +612,37 @@ function mount(el, cfg, tasks, onWin){
     return "";
   }
   function after(r){ if (r && r.msg) say(r.msg, r.ok?"":"bad"); animKey++; draw(); }
+  function runPc(id, v){
+    const d = B.devs[id], rem = B.remote[id], env = rem && rem.env;
+    const L = pcLines[id] = pcLines[id] || [{t:"Microsoft Windows [Version 10.0.22631]\n(c) Microsoft Corporation. All rights reserved.", cls:""}];
+    if (!v.trim() && !(env && env.pending)) { if (rem) L.push({t:pcPrompt(B,d), cls:"in"}); return; }
+    K.termEcho(L, env, v, pcPrompt(B,d));
+    K.termOut(L, act(B,["pc",id,v]).out);
+    if (L.length>300) pcLines[id] = L.slice(-300);
+  }
+  function runTerm(v){
+    const s = B.console; if (!s) return; const t = B.devs[s.target];
+    if (s.good && t.on) K.termEcho(s.lines, t.env, v, t.env.prompt()); else s.lines.push({t:v, cls:"in"});
+    K.termOut(s.lines, act(B,["term",v]).out);
+    if (s.lines.length>300) s.lines = s.lines.slice(-300);
+  }
+  function stopPlay(){ if (play && play.t) clearInterval(play.t); play = null; }
+  function startPlay(){
+    stopPlay(); B = create(cfg); sel=null; hand=null; tool=null; won=false; watched = true; for (const k in pcLines) delete pcLines[k];
+    play = { i:0 }; const steps = cfg.solve;
+    play.t = setInterval(() => {
+      if (!el.isConnected || !play){ stopPlay(); return; }
+      if (play.i >= steps.length){ stopPlay(); say("Solution complete — every task is done. Points are only awarded when you do it yourself: press Reset bench and try it."); draw(); return; }
+      const a = steps[play.i]; play.i++;
+      if (a[0]==="pc"){ tool = "cmd:"+a[1]; runPc(a[1], a[2]); }
+      else if (a[0]==="console"){ tool = "putty:"+a[1]; Object.assign(cons, a[2]||{}); act(B, a); }
+      else if (a[0]==="term"){ if (B.console) tool = "putty:"+B.console.laptop; runTerm(a[1]); }
+      else { const r = act(B, a); if (a[0]==="ip") tool = null; if (r && r.ok===false) say(r.msg, "bad"); }
+      say(`Step ${play.i} of ${steps.length}: ` + describe(a).replace(/<[^>]+>/g,""));
+      animKey++; draw(); const tm = el.querySelector(".bn-term"); if (tm) tm.scrollTop = tm.scrollHeight;
+    }, 1300);
+    draw();
+  }
   function focusSel(s){ const n = el.querySelector(s); if (n) n.focus(); const tm = el.querySelector(".bn-term"); if (tm) tm.scrollTop = tm.scrollHeight; }
   function wireTerm(inputSel, runSel, run, env){
     const inp = el.querySelector(inputSel), btn = el.querySelector(runSel); if (!inp) return;
@@ -600,6 +659,10 @@ function mount(el, cfg, tasks, onWin){
     el.querySelectorAll("[data-sfp]").forEach(b=>b.onclick=()=>{ hand = {sfp:b.dataset.sfp}; sel=null; say(`Holding a ${SFPS[hand.sfp].name}. Tap an empty SFP cage.`); draw(); });
     el.querySelectorAll("[data-drop]").forEach(b=>b.onclick=()=>{ hand=null; say("Put it back in the tray."); draw(); });
     el.querySelectorAll("[data-zoom]").forEach(b=>b.onclick=()=>{ zoom = Math.max(1, Math.min(2.2, zoom + (+b.dataset.zoom)*0.4)); draw(); });
+    const ss = el.querySelector("[data-solshow]"); if (ss) ss.onclick = () => { if (cfg.challenge && !confirm("This shows how to fix every fault. Try the hints first — show the full solution anyway?")) return; showSol = true; draw(); };
+    const sh = el.querySelector("[data-solhide]"); if (sh) sh.onclick = () => { stopPlay(); showSol = false; draw(); };
+    const sp = el.querySelector("[data-solplay]"); if (sp) sp.onclick = () => startPlay();
+    const st = el.querySelector("[data-solstop]"); if (st) st.onclick = () => { stopPlay(); say("Stopped. Press Reset bench to start again yourself."); draw(); };
     el.querySelectorAll("[data-hint]").forEach(b=>b.onclick=()=>{ const i = +b.dataset.hint; hintsShown[i] = !hintsShown[i]; draw(); });
     const an = el.querySelector("[data-anim]"); if (an) an.onchange = () => { showFrames = an.checked; draw(); };
     const rp = el.querySelector("[data-replay]"); if (rp) rp.onclick = () => { animKey++; draw(); const lg = el.querySelector(".bn-log"); if (lg) lg.open = true; };
@@ -621,30 +684,15 @@ function mount(el, cfg, tasks, onWin){
     const ips = el.querySelector("#bn-ipsave");
     if (ips) ips.onclick = () => { const id = tool.split(":")[1]; const r = act(B, ["ip", id, el.querySelector("#bn-ip").value.trim(), el.querySelector("#bn-mask").value.trim(), el.querySelector("#bn-gw").value.trim()]); if (r.ok) tool=null; after(r); };
     if (el.querySelector("#bn-cmd")){ const id = tool.split(":")[1], d = B.devs[id];
-      wireTerm("#bn-cmd", "#bn-run", v => {
-        const rem = B.remote[id], env = rem && rem.env;
-        if (!v.trim() && !(env && env.pending)) { if (rem) pcLines[id].push({t:pcPrompt(B,d), cls:"in"}); draw(); return focusSel("#bn-cmd"); }
-        const L = pcLines[id];
-        K.termEcho(L, env, v, pcPrompt(B,d));
-        const o = act(B,["pc",id,v]).out;
-        K.termOut(L, o);
-        if (L.length>300) pcLines[id] = L.slice(-300);
-        animKey++; draw(); focusSel("#bn-cmd");
-      }, B.remote[id] && B.remote[id].env); }
+      wireTerm("#bn-cmd", "#bn-run", v => { runPc(id, v); animKey++; draw(); focusSel("#bn-cmd"); }, B.remote[id] && B.remote[id].env); void d; }
     const op = el.querySelector("#bn-open");
     if (op) op.onclick = () => { Object.assign(cons, { speed:el.querySelector("#bn-sp").value, data:el.querySelector("#bn-db").value, parity:el.querySelector("#bn-pa").value, stop:el.querySelector("#bn-sb").value, flow:el.querySelector("#bn-fc").value });
       const r = act(B, ["console", tool.split(":")[1], cons]); after(r); focusSel("#bn-tin"); };
     if (el.querySelector("#bn-tin")){ const s = B.console, t = B.devs[s.target];
-      wireTerm("#bn-tin", "#bn-trun", v => {
-        if (s.good && t.on) K.termEcho(s.lines, t.env, v, t.env.prompt()); else s.lines.push({t:v, cls:"in"});
-        const o = act(B,["term",v]).out;
-        K.termOut(s.lines, o);
-        if (s.lines.length>300) s.lines = s.lines.slice(-300);
-        animKey++; draw(); focusSel("#bn-tin");
-      }, s.good ? t.env : null);
+      wireTerm("#bn-tin", "#bn-trun", v => { runTerm(v); animKey++; draw(); focusSel("#bn-tin"); }, s.good ? t.env : null);
       el.querySelector("#bn-tclose").onclick = () => { B.console = null; draw(); }; }
   }
-  el.reset = () => { B = create(cfg); sel=null; hand=null; tool=null; won=false; for (const k in pcLines) delete pcLines[k]; say("Bench reset — everything is back as it started."); draw(); };
+  el.reset = () => { stopPlay(); watched = false; B = create(cfg); sel=null; hand=null; tool=null; won=false; for (const k in pcLines) delete pcLines[k]; say("Bench reset — everything is back as it started."); draw(); };
   draw();
   return { get bench(){ return B; } };
 }

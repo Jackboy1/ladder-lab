@@ -23,8 +23,8 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 
 **2. Networking — CCNA 200-301** (v1.1 until 2 Feb 2027; v2.0 from 3 Feb 2027 — same code, more troubleshooting, new AI-in-network-operations domain ~10%: covered as it lands)
 ✅ M1 How networks work — what a network is, devices, cables, topologies, OSI/TCP-IP, encapsulation, TCP/UDP, first IOS session · Core/Exam/Stretch quizzes · Module 1 challenge
-🔨 M2 Ethernet switching & ARP — MAC learning and the MAC table, flooding, broadcast & collision domains, ARP, switch basics and verification
-⬜ M3 Binary, IPv4 addressing & subnetting — binary/hex, address classes & private ranges, masks & CIDR, subnetting the fast way, VLSM, drills
+✅ M2 Ethernet switching & ARP — MAC learning and the MAC table, flooding, broadcast & collision domains, ARP, switch basics and verification
+✅ M3 Binary, IPv4 addressing & subnetting — binary/hex, address classes & private ranges, masks & CIDR, subnetting the fast way, VLSM, drills
 ⬜ M4 VLANs, trunks & Spanning Tree — VLANs, 802.1Q trunks, DTP/VTP, inter-VLAN routing (ROAS, SVIs), STP/RSTP elections & states, PortFast/BPDU Guard/Root Guard/Loop Guard, EtherChannel (LACP/PAgP)
 ⬜ M5 Routing — routing table logic, static & default routes, longest-prefix match, administrative distance, OSPF (single/multi-area, DR/BDR, cost, troubleshooting), RIP/EIGRP overview, FHRP/HSRP
 ⬜ M6 IPv6 — addressing & shortening, types, EUI-64, SLAAC, DHCPv6, static IPv6 routing
@@ -68,6 +68,21 @@ This mode is how you get that proof before your first role:
 ✅ **Certs tab** — each certification on the path, with verdict, timing notes, the courses that prepare you, and a
 readiness meter (course progress + best Hard-mode exam). Aligned with the Infrastructure Ladder plan; exam facts
 checked Oct 2026 (CCNA v2.0 from Feb 2027, DevNet Associate → CCNA Automation, AWS Advanced Networking retiring).
+
+## Part E — Next big builds (from the owner's testing)
+- ⬜ **Topology builder (sandbox):** a blank canvas with a device palette — routers, L2/L3 switches, access points, PCs,
+  servers, printers, firewalls, an ISP/Internet cloud — drag them on, cable them, name them, configure them, save and
+  reload your topology. Starter templates: small office/SOHO, two-tier campus, three-tier campus, branch + HQ over WAN,
+  data-centre spine-leaf. Built on the bench engine so everything you build really works (ARP, MAC learning, routing).
+- ⬜ **Wireless:** access points and wireless clients on the bench — SSIDs, bands/channels, WPA2/WPA3 PSK vs Enterprise,
+  autonomous vs controller-based (WLC) and how APs look/mount in real offices and campuses (CCNA M9).
+- ⬜ **Routing protocols in the engine:** OSPF adjacencies and LSAs for Module 5, then **BGP** — eBGP to an ISP, AS
+  numbers, path selection basics, and how it underpins internet edges and AWS Direct Connect/VPN (taught after CCNA as
+  part of the cloud-networking track; BGP basics also appear in CCNP ENCOR).
+- ⬜ **VLANs, trunks and Spanning Tree on the bench** for Module 4 (802.1Q tagging, root bridge election, blocked ports,
+  a real broadcast storm when STP is off).
+- ✅ **Worked solutions everywhere:** every bench, in-lesson terminal and classic lab has "Show solution" and a
+  step-by-step "Watch it / Type it for me" player; watching never awards points. ✅ Back button + browser history.
 
 ## Part C — Simulator upgrades
 

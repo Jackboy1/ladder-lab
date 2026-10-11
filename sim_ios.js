@@ -52,7 +52,8 @@ function ios2Env(opts){
   };
   const st = Object.assign(factory(), { kind, mode:"user", cur:null, curList:null, curLine:null, curVlan:null, history:[], savedOnce:false, startup:null, pending:null, noEcho:false, motd: opts.motd!=null?opts.motd:"" });
   if (opts.setup) opts.setup(st);
-  function defaultReach(ip){ for (const i of Object.values(st.intfs)) if (i.ip && !i.shut && (i.ip===ip || sameNet(i.ip, ip, i.mask))) return true; return false; }
+  function defaultReach(ip){ for (const i of Object.values(st.intfs)) if (i.ip && !i.shut){ if (i.ip===ip) return true; if (sameNet(i.ip, ip, i.mask)){ const len = maskLen(i.mask); if (len>=31) return true; return ip!==netOf(i.ip, i.mask) && ip!==bcastOf(i.ip, i.mask); } } return false; }
+  function bcastOf(ip, m){ const a = toInt(ip), b = toInt(m); const x = ((a & b) + (0xFFFFFFFF - b)) >>> 0; return [24,16,8,0].map(s=>Math.floor(x/2**s)%256).join("."); }
   const cfgKeys = Object.keys(factory());
   const snapshot = () => JSON.parse(JSON.stringify(cfgKeys.reduce((o,k)=>(o[k]=st[k],o),{})));
   const restore = snap => { for (const k of cfgKeys) st[k] = JSON.parse(JSON.stringify(snap[k])); };
@@ -210,19 +211,33 @@ function ios2Env(opts){
     for (const r of rows) o += `Internet  ${pad(r.ip,17)}${pad(r.age||"0",11)}${pad(r.mac,16)}ARPA   ${r.intf}\n`;
     return o.trimEnd();
   }
-  function routeTable(){
+  function routeTable(only){
     const L = ["Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP","       O - OSPF, IA - OSPF inter area, * - candidate default","",
       (st.routes.find(r=>r.net==="0.0.0.0") ? `Gateway of last resort is ${st.routes.find(r=>r.net==="0.0.0.0").nh} to network 0.0.0.0` : "Gateway of last resort is not set"), ""];
-    for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && up(n)){ L.push(`C        ${netOf(i.ip,i.mask)}/${maskLen(i.mask)} is directly connected, ${n}`); L.push(`L        ${i.ip}/32 is directly connected, ${n}`); } }
-    for (const r of st.routes) L.push(`S${r.net==="0.0.0.0"?"*":" "}       ${r.net}/${maskLen(r.mask)} [1/0] via ${r.nh}`);
+    const rows = [];
+    for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && up(n)){ rows.push({net:netOf(i.ip,i.mask), len:maskLen(i.mask), text:`C        ${netOf(i.ip,i.mask)}/${maskLen(i.mask)} is directly connected, ${n}`}); rows.push({net:i.ip, len:32, text:`L        ${i.ip}/32 is directly connected, ${n}`}); } }
+    for (const r of st.routes) rows.push({net:r.net, len:maskLen(r.mask), text:`S${r.net==="0.0.0.0"?"*":" "}       ${r.net}/${maskLen(r.mask)} [1/0] via ${r.nh}`});
+    const keep = only==='connected' ? (r=>/^[CL]/.test(r.text)) : only==='static' ? (r=>/^S/.test(r.text)) : (()=>true);
+    for (let k=rows.length-1;k>=0;k--) if (!keep(rows[k])) rows.splice(k,1);
+    const classful = ip => { const f = +ip.split(".")[0]; const p = f<128 ? 8 : f<192 ? 16 : 24; return {major: netOf(ip, [0,0,0,0].map((_,k)=>k<p/8?255:0).join(".")), p}; };
+    const groups = new Map();
+    for (const r of rows){ if (r.net==="0.0.0.0"){ groups.set("0.0.0.0", {hdr:null, rows:[r]}); continue; } const c = classful(r.net); const key = c.major+"/"+c.p; if (!groups.has(key)) groups.set(key, {major:c.major, p:c.p, rows:[]}); groups.get(key).rows.push(r); }
+    for (const [key,g] of [...groups].sort((x,y)=>x[0]==="0.0.0.0"?-1:y[0]==="0.0.0.0"?1:toInt(x[1].major)-toInt(y[1].major))){
+      if (g.major){ const masks = [...new Set(g.rows.map(r=>r.len))]; const sub = g.rows.length;
+        if (!(masks.length===1 && masks[0]===g.p)) L.push(masks.length>1 ? `      ${g.major}/${g.p} is variably subnetted, ${sub} subnets, ${masks.length} masks` : `      ${g.major}/${masks[0]} is subnetted, ${sub} subnets`); }
+      g.rows.sort((x,y)=>toInt(x.net)-toInt(y.net) || x.len-y.len).forEach(r=>L.push(r.text));
+    }
     return L.join("\n");
   }
   function version(){
     const sw = kind==="switch";
     return [`Cisco IOS XE Software, Version 17.09.04a`, `Cisco IOS Software [Cupertino], ${sw?"Catalyst L3 Switch":"ISR"} Software, Version 17.9.4a, RELEASE SOFTWARE (fc3)`, "Technical Support: http://www.cisco.com/techsupport", "",
       `ROM: IOS-XE ROMMON`, `${st.host} uptime is ${opts.uptime||"2 hours, 14 minutes"}`, `System returned to ROM by ${opts.lastReload||"power-on"}`, `System image file is "flash:${sw?"cat9k_lite_iosxe":"c1100-universalk9"}.17.09.04a.SPA.bin"`, "",
-      `cisco ${opts.model||(sw?"C9200L-24P-4G":"C1111-4P")} (${sw?"ARM":"1RU"}) processor with 1395406K/6147K bytes of memory.`, `${physical.length} Gigabit Ethernet interfaces`, `Base Ethernet MAC Address          : ${baseMac}.0000`,
-      `Model Number                       : ${opts.model||(sw?"C9200L-24P-4G":"C1111-4P")}`, `System Serial Number               : ${opts.serial||"FOC2741X0AB"}`, "", `Configuration register is 0x2102`].join("\n");
+      `cisco ${opts.model||(sw?"C9200L-24P-4G":"C1111-4P")} (${sw?"ARM":"1RU"}) processor with 1395406K/6147K bytes of memory.`, `${physical.length} Gigabit Ethernet interfaces`,
+      // switches print a base MAC and model/serial block; ISR routers show the processor board ID instead
+      ...(sw ? [`Base Ethernet MAC Address          : ${baseMac}.0000`, `Model Number                       : ${opts.model||"C9200L-24P-4G"}`, `System Serial Number               : ${opts.serial||"FOC2741X0AB"}`]
+             : [`Processor board ID ${opts.serial||"FGL2741X0AB"}`]),
+      "", `Configuration register is ${st.confreg||"0x2102"}${st.confregNext && st.confregNext!==(st.confreg||"0x2102") ? ` (will be ${st.confregNext} at next reload)` : ""}`].join("\n");
   }
 
   /* ---------- command tables ---------- */
@@ -232,6 +247,13 @@ function ios2Env(opts){
     X("show running-config", ()=>runningCfg()), X("show startup-config", ()=>st.startup ? runningCfgFrom(st.startup) : "startup-config is not present"),
     X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()),
     X("show interfaces", ()=>ifNames().filter(n=>!st.intfs[n].loop||true).map(showInt).join("\n")),
+    X("show ip interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return "% Invalid input detected at '^' marker."; const i = st.intfs[n], l = up(n);
+      const L = [`${n} is ${i.shut?"administratively down":(l||(i.mode==="svi"&&st.vlans[i.vlan]))?"up":"down"}, line protocol is ${l?"up":"down"}`];
+      if (!i.ip) L.push("  Internet protocol processing disabled");
+      else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", "  MTU is 1500 bytes", "  Helper address is not set",
+        "  Directed broadcast forwarding is disabled", "  Outgoing Common access list is not set", "  Outgoing access list is not set", "  Inbound Common access list is not set", "  Inbound  access list is not set",
+        `  Proxy ARP is ${i.proxyArp===false?"disabled":"enabled"}`, "  Local Proxy ARP is disabled", "  Security level is default", "  Split horizon is enabled", "  ICMP redirects are always sent", "  ICMP unreachables are always sent", "  ICMP mask replies are never sent");
+      return L.join("\n"); }),
     X("show interfaces A:IF", a=>{ const n = parseIf(a[0]); return n ? showInt(n) : "% Invalid interface type and number"; }),
     X("show vlan brief", ()=>vlanBrief()||inv()), X("show vlan", ()=>vlanBrief()||inv()),
     X("show mac address-table", ()=>macTable()||inv()), X("show mac address-table dynamic", ()=>macTable({type:"dynamic"})||inv()),
@@ -239,7 +261,7 @@ function ios2Env(opts){
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
     X("show cdp neighbors", ()=>cdpNeighbors(false)), X("show cdp neighbors detail", ()=>cdpNeighbors(true)),
     X("show lldp neighbors", ()=>lldpNeighbors()),
-    X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()),
+    X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()), X("show ip route connected", ()=>routeTable("connected")), X("show ip route static", ()=>routeTable("static")),
     X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show users", ()=>{ const ss = (hooks.sessions && hooks.sessions()) || [];
       let o = "    Line       User       Host(s)              Idle       Location\n" + `${ss.some(s=>s.me)?" ":"*"}  0 con 0                idle                 00:00:00`;
       ss.forEach((s,i)=>{ o += `\n${s.me?"*":" "}  ${String(i+1).padEnd(2)}vty ${i}     ${pad(s.user||"",11)}idle                 00:00:0${i}  ${s.from}`; });
@@ -293,8 +315,9 @@ function ios2Env(opts){
       X("crypto key generate rsa modulus A:NUM", a=>{ if (st.host==="Switch"||st.host==="Router") return "% Please define a hostname other than "+st.host+"."; if (!st.domain) return "% Please define a domain-name first."; const b=+a[0]; if (!(b>=512&&b<=4096)) return "% Invalid modulus"; st.rsa=b; return `The name for the keys will be: ${st.host}.${st.domain}\n% The key modulus size is ${b} bits\n% Generating ${b} bit RSA keys, keys will be non-exportable...\n[OK] (elapsed time was 1 seconds)\n%SSH-5-ENABLED: SSH 1.99 has been enabled`; }),
       X("crypto key zeroize rsa", ()=>{ st.rsa=0; return "% All keys will be removed.\n%SSH-5-DISABLED: SSH 1.99 has been disabled"; }),
       X("ip ssh version A:NUM", a=>{ if (!/^[12]$/.test(a[0])) return "% Invalid input"; if (!st.rsa && a[0]==="2") return "Please create RSA keys to enable SSH (and of atleast 768 bits for SSH v2)."; st.sshVer=a[0]; return ""; }),
+      X("config-register A:WORD", a=>{ if (!/^0x[0-9a-f]{1,4}$/i.test(a[0])) return "% Invalid input detected at '^' marker."; st.confregNext = "0x" + a[0].slice(2).toUpperCase().padStart(4,"0"); return ""; }),
       X("ip default-gateway A:IP", a=>{ if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; st.defaultGw=a[0]; return ""; }), X("no ip default-gateway", ()=>{ st.defaultGw=null; return ""; }),
-      X("ip route A:IP A:MASK A:WORD", a=>{ if (!ipRe.test(a[0])||!maskOk(a[1])) return "%Inconsistent address and mask"; st.routes.push({net:a[0], mask:a[1], nh:a[2]}); return ""; }),
+      X("ip route A:IP A:MASK A:WORD", a=>{ const mOk = a[1]==="0.0.0.0" || maskOk(a[1]); if (!ipRe.test(a[0]) || !mOk || netOf(a[0], a[1])!==a[0]) return "%Inconsistent address and mask"; if (!st.routes.some(r=>r.net===a[0]&&r.mask===a[1]&&r.nh===a[2])) st.routes.push({net:a[0], mask:a[1], nh:a[2]}); return ""; }),
       X("no ip route A:IP A:MASK A:WORD", a=>{ st.routes = st.routes.filter(r=>!(r.net===a[0]&&r.mask===a[1]&&r.nh===a[2])); return ""; }),
       X("cdp run", ()=>{ st.cdpRun=true; return ""; }), X("no cdp run", ()=>{ st.cdpRun=false; return ""; }),
       X("lldp run", ()=>{ st.lldpRun=true; return ""; }), X("no lldp run", ()=>{ st.lldpRun=false; return ""; }),
@@ -303,9 +326,12 @@ function ios2Env(opts){
       X("description A:LINE", a=>{ forCur(i=>i.desc=a[0].slice(0,240)); return ""; }), X("no description", ()=>{ forCur(i=>i.desc=""); return ""; }),
       X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (!i.shut){ i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
       X("no shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (i.shut){ i.shut=false; if (up(n)) out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to up`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to up`); else if (i.mode!=="svi") out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
-      X("ip address A:IP A:MASK", a=>{ const i = st.intfs[st.cur]; if (kind==="switch" && i.mode!=="svi" && !i.loop) return "                                   ^\n% Invalid input detected at '^' marker.\n(a Layer 2 switch port has no IP address — configure the management IP on interface vlan 1)"; if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; if (!maskOk(a[1])) return `% Bad mask /${a[1]} for address ${a[0]}`;
-        for (const [n,o] of Object.entries(st.intfs)) if (n!==st.cur && o.ip && sameNet(o.ip, a[0], o.mask)) return `% ${netOf(a[0],a[1])} overlaps with ${n}`;
-        i.ip=a[0]; i.mask=a[1]; return ""; }),
+      X("ip address A:IP A:MASK", a=>{ const i = st.intfs[st.cur]; if (kind==="switch" && i.mode!=="svi" && !i.loop) return "                                   ^\n% Invalid input detected at '^' marker.\n(a Layer 2 switch port has no IP address — configure the management IP on interface vlan 1)"; if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; if (!maskOk(a[1])) return ipRe.test(a[1]) ? `% Bad mask 0x${toInt(a[1]).toString(16).toUpperCase().padStart(8,"0")} for address ${a[0]}` : "% Invalid input detected at '^' marker.";
+        const len = maskLen(a[1]);
+        if (len<31 && (a[0]===netOf(a[0],a[1]) || a[0]===bcastOf(a[0],a[1]))) return `% Bad mask /${len} for address ${a[0]}`;
+        for (const [n,o] of Object.entries(st.intfs)) if (n!==st.cur && o.ip){ const shorter = maskLen(o.mask) <= len ? o.mask : a[1]; if (sameNet(o.ip, a[0], shorter)) return `% ${netOf(a[0],a[1])} overlaps with ${n}`; }
+        i.ip=a[0]; i.mask=a[1];
+        return len===31 && !i.loop ? "% Warning: use /31 mask on non point-to-point interface cautiously" : ""; }),
       X("no ip address", ()=>{ forCur(i=>{ i.ip=null; i.mask=null; }); return ""; }),
       X("speed A:WORD", a=>{ if (!/^(10|100|1000|auto)$/.test(a[0])) return "% Invalid input detected at '^' marker."; if (st.intfs[st.cur].mode==="svi") return inv(); forCur(i=>i.speed=a[0]==="auto"?"auto":+a[0]); return ""; }),
       X("duplex A:WORD", a=>{ const d = ["full","half","auto"].find(x=>x.startsWith(a[0].toLowerCase())); if (!d) return "% Invalid input detected at '^' marker."; if (st.intfs[st.cur].mode==="svi") return inv(); forCur(i=>i.duplex=d); return ""; }),
@@ -341,7 +367,7 @@ function ios2Env(opts){
   function parseRange(s){ const m = s.replace(/\s+/g,"").match(/^([a-z]+)(\d+\/)(\d+)-(\d+)$/i); if (!m) return null; const out = []; for (let k=+m[3]; k<=+m[4]; k++){ const n = parseIf(m[1]+m[2]+k); if (!n) return null; out.push(n); } return out.length ? out : null; }
   function save(){ st.startup = snapshot(); st.savedOnce = true; return "Building configuration...\n[OK]"; }
   function runningCfgFrom(snap){ const cur = snapshot(); restore(snap); const out = runningCfg().replace("Current configuration","Using 2104 out of 524288 bytes\n!\n! Last configuration change"); restore(cur); return out; }
-  function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null;
+  function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; if (st.confregNext) st.confreg = st.confregNext;
     if (hooks.clearMac) hooks.clearMac(); return {reload:true, text:"\n%SYS-5-RELOAD: Reload requested by console. Reload Reason: Reload Command.\n\n...System restarting...\n\n" + (st.startup ? `${st.host} con0 is now available\n\nPress RETURN to get started.` : "         --- System Configuration Dialog ---\n\nWould you like to enter the initial configuration dialog? [yes/no]: no\n\nPress RETURN to get started.") + (st.banner?`\n\n${st.banner}`:"")}; }
   function ask(prompt, handle){ st.pending = {prompt, handle}; return {ask:prompt}; }
   function goEnable(){

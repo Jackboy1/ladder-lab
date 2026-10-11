@@ -64,7 +64,14 @@ function trackComplete(t){ const p=trackProgress(t); return p.total>0 && p.done>
 /* ---------- shell ---------- */
 const TABS = [["home","Dashboard"],["tracks","Courses"],["labs","Labs"],["tickets","Tickets"],["interview","Interview"],["certs","Certs"],["career","Career"],["cards","Flashcards"],["settings","Settings"]];
 let route = {view:"home"};
-function go(view, params){ route = Object.assign({view}, params||{}); render(); window.scrollTo(0,0); try{ location.hash = view; }catch(e){} }
+function encodeRoute(r){ const q = Object.entries(r).filter(([k,v])=>k!=="view"&&k!=="group"&&v!=null&&v!=="").map(([k,v])=>k+"="+encodeURIComponent(v)).join("&"); return r.view + (q?"?"+q:""); }
+function decodeRoute(h){ const [v,q] = String(h||"").split("?"); const r = {view: v||"home"}; if (q) for (const kv of q.split("&")){ const [k,val] = kv.split("="); let x = decodeURIComponent(val||""); if (k==="i") x = +x; else if (x==="true"||x==="false") x = x==="true"; r[k] = x; } return r; }
+let navDepth = 0;
+function go(view, params){ route = Object.assign({view}, params||{}); try{ history.pushState({route, depth: ++navDepth}, "", "#"+encodeRoute(route)); }catch(e){} render(); window.scrollTo(0,0); }
+window.addEventListener("popstate", e => { const st = e.state; route = (st && st.route) ? Object.assign({}, st.route) : decodeRoute((location.hash||"").slice(1)); navDepth = st && st.depth ? st.depth : 0; render(); window.scrollTo(0,0); });
+const UP = { lesson:r=>["track",{id:r.id}], quiz:r=>["track",{id:r.id}], track:()=>["tracks"], cardsession:()=>["cards"], cert:r=>["track",{id:r.id}], exam:()=>["tracks"],
+  lab:()=>["labs"], bench:()=>["labs"], play:()=>["labs"], drills:()=>["labs"], drill:()=>["labs"], codelab:r=>["track",{id:r.tid}], ticket:()=>["tickets"], mock:()=>["interview"] };
+window.LLBack = () => { if (navDepth>0) history.back(); else { const u = UP[route.view]; u ? go(...u(route)) : go("home"); } };
 window.GO = go;
 
 function statline(){
@@ -79,7 +86,8 @@ function tabs(){
   $("#tabs").innerHTML = TABS.map(([id,label])=>`<button class="${route.view===id||route.group===id?"on":""}" onclick="GO('${id}')">${label}</button>`).join("");
 }
 
-function render(){ clearLLTimers(); tabs(); statline();
+function render(){ renderView(); const bb = $("#backbar"); if (bb) bb.innerHTML = (!TABS.some(([id])=>id===route.view) && route.view!=="selftest") ? `<button class="btn sm ghost backbtn" onclick="LLBack()" aria-label="Go back">← Back</button>` : ""; }
+function renderView(){ clearLLTimers(); tabs(); statline();
   const v = route.view;
   if (v==="home") return home();
   if (v==="tracks") return tracksView();
@@ -558,8 +566,11 @@ function labView(id){
       <div>
         <div class="eyebrow">Objectives</div>
         ${objHtml}
-        ${allDone?`<div class="callout"><b>All objectives met.</b> ${P.labsDone[id]?"Already credited.":`<button class="btn sm" id="claim">Collect +${lab.points} pts</button>`}</div>`:""}
-        <div class="btnrow"><button class="btn sm ghost" id="resetlab">Reset lab</button></div>
+        ${allDone?`<div class="callout"><b>All objectives met.</b> ${P.labsDone[id]?"Already credited.":LAB.watched?"That was the worked solution — press <b>Reset lab</b> and do it yourself to earn the points.":`<button class="btn sm" id="claim">Collect +${lab.points} pts</button>`}</div>`:""}
+        <div class="btnrow"><button class="btn sm ghost" id="resetlab">Reset lab</button>${lab.solve?`<button class="btn sm ghost" id="showsol">${LAB.showSol?"Hide solution":"Stuck? Show solution"}</button>`:""}</div>
+        ${lab.solve && LAB.showSol ? `<div class="kbox"><div class="kbox-h">Worked solution</div><ol class="small sol-list">${lab.solve.map((c,k)=>`<li class="${LAB.play && k<LAB.play.i?"done":""}${LAB.play && k===LAB.play.i?" cur":""}"><code>${esc(c==="@delete-web-pod"?"kubectl delete pod <one of the web-… pods>":c)}</code></li>`).join("")}</ol>
+          <div class="btnrow">${LAB.play?`<button class="btn sm" id="stopsol">Stop</button>`:`<button class="btn sm" id="playsol">Type it for me, step by step</button>`}</div>
+          <p class="small muted">It types each command into this terminal so you can watch the output. Then press <b>Reset lab</b> and do it yourself.</p></div>`:""}
       </div>
     </div>
   </div>`;
@@ -582,7 +593,22 @@ function labView(id){
     labView(id);
   }
   if ($("#claim")) $("#claim").onclick = ()=>{ P.labsDone[id]=true; addPoints(lab.points,"lab complete"); labView(id); };
-  $("#resetlab").onclick = ()=>{ LAB=null; labView(id); };
+  $("#resetlab").onclick = ()=>{ if (LAB.play) clearInterval(LAB.play.t); LAB=null; labView(id); };
+  if ($("#showsol")) $("#showsol").onclick = ()=>{ LAB.showSol = !LAB.showSol; labView(id); };
+  if ($("#stopsol")) $("#stopsol").onclick = ()=>{ clearInterval(LAB.play.t); LAB.play=null; labView(id); };
+  if ($("#playsol")) $("#playsol").onclick = ()=>{
+    LAB = null; labView(id); LAB.showSol = true; LAB.watched = true; LAB.play = { i:0 };
+    const L = LAB, steps = lab.solve;
+    L.play.t = setInterval(()=>{
+      if (LAB!==L || route.view!=="lab"){ clearInterval(L.play && L.play.t); return; }
+      if (L.play.i>=steps.length){ clearInterval(L.play.t); L.play=null; labView(id); return; }
+      let c = steps[L.play.i];
+      if (c==="@delete-web-pod"){ const p = (L.env.pods||[]).find(p=>p.name.startsWith("web-")); c = "kubectl delete pod "+(p?p.name:"web"); }
+      L.lines.push({t: L.env.prompt()+c, cls:"in"}); const out = L.env.exec(c);
+      if (out && out.clear) L.lines = []; else if (out) L.lines.push({t: typeof out==="string"?out:(out.text||"")+(out.ask||""), cls:""});
+      L.play.i++; labView(id);
+    }, 900);
+  };
 }
 
 /* ---------- hands-on bench (standalone) ---------- */
@@ -1053,6 +1079,7 @@ window.LLSelfTest = selfTest;
 /* ---------- boot ---------- */
 touchDay(); saveP();
 const startHash = (location.hash||"").replace("#","");
-if (TABS.some(([id])=>id===startHash)) route={view:startHash};
+if (startHash && startHash!=="selftest") route = decodeRoute(startHash);
+try{ history.replaceState({route, depth:0}, "", location.hash || "#home"); }catch(e){}
 if (startHash==="selftest") selfTest(); else render();
 })();

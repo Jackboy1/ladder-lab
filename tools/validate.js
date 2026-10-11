@@ -117,7 +117,10 @@ for (const t of LL.tracks) for (const q of (t.quiz||[])){ const k = q.q.trim().t
 
 for (const [id,lab] of Object.entries(LL.labs)){
   if (!SIM || !SIM[lab.env+"Env"]){ err(`lab ${id}: unknown env ${lab.env}`); continue; }
-  try { const env = SIM[lab.env+"Env"](lab.opts||{}); if (lab.setup) lab.setup(env); lab.objectives.forEach(o=>o.done(env)); }
+  try { const env = SIM[lab.env+"Env"](lab.opts||{}); if (lab.setup) lab.setup(env); lab.objectives.forEach(o=>o.done(env));
+    if (!lab.solve) warn(`lab ${id}: no solve[] — learners can't see a worked solution`);
+    else { for (const c of lab.solve){ if (c==="@delete-web-pod"){ const p = (env.pods||[]).find(p=>p.name.startsWith("web-")); env.exec("kubectl delete pod "+(p?p.name:"web")); } else env.exec(c); }
+      lab.objectives.forEach(o=>{ if (!o.done(env)) err(`lab ${id}: solution does not complete "${o.text.replace(/<[^>]+>/g,"")}"`); }); } }
   catch(e){ err(`lab ${id}: ${e.message}`); }
 }
 // in-lesson terminals: build each one and make sure the tasks can be evaluated on a fresh box
@@ -147,6 +150,19 @@ if (K && K._benches && ctx.Bench){
       else { for (const a of cfg.solve){ const r = ctx.Bench.act(B, a); if (r.ok===false) err(`${where}: solve step ${JSON.stringify(a)} failed: ${r.msg}`); }
         tasks.forEach(t=>{ if (!t.done(B)) err(`${where}: solution does not complete "${t.text.replace(/<[^>]+>/g,"")}"`); }); }
     } catch(e){ err(`${where}: ${e.message}`); }
+  }
+}
+
+// bench layout: devices must not overlap or spill outside the viewBox (mirrors bench.js layout())
+if (ctx.Bench){
+  const PORTW = { rj45:[22,17], console:[22,17], sfp:[30,14], usb:[18,9] };
+  const lay = d => { if (["switch","router","hub"].includes(d.kind)){ let x = 52; for (const p of d.ports){ const [w] = PORTW[p.type]; if (p.type==="console") x += 14; x += w + (p.type==="sfp"?10:7); } return {w:Math.max(x+14, d.kind==="hub"?170:200), h:78}; } return {w:108, h:96}; };
+  for (const [id,cfg] of Object.entries(LL.benches||{})){
+    let B; try { B = ctx.Bench.create(cfg); } catch(e){ continue; }
+    const vb = (cfg.viewBox||"0 0 900 360").split(/\s+/).map(Number);
+    const boxes = B.order.map(k=>{ const d = B.devs[k], L = lay(d); return {k, x:d.x, y:d.y, w:L.w, h:L.h}; });
+    for (const b of boxes) if (b.x<0 || b.y<0 || b.x+b.w>vb[2]+1 || b.y+b.h>vb[3]+1) err(`bench ${id}: device ${b.k} spills outside the viewBox (${b.x},${b.y} ${b.w}×${b.h} vs ${vb[2]}×${vb[3]})`);
+    for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++){ const A = boxes[i], C = boxes[j]; if (Math.min(A.x+A.w,C.x+C.w)-Math.max(A.x,C.x)>0 && Math.min(A.y+A.h,C.y+C.h)-Math.max(A.y,C.y)>0) err(`bench ${id}: devices ${A.k} and ${C.k} overlap`); }
   }
 }
 

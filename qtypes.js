@@ -77,7 +77,7 @@ function fieldOk(f, v){
   if (f.a.some(a=>norm(a)===norm(v))) return true;
   if (!f.ios) return false;
   const typed = norm(v).split(" ");
-  return f.a.some(a=>{ const words = norm(a).split(" "); return words.length===typed.length && words.every((w,i)=>/\d/.test(w) ? typed[i]===w : typed[i].length>=Math.min(2,w.length) && w.startsWith(typed[i])); });
+  return f.a.some(a=>{ const words = norm(a).split(" "); return words.length===typed.length && words.every((w,i)=>/\d/.test(w) ? typed[i]===w : typed[i].length>=Math.min(i===0?2:1,w.length) && w.startsWith(typed[i])); });
 }
 function answerText(q){
   const t = type(q);

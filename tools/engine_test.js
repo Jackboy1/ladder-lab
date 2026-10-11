@@ -91,6 +91,22 @@ ok(/Reply from 10.1.1.2/.test(out(B,["pc","noc","ping 10.1.1.2"])) && Bench.prox
 for (const c of ["conf t","int g0/0","no ip proxy-arp","end"]) B.devs.r.env.exec(c); for (const k of Object.keys(B.arp)) B.arp[k]={};
 ok(/timed out/.test(out(B,["pc","noc","ping 10.1.1.2"])),"with no ip proxy-arp the missing gateway breaks remote management");
 ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0/0")),"running-config shows no ip proxy-arp");
+// 9b addressing realism: Bad mask, overlap, /31 warning, default route, classful route headings
+{ const R = SIM.ios2Env({kind:"router"}); for (const c of ["en","conf t","int g0/0"]) R.exec(c);
+  ok(/Bad mask \/22 for address 10\.20\.36\.0/.test(R.exec("ip add 10.20.36.0 255.255.252.0")),"IOS refuses a network address as an interface address");
+  R.exec("ip add 10.20.36.1 255.255.252.0"); R.exec("no shut"); R.exec("int g0/1");
+  ok(/10\.20\.38\.0 overlaps with GigabitEthernet0\/0/.test(R.exec("ip add 10.20.38.5 255.255.255.0")),"overlap detected using the shorter mask");
+  ok(/use \/31 mask/.test(R.exec("ip add 10.9.9.0 255.255.255.254")),"/31 accepted with a warning"); R.exec("no shut"); R.exec("exit");
+  ok(R.exec("ip route 0.0.0.0 0.0.0.0 10.9.9.1")==="","default route accepted");
+  ok(/Inconsistent/.test(R.exec("ip route 10.1.1.5 255.255.255.0 10.9.9.1")),"static route with host bits set is rejected"); R.exec("end");
+  const rt = R.exec("show ip route"); ok(/10\.0\.0\.0\/8 is variably subnetted, 4 subnets, 3 masks/.test(rt) && /Gateway of last resort is 10\.9\.9\.1/.test(rt) && rt.indexOf("10.9.9.0/31") < rt.indexOf("10.20.36.0/22"),"show ip route has classful headings, sorted entries and the gateway of last resort"); }
+// 9c unreachables and host addressing rules
+{ const B2 = Bench.create({devices:[{id:"r",kind:"router",label:"R1",config:e=>{for(const c of ["en","conf t","int g0/0","ip add 10.1.1.1 255.255.255.0","no shut","no ip proxy-arp","int g0/1","ip add 10.2.2.1 255.255.255.0","end"])e.exec(c)}},
+    {id:"p",kind:"pc",label:"P",ip:"10.1.1.5",mask:"255.255.255.0",gw:"10.1.1.1"},{id:"q",kind:"pc",label:"Q",ip:"10.2.2.5",mask:"255.255.255.0",gw:"10.2.2.1"}],
+    cables:[{type:"cat6",a:"p:eth",b:"r:g0"},{type:"cat6",a:"q:eth",b:"r:g1"}]});
+  ok(/Reply from 10\.1\.1\.1: Destination net unreachable\./.test(out(B2,["pc","p","ping 10.2.2.5"])),"router with the egress interface shut answers Destination net unreachable");
+  ok(Bench.act(B2,["ip","q","10.2.2.255","255.255.255.0","10.2.2.1"]).ok===false && Bench.act(B2,["ip","q","10.2.2.0","255.255.255.0","10.2.2.1"]).ok===false,"Windows refuses the subnet's network or broadcast address");
+  ok(/Internet address is 10\.1\.1\.1\/24/.test(B2.devs.r.env.exec("show ip interface g0/0")) && /Proxy ARP is disabled/.test(B2.devs.r.env.exec("show ip interface g0/0")),"show ip interface shows the address and proxy ARP state"); }
 // 10 drills: thousands of generated answers checked against an independent BigInt calculation
 { const D = ctx.DRILL; D._seed(12345);
   const bi = s => s.split(".").reduce((a,o)=>a*256n+BigInt(o),0n), bs = n => [24n,16n,8n,0n].map(k=>String((n>>k)&255n)).join(".");

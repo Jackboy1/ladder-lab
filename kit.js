@@ -176,10 +176,11 @@ const K = {
       const draw = () => {
         const L = live[id], env = L.env, tasks = cfg.tasks||[];
         const done = tasks.filter(t=>{ try{ return t.done(env); }catch(e){ return false; } });
-        body.innerHTML = `${tasks.length?`<div class="mt-tasks">${tasks.map(t=>{ let ok=false; try{ ok=t.done(env); }catch(e){} return `<div class="mt-task ${ok?"ok":""}"><span class="check ${ok?"done":""}">✓</span><span>${t.text}</span></div>`; }).join("")}</div>`:""}
+        body.innerHTML = `${cfg.env==="ios2"?`<p class="small muted" style="margin:0 0 6px">Lab note: interface names are shortened to Gi0/x. Real kit numbers them by slot: a Catalyst 9200 uses Gi1/0/1, an ISR 1000/4000 router uses Gi0/0/0 — the commands are identical.</p>`:""}${tasks.length?`<div class="mt-tasks">${tasks.map(t=>{ let ok=false; try{ ok=t.done(env); }catch(e){} return `<div class="mt-task ${ok?"ok":""}"><span class="check ${ok?"done":""}">✓</span><span>${t.text}</span></div>`; }).join("")}</div>`:""}
           ${tasks.length && done.length===tasks.length?`<div class="callout"><b>Nice — every task done.</b> ${cfg.win||"You just did the real thing."}</div>`:""}
           <div class="term mt-term">${L.lines.map(l=>`<div class="ln ${l.cls}">${esc(l.t)}</div>`).join("")}</div>
-          <div class="termbar"><input autocomplete="off" spellcheck="false" placeholder="${esc(env.prompt())}" aria-label="command"><button class="btn">Run</button><button class="btn ghost sm mt-reset" title="Start this terminal again">Reset</button></div>`;
+          <div class="termbar"><input autocomplete="off" spellcheck="false" placeholder="${esc(env.prompt())}" aria-label="command"><button class="btn">Run</button><button class="btn ghost sm mt-reset" title="Start this terminal again">Reset</button></div>
+          ${cfg.solve && cfg.solve.length ? (L.showSol ? `<div class="kbox"><div class="kbox-h">Worked solution</div><ol class="small sol-list">${cfg.solve.map((c,k)=>`<li class="${L.play&&k<L.play.i?"done":""}${L.play&&k===L.play.i-1?" cur":""}"><code>${esc(c===""?"(press Enter)":c)}</code></li>`).join("")}</ol><div class="btnrow">${L.play?`<button class="btn sm mt-solstop">Stop</button>`:`<button class="btn sm mt-solplay">Type it for me, step by step</button>`}<button class="btn sm ghost mt-solhide">Hide</button></div><p class="small muted">It types each command so you can watch the output; then press Reset and do it yourself.</p></div>` : `<button class="btn sm ghost mt-solshow">Stuck? Show the solution</button>`) : ""}`;
         const term = body.querySelector(".mt-term"); term.scrollTop = term.scrollHeight;
         const input = body.querySelector("input");
         const run = () => { const cmd = input.value; if (!cmd.trim() && !env.pending && !env.connect) return;
@@ -193,7 +194,23 @@ const K = {
           else if (e.key==="Tab" && env.complete && !env.pending){ e.preventDefault(); input.value = env.complete(input.value); }
           else if (e.key==="ArrowUp" && env.history.length){ input.value = env.history[env.history.length-1]; e.preventDefault(); } };
         body.querySelector(".btn").onclick = run;
-        body.querySelector(".mt-reset").onclick = () => { delete live[id]; const env2 = mk(fresh(cfg.opts)); if (cfg.setup) cfg.setup(env2); live[id] = {env:env2, lines:[{t:env2.motd||"", cls:""}]}; draw(); };
+        const q = s => body.querySelector(s);
+        if (q(".mt-solshow")) q(".mt-solshow").onclick = () => { L.showSol = true; draw(); };
+        if (q(".mt-solhide")) q(".mt-solhide").onclick = () => { if (L.play) clearInterval(L.play.t); L.play = null; L.showSol = false; draw(); };
+        if (q(".mt-solstop")) q(".mt-solstop").onclick = () => { clearInterval(L.play.t); L.play = null; draw(); };
+        if (q(".mt-solplay")) q(".mt-solplay").onclick = () => {
+          const env2 = mk(fresh(cfg.opts)); if (cfg.setup) cfg.setup(env2);
+          const L2 = live[id] = {env:env2, lines:[{t:env2.motd||"", cls:""}], showSol:true, play:{i:0}};
+          L2.play.t = setInterval(() => {
+            if (!box.isConnected || live[id]!==L2){ clearInterval(L2.play.t); return; }
+            if (L2.play.i >= cfg.solve.length){ clearInterval(L2.play.t); L2.play = null; draw(); return; }
+            const c = cfg.solve[L2.play.i++]; K.termEcho(L2.lines, env2, c, env2.prompt()); const out = env2.exec(c);
+            if (out && out.logout) L2.lines.push({t:"\n"+(env2.host||"")+" con0 is now available\n\nPress RETURN to get started.", cls:""}); else K.termOut(L2.lines, out);
+            draw();
+          }, 900);
+          draw();
+        };
+        body.querySelector(".mt-reset").onclick = () => { if (live[id] && live[id].play) clearInterval(live[id].play.t); delete live[id]; const env2 = mk(fresh(cfg.opts)); if (cfg.setup) cfg.setup(env2); live[id] = {env:env2, lines:[{t:env2.motd||"", cls:""}]}; draw(); };
       };
       draw();
     });
