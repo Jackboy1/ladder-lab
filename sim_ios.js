@@ -1251,6 +1251,7 @@ function ios2Env(opts){
     const m = !st.pending && line.match(/^(.*?)\s+\|\s*(i|in|inc|incl|inclu|includ|include|e|ex|exc|excl|exclu|exclud|exclude|b|be|beg|begi|begin|s|se|sec|sect|secti|sectio|section|c|co|cou|coun|count)\s+(.+)$/i);
     if (!m) return subExec0(line);
     const out = subExec0(m[1]);
+    if (st.history.length && st.history[st.history.length-1]===m[1]) st.history[st.history.length-1] = line;   // history keeps what was typed, "| include …" and all
     if (typeof out!=="string") return out;
     let re; try { re = new RegExp(m[3].trim()); } catch(e){ return "% Invalid regular expression"; }
     const L = out.split("\n"), k = m[2][0].toLowerCase();
