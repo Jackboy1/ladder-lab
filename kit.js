@@ -10,7 +10,13 @@ const terms = {};   // id -> {env, opts, setup, title, intro, tasks}
 const benches = {}; // id -> bench config (see bench.js)
 const qs = {};      // id -> practice question (see qtypes.js)
 const live = {};    // id -> {env, lines}  (survives re-renders during the session)
-const fresh = o => JSON.parse(JSON.stringify(o||{}));   // simulators mutate opts (e.g. opts.intfs), so each box gets its own copy
+// simulators mutate opts (e.g. opts.intfs), so each box gets its own deep copy (functions such as setup/hooks are kept)
+const fresh = o => { const c = JSON.parse(JSON.stringify(o||{}));
+  for (const [k,v] of Object.entries(o||{})){
+    if (typeof v==="function") c[k] = v;
+    else if (v && typeof v==="object" && !Array.isArray(v) && Object.values(v).some(x=>typeof x==="function")) c[k] = Object.assign({}, c[k], Object.fromEntries(Object.entries(v).filter(([,x])=>typeof x==="function")));
+  }
+  return c; };
 
 const K = {
   esc,
@@ -102,6 +108,10 @@ const K = {
     for (const l of ls){ if (l.quiz) t.quiz.push(...l.quiz.map(q=>Object.assign({lesson:l.id}, q))); if (l.cards) t.cards.push(...l.cards); }
     return t;
   },
+  // terminal line handling shared by in-lesson terminals and the bench: echo the typed line (hidden for passwords,
+  // appended to the question when answering a prompt such as [confirm]) and print any kind of engine output
+  termEcho: (L, env, v, prompt) => { if (env && env.pending){ if (!env.noEcho && L.length) L[L.length-1].t += v; } else L.push({t:(prompt||"")+v, cls:"in"}); },
+  termOut: (L, o) => { if (o==null || o==="") return; if (o.clear){ L.length = 0; return; } if (typeof o==="string"){ L.push({t:o, cls:""}); return; } if (o.text) L.push({t:o.text, cls:""}); if (o.ask) L.push({t:o.ask, cls:"ask"}); },
   _terms: () => terms,   // for tools/validate.js
   _benches: () => benches,
   _qs: () => qs,
@@ -150,13 +160,16 @@ const K = {
           <div class="termbar"><input autocomplete="off" spellcheck="false" placeholder="${esc(env.prompt())}" aria-label="command"><button class="btn">Run</button><button class="btn ghost sm mt-reset" title="Start this terminal again">Reset</button></div>`;
         const term = body.querySelector(".mt-term"); term.scrollTop = term.scrollHeight;
         const input = body.querySelector("input");
-        const run = () => { const cmd = input.value; if (!cmd.trim()) return;
-          L.lines.push({t: env.prompt()+cmd, cls:"in"});
+        const run = () => { const cmd = input.value; if (!cmd.trim() && !env.pending && !env.connect) return;
+          K.termEcho(L.lines, env, cmd, env.prompt());
           const out = env.exec(cmd);
-          if (out && out.clear) L.lines = []; else if (out) L.lines.push({t:out, cls:""});
+          if (out && out.logout) L.lines.push({t:"\n"+(env.host||"")+" con0 is now available\n\nPress RETURN to get started.", cls:""});
+          else K.termOut(L.lines, out);
           if (L.lines.length>200) L.lines = L.lines.slice(-200);
           draw(); const ni = body.querySelector("input"); if (ni) ni.focus(); };
-        input.onkeydown = e => { if (e.key==="Enter") run(); if (e.key==="ArrowUp" && env.history.length){ input.value = env.history[env.history.length-1]; e.preventDefault(); } };
+        input.onkeydown = e => { if (e.key==="Enter") run();
+          else if (e.key==="Tab" && env.complete && !env.pending){ e.preventDefault(); input.value = env.complete(input.value); }
+          else if (e.key==="ArrowUp" && env.history.length){ input.value = env.history[env.history.length-1]; e.preventDefault(); } };
         body.querySelector(".btn").onclick = run;
         body.querySelector(".mt-reset").onclick = () => { delete live[id]; const env2 = mk(fresh(cfg.opts)); if (cfg.setup) cfg.setup(env2); live[id] = {env:env2, lines:[{t:env2.motd||"", cls:""}]}; draw(); };
       };

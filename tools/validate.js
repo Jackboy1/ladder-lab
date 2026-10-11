@@ -72,6 +72,9 @@ for (const t of LL.tracks){
       for (const ty of ["multi","order","match","fill"]) if (!types.has(ty)) warn(`${where}: quiz has no "${ty}" question`);
       if (!qz.some(q=>q.ex)) warn(`${where}: quiz has no exhibit (ex) question`);
       if (qz.length < 12) warn(`${where}: only ${qz.length} quiz questions (aim for 12–15)`);
+      const lv = q => q.lvl===3?3:q.lvl===2?2:1, n2 = qz.filter(q=>lv(q)>=2).length, n3 = qz.filter(q=>lv(q)===3).length;
+      if (qz.length && n2/qz.length < 0.4) warn(`${where}: only ${n2}/${qz.length} quiz questions are Exam/Stretch level (lvl 2–3) — aim for 40%+`);
+      if (n3 < 2) warn(`${where}: only ${n3} Stretch (lvl 3) questions — aim for 2+`);
       if (!/class="mt[" ]|class="kreveal"/.test(l.html)) warn(`${where}: no hands-on (bench, terminal or exercise)`);
       if (!/class="kc kq"/.test(l.html)) warn(`${where}: no inline K.q practice question`);
     }
@@ -109,7 +112,7 @@ LL.interview.forEach((iv,i)=>{ const where = `interview #${i+1}`;
 // exams: each track's question pool must be big enough for a meaningful exam
 for (const t of LL.tracks){ if ((t.quiz||[]).length < 10) warn(`${t.id}: only ${t.quiz.length} quiz questions — exam pool is thin`); }
 const qtext = new Map();
-for (const t of LL.tracks) for (const q of (t.quiz||[])){ const k = q.q.trim().toLowerCase(); if (qtext.has(k)) warn(`duplicate quiz question in ${t.id} and ${qtext.get(k)}: "${q.q.slice(0,60)}"`); else qtext.set(k, t.id); }
+for (const t of LL.tracks) for (const q of (t.quiz||[])){ const k = q.q.trim().toLowerCase() + "|" + JSON.stringify(q.o||q.items||q.pairs||q.fields||""); if (qtext.has(k)) warn(`duplicate quiz question in ${t.id} and ${qtext.get(k)}: "${q.q.slice(0,60)}"`); else qtext.set(k, t.id); }
 
 for (const [id,lab] of Object.entries(LL.labs)){
   if (!SIM || !SIM[lab.env+"Env"]){ err(`lab ${id}: unknown env ${lab.env}`); continue; }

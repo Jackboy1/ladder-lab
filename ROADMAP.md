@@ -21,9 +21,9 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 ⬜ M7 Security for support: malware removal, MFA, phishing, BitLocker, backups, least privilege
 ⬜ M8 Number systems: binary, hex, how computers count (shared with CCNA M2)
 
-**2. Networking — CCNA 200-301 v1.1**
-✅ M1 How networks work — what a network is, devices, cables, topologies, OSI/TCP-IP, encapsulation, TCP/UDP, first IOS session
-⬜ M2 Ethernet switching & ARP — MAC learning and the MAC table, flooding, broadcast & collision domains, ARP, switch basics and verification
+**2. Networking — CCNA 200-301** (v1.1 until 2 Feb 2027; v2.0 from 3 Feb 2027 — same code, more troubleshooting, new AI-in-network-operations domain ~10%: covered as it lands)
+✅ M1 How networks work — what a network is, devices, cables, topologies, OSI/TCP-IP, encapsulation, TCP/UDP, first IOS session · Core/Exam/Stretch quizzes · Module 1 challenge
+🔨 M2 Ethernet switching & ARP — MAC learning and the MAC table, flooding, broadcast & collision domains, ARP, switch basics and verification
 ⬜ M3 Binary, IPv4 addressing & subnetting — binary/hex, address classes & private ranges, masks & CIDR, subnetting the fast way, VLSM, drills
 ⬜ M4 VLANs, trunks & Spanning Tree — VLANs, 802.1Q trunks, DTP/VTP, inter-VLAN routing (ROAS, SVIs), STP/RSTP elections & states, PortFast/BPDU Guard/Root Guard/Loop Guard, EtherChannel (LACP/PAgP)
 ⬜ M5 Routing — routing table logic, static & default routes, longest-prefix match, administrative distance, OSPF (single/multi-area, DR/BDR, cost, troubleshooting), RIP/EIGRP overview, FHRP/HSRP
@@ -64,9 +64,15 @@ This mode is how you get that proof before your first role:
   checklist of what a hiring manager looks for.
 - **Interview loop.** Mock interviews pull from the topics *and* the incidents you've personally handled.
 
+## Part D — Certification roadmap
+✅ **Certs tab** — each certification on the path, with verdict, timing notes, the courses that prepare you, and a
+readiness meter (course progress + best Hard-mode exam). Aligned with the Infrastructure Ladder plan; exam facts
+checked Oct 2026 (CCNA v2.0 from Feb 2027, DevNet Associate → CCNA Automation, AWS Advanced Networking retiring).
+
 ## Part C — Simulator upgrades
 
-Also shipped: CCNA-style question types (multi-select, ordering, matching, fill-in, exhibits) in quizzes, the timed exam and lessons.
+Also shipped: CCNA-style question types (multi-select, ordering, matching, fill-in, exhibits) in quizzes, the timed exam and lessons;
+Core / Exam / Stretch difficulty tags and a Hard-mode exam; module challenge benches; Cisco IOS engine v2 (`sim_ios.js`).
 
 
 1. **Service Desk simulator** — a simulated Windows/Active Directory admin console (reset passwords, unlock accounts,

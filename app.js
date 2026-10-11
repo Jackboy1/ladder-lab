@@ -62,7 +62,7 @@ function trackProgress(t){
 function trackComplete(t){ const p=trackProgress(t); return p.total>0 && p.done>=p.total; }
 
 /* ---------- shell ---------- */
-const TABS = [["home","Dashboard"],["tracks","Courses"],["labs","Labs"],["tickets","Tickets"],["interview","Interview"],["career","Career"],["cards","Flashcards"],["settings","Settings"]];
+const TABS = [["home","Dashboard"],["tracks","Courses"],["labs","Labs"],["tickets","Tickets"],["interview","Interview"],["certs","Certs"],["career","Career"],["cards","Flashcards"],["settings","Settings"]];
 let route = {view:"home"};
 function go(view, params){ route = Object.assign({view}, params||{}); render(); window.scrollTo(0,0); try{ location.hash = view; }catch(e){} }
 window.GO = go;
@@ -95,6 +95,7 @@ function render(){ clearLLTimers(); tabs(); statline();
   if (v==="drill") return drillView();
   if (v==="exam") return examView();
   if (v==="career") return careerView();
+  if (v==="certs") return certsView();
   if (v==="codelab") return codelabView(route.tid, route.cid);
   if (v==="tickets") return ticketsView();
   if (v==="ticket") return ticketView(route.id);
@@ -176,9 +177,13 @@ function tracksView(){
   route.group="tracks";
   main.innerHTML = `<h1>Courses</h1><p class="muted small">In career order. Each course: in-depth lessons → quiz → flashcards → hands-on labs. Finish everything to earn its certificate.</p>
   <div class="card"><h2>Exam simulator</h2>
-    <p class="small muted">20 mixed questions under a 25-minute countdown, exam conditions: no feedback until the end. Best: <span class="num">${P.examBest||0}%</span> · sat: <span class="num">${P.exams||0}</span></p>
+    <p class="small muted">Exam conditions: a countdown and no feedback until the end. Questions are tagged <span class="qt-lvl l1">Core</span> <span class="qt-lvl l2">Exam</span> <span class="qt-lvl l3">Stretch</span>. Best: <span class="num">${P.examBest||0}%</span> · sat: <span class="num">${P.exams||0}</span></p>
     <div class="btnrow">
       <select id="examtrack" class="txt" style="max-width:260px"><option value="">All courses (mixed)</option>${LL.tracks.filter(t=>t.quiz.length>=8).map(t=>`<option value="${t.id}">${esc(t.title)}</option>`).join("")}</select>
+      <select id="exammode" class="txt" style="max-width:300px">
+        <option value="std">Standard — 20 questions, 25 min, pass 70%</option>
+        <option value="hard">Hard mode — 30 Exam/Stretch questions, 40 min, pass 80%</option>
+      </select>
       <button class="btn" id="startexam">Start exam</button>
     </div></div>` +
   LL.phases.map(ph=>{
@@ -195,7 +200,7 @@ function tracksView(){
       </div>`;
     }).join("")+`</div>`;
   }).join("");
-  const se=$("#startexam"); if(se) se.onclick=()=>{ EXAM=null; go("exam",{track:$("#examtrack").value}); };
+  const se=$("#startexam"); if(se) se.onclick=()=>{ EXAM=null; go("exam",{track:$("#examtrack").value, mode:$("#exammode").value}); };
 }
 
 function trackView(id){
@@ -327,22 +332,25 @@ function quizView(id){
 }
 
 /* ---------- exam simulator ---------- */
-function examPool(trackId, n){
+function examPool(trackId, n, hard){
   let qs = [];
   for (const t of LL.tracks){
     if (trackId && t.id!==trackId) continue;
     t.quiz.forEach(q=>qs.push(Object.assign({track:t.title}, q)));
   }
+  if (hard){ const tough = qs.filter(q=>QT.level(q)>=2); if (tough.length>=10) qs = tough; }
   return qs.sort(()=>Math.random()-.5).slice(0, n||20);
 }
 window.examPool = examPool;
 let EXAM=null;
+window.LLNewExam = (track, mode) => { EXAM=null; go("exam", {track:track||"", mode:mode||"std"}); };
 function fmtTime(s){ return Math.floor(s/60)+":"+String(s%60).padStart(2,"0"); }
 function examView(){
   route.group="tracks";
   clearLLTimers();
   if (!EXAM){
-    EXAM = { qs: examPool(route.track, 20), i:0, picks:{}, secs: 25*60, done:false, track:route.track };
+    const hard = route.mode==="hard";
+    EXAM = { qs: examPool(route.track, hard?30:20, hard), i:0, picks:{}, secs: (hard?40:25)*60, done:false, track:route.track, mode:route.mode, pass: hard?80:70 };
   }
   if (!EXAM.done){
     const tm = setInterval(()=>{
@@ -360,12 +368,15 @@ function examView(){
     const score = qs.filter((q,i)=>QT.grade(q, EXAM.picks[i])).length;
     const pct = Math.round(score/qs.length*100);
     P.exams=(P.exams||0)+1; if (pct>(P.examBest||0)) P.examBest=pct;
-    if (pct>=70) addPoints(40,"exam passed "+pct+"%"); else { touchDay(); saveP(); statline(); }
+    if (EXAM.track){ P.examTrack = P.examTrack||{}; const k = EXAM.track+":"+(EXAM.mode||"std"); if (pct>(P.examTrack[k]||0)) P.examTrack[k] = pct; }
+    const pass = EXAM.pass||70;
+    if (pct>=pass) addPoints(EXAM.mode==="hard"?80:40,"exam passed "+pct+"%"); else { touchDay(); saveP(); statline(); }
     const misses = qs.map((q,i)=>({q,i})).filter(x=>!QT.grade(x.q, EXAM.picks[x.i]));
     main.innerHTML = `<div class="card" style="text-align:center">
       <div class="eyebrow">Exam result${EXAM.secs<=0?" · time expired":""}</div>
       <div class="bignum num">${pct}%</div>
-      <p class="num">${score}/${qs.length} correct · ${pct>=70?"<b>PASS</b>":"below the 70% line"} · ${fmtTime(Math.max(0,EXAM.secs))} remaining</p>
+      <p class="num">${score}/${qs.length} correct · ${pct>=pass?"<b>PASS</b>":`below the ${pass}% line`} · ${fmtTime(Math.max(0,EXAM.secs))} remaining${EXAM.mode==="hard"?" · hard mode":""}</p>
+      <p class="small muted">${[1,2,3].map(l=>{ const s = qs.filter(q=>QT.level(q)===l); return s.length?`${QT.LEVELS[l][0]}: ${s.filter(q=>QT.grade(q, EXAM.picks[qs.indexOf(q)])).length}/${s.length}`:""; }).filter(Boolean).join(" · ")}</p>
     </div>
     ${misses.length?`<div class="card"><h2>Review your ${misses.length} miss${misses.length>1?"es":""}</h2>
       ${misses.map(({q,i})=>`<div class="callout warn" style="margin:.8rem 0">
@@ -376,9 +387,9 @@ function examView(){
         <div class="small" style="margin-top:4px">${esc(q.why)}</div></div>`).join("")}
       <p class="small muted">The misses ARE the syllabus — hit the matching flashcard decks before retaking.</p></div>`
       :`<div class="card"><h2>Clean sheet.</h2><p class="small muted">Full marks under the clock — that's interview-day form.</p></div>`}
-    <div class="btnrow"><button class="btn" onclick="(function(){EXAM=null;GO('exam',{track:'${EXAM.track||""}'})})()">Retake</button>
+    <div class="btnrow"><button class="btn" onclick="LLNewExam('${EXAM.track||""}','${EXAM.mode||"std"}')">Retake</button>
     <button class="btn ghost" onclick="GO('tracks')">Back to courses</button></div>`;
-    const ex=EXAM; EXAM={done:true, qs:ex.qs, picks:ex.picks, secs:ex.secs, track:ex.track};
+    const ex=EXAM; EXAM={done:true, qs:ex.qs, picks:ex.picks, secs:ex.secs, track:ex.track, mode:ex.mode, pass:ex.pass};
   }
   window.__finishExam = finishExam;
   if (EXAM.done) return finishExam();
@@ -868,6 +879,33 @@ function drillView(){
 }
 
 /* ---------- career ---------- */
+function certReadiness(c){
+  const ts = c.tracks.map(id=>LL.tracks.find(t=>t.id===id)).filter(Boolean);
+  if (!ts.length) return null;
+  const course = Math.round(ts.reduce((a,t)=>a+trackProgress(t).pct,0)/ts.length);
+  const hard = Math.max(0, ...ts.map(t=>(P.examTrack||{})[t.id+":hard"]||0));
+  const score = Math.round(course*0.6 + hard*0.4);
+  return { course, hard, score, ready: course>=90 && hard>=80 };
+}
+function certsView(){
+  route.group="certs";
+  main.innerHTML = `<h1>Certification roadmap</h1>
+  <p class="muted small">In the order of your Infrastructure Ladder. Readiness = 60% course progress + 40% your best <b>Hard-mode</b> exam on the matching course. Book the exam when a card says <b>Ready to book</b> (course 90%+ and Hard mode 80%+). Exam rules change — always confirm on the vendor's page before paying.</p>
+  ${LL.certStages.map(stage=>`<h2 style="margin-top:18px">${esc(stage)}</h2><div class="grid2">${LL.certs.filter(c=>c.stage===stage).map(c=>{ const r = certReadiness(c);
+    return `<div class="card cert-card ${c.retired?"retired":""}">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap"><h3 style="margin:0">${esc(c.name)}</h3><span class="tag ${c.retired?"warn":/^YES|STRONG|CHEAP/.test(c.verdict)?"acc":""}">${esc(c.verdict)}</span></div>
+      <div class="small muted">${esc(c.vendor)} · ${esc(c.code)}${c.hands&&c.hands!=="—"?` · ${esc(c.hands)}`:""}</div>
+      <p class="small">${esc(c.why)}</p>
+      ${c.timing?`<div class="callout small"><b>Timing:</b> ${esc(c.timing)}</div>`:""}
+      ${r && !c.retired?`<div class="small" style="margin-top:6px"><b>Readiness ${r.score}%</b> ${r.ready?'<span class="tag ok">Ready to book</span>':""}</div><div class="bar" style="margin:4px 0"><i style="width:${r.score}%"></i></div>
+        <div class="small muted">Course ${r.course}% · best Hard-mode exam ${r.hard}%</div>
+        <div class="btnrow">${c.tracks.map(id=>{ const t = LL.tracks.find(x=>x.id===id); return t?`<button class="btn sm ghost" onclick="GO('track',{id:'${id}'})">${esc(t.title)}</button>`:""; }).join("")}
+        <button class="btn sm" onclick="LLNewExam('${c.tracks[0]}','hard')">Hard-mode exam</button></div>`
+      : r ? `<div class="btnrow">${c.tracks.map(id=>{ const t = LL.tracks.find(x=>x.id===id); return t?`<button class="btn sm ghost" onclick="GO('track',{id:'${id}'})">Study it in ${esc(t.title)}</button>`:""; }).join("")}</div>`
+      :`<div class="small muted" style="margin-top:6px">The Ladder Lab course for this cert is planned (see ROADMAP).</div>`}
+    </div>`; }).join("")}</div>`).join("")}`;
+}
+
 function careerView(){
   route.group="career";
   const C = window.CAREER;
@@ -977,6 +1015,7 @@ function selfTest(){
   ["linux","ios","git","k8s"].forEach(env=>routes.push({view:"play",env}));
   LL.tickets.forEach(tk=>routes.push({view:"ticket",id:tk.id}));
   routes.push({view:"drill"},{view:"mock",topic:"",timed:false});
+  for (const t of LL.tracks) routes.push({view:"exam",track:t.id,mode:"hard"});
   const problems = [];
   for (const r of routes){
     const label = JSON.stringify(r);

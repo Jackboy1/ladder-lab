@@ -45,4 +45,6 @@ lesson kit in `kit.js`). What's built and what's next is in **[ROADMAP.md](ROADM
 - `node tools/validate.js` — loads every data file like the browser does and fails on broken JS, wrong quiz/quick-check
   answers, unbalanced HTML, code-lab model solutions that fail their own checks, unsolvable in-lesson terminals, and
   incomplete tickets/interview questions. `--words` prints a per-lesson depth report.
+- `node tools/engine_test.js` — regression tests for the Cisco IOS engine and the hands-on bench (MAC learning, ARP, VLANs,
+  routing, SSH, duplex mismatch, reload, CLI parsing).
 - Open the site with `#selftest` on the end of the URL — it renders every page in the app and lists anything broken.

@@ -22,10 +22,13 @@ function initial(q){
   if (t==="fill") return fields(q).map(()=>"");
   return null;
 }
+const LEVELS = {1:["Core","understand it"], 2:["Exam","CCNA-exam standard"], 3:["Stretch","on-the-job / beyond the exam"]};
+const level = q => q.lvl===3 ? 3 : q.lvl===2 ? 2 : 1;
+function badge(q){ const l = level(q); return `<span class="qt-lvl l${l}" title="${LEVELS[l][1]}">${LEVELS[l][0]}</span>`; }
 function prompt(q){
   const t = type(q);
   const lead = t==="multi" ? `Choose ${q.a.length}.` : t==="order" ? "Put these in the correct order (use the arrows)." : t==="match" ? "Match each item on the left with the right answer." : t==="fill" ? "Type your answer." : "";
-  return `${q.ex?`<pre class="qt-ex"><code>${esc(q.ex)}</code></pre>`:""}<h2>${esc(q.q)}</h2>${lead?`<p class="small muted">${lead}</p>`:""}`;
+  return `${badge(q)}${q.ex?`<pre class="qt-ex"><code>${esc(q.ex)}</code></pre>`:""}<h2>${esc(q.q)}</h2>${lead?`<p class="small muted">${lead}</p>`:""}`;
 }
 // render the answer area. resp = current response; reveal = show right/wrong marking
 function body(q, resp, reveal){
@@ -99,6 +102,7 @@ function respText(q, resp){
 function problem(q){
   const t = type(q);
   if (typeof q.q!=="string" || !q.q.trim()) return "missing question text";
+  if (q.lvl!=null && ![1,2,3].includes(q.lvl)) return "lvl must be 1 (Core), 2 (Exam) or 3 (Stretch)";
   if (t==="mcq"){ if (!Array.isArray(q.o)||q.o.length<2) return "needs 2+ options"; if (!(Number.isInteger(q.a)&&q.a>=0&&q.a<q.o.length)) return `answer index ${q.a} out of range`; return null; }
   if (t==="multi"){ if (!Array.isArray(q.o)||q.o.length<3) return "multi needs 3+ options"; if (!Array.isArray(q.a)||q.a.length<2) return "multi needs 2+ correct answers in a[]"; if (q.a.some(i=>!(Number.isInteger(i)&&i>=0&&i<q.o.length))) return "multi answer index out of range"; if (new Set(q.a).size!==q.a.length) return "multi has a repeated answer"; if (q.a.length>=q.o.length) return "multi: not every option can be correct"; return null; }
   if (t==="order"){ if (!Array.isArray(q.items)||q.items.length<3) return "order needs 3+ items"; if (new Set(q.items).size!==q.items.length) return "order items must be unique"; return null; }
@@ -106,5 +110,5 @@ function problem(q){
   if (t==="fill"){ const f = fields(q); if (!f.length || f.some(x=>!Array.isArray(x.a)||!x.a.length)) return "fill needs accepted answers a:[...]"; return null; }
   return "unknown question type "+t;
 }
-window.QT = { type, initial, prompt, body, wire, answered, grade, answerText, respText, problem };
+window.QT = { type, initial, prompt, body, wire, answered, grade, answerText, respText, problem, level, LEVELS };
 })();

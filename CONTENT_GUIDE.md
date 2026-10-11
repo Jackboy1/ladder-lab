@@ -4,6 +4,12 @@ The bar: someone with **zero experience** can start at lesson 1 and keep going, 
 experienced still learns from it. Depth of a top paid course, explained more patiently, with
 hands-on practice inside the lesson and the "what this looks like at work" layer most courses skip.
 
+**Every lesson, every module, no exceptions** (the owner approved the CCNA Module 1 format and checks for it):
+depth with patient step-by-step explanation · diagrams and visual representations · worked examples ·
+"Try it yourself" terminals and hands-on benches · on-the-job scenarios and case studies · interview corner ·
+hints, did-you-know, myth vs fact, do/don't, when-to-use-what, exam tips, memory aids · mixed-type quizzes at
+Core / Exam / Stretch difficulty · flashcards. If a lesson is missing any of these, it isn't finished.
+
 ## Where content lives
 
 - `kit.js` — the building blocks (`K.*`) used inside lesson HTML.
@@ -67,9 +73,22 @@ real exam (see `qtypes.js`): mostly `mcq`, plus at least one each of `multi` (ch
 `K.q({...})` practice questions of the non-MCQ types in the lesson body. Quiz and card text is plain text (no HTML).
 They merge into the course quiz, exam pool and flashcard deck.
 
+### Difficulty — every question carries a level
+`lvl:1` **Core** (understand it) · `lvl:2` **Exam** (CCNA/AWS exam standard: scenario, two-step reasoning,
+trap options, exhibits) · `lvl:3` **Stretch** (on-the-job: diagnose from symptoms and output, choose between
+designs, explain trade-offs). Untagged = Core. Each lesson quiz: at least **40% Exam or Stretch, and 2+ Stretch**.
+Hard-mode exams draw only Exam/Stretch questions. Don't make questions hard with trick wording — make them hard
+the way the job is hard: more realistic detail, plausible wrong answers, one more step of reasoning.
+
+### Module challenge
+The last lesson of every module ends with a **challenge bench** (`challenge:true`): a pre-broken network with
+several faults, tasks written as user complaints/outcomes ("Finance can't reach the file server"), each with an
+optional `hint`. No step-by-step instructions — the learner diagnoses with real commands.
+
 ## Writing rules
 
-- **Length:** 2,500–4,000 words of lesson prose. Space it out: short paragraphs, one idea each.
+- **Length:** 3,000–6,000 words of lesson prose (validator count). Space it out: short paragraphs, one idea each.
+  Never cut good material (scenarios, worked examples, case studies) to hit a number; trim only repetition.
 - **Never assume.** First use of any jargon → `K.g("term", "plain definition")`. Never write "simply",
   "obviously", "just", "as you know".
 - **Explain the why**, not only the what: why the design exists, what breaks without it.
@@ -148,14 +167,61 @@ K.bench({ id:"m1-office-lan", points:60, from:"CCNA M1 · lesson 1",   // id ⇒
           ["console","lap",{speed:"9600",data:"8",parity:"None",stop:"1",flow:"None"}], ["term","enable"] ] })
 ```
 Ports: switch `g1`–`g8` (RJ45, IOS `GigabitEthernet0/1`–`0/8`), `g9`–`g10` (SFP), `con`; router `g0`, `g1`, `con`;
-hosts `eth` (+ `usb` on laptops). Task helpers: `Bench.upAt(B, ref)`, `Bench.up(B, a, b)`, `Bench.linked(B, a, b)`,
-`Bench.cableType(B, ref)`, `Bench.consoleOk(B, devId)`, `Bench.pinged(B, fromId, ip)`, plus `B.devs[id].ip`,
-`B.devs[id].env` (the IOS state — see below). Links follow real rules: fibre needs matching optics and fibre type and
-correct Tx/Rx polarity; interfaces must be `no shutdown`; consoles need 9600 8N1 with no flow control.
+hub `p1`–`p4`; hosts `eth` (+ `usb` on laptops). Device kinds: `pc laptop server switch router hub`.
+
+**What the bench simulates (v2):** every NIC and interface has a MAC address; switches learn source MACs per port and
+VLAN, flood broadcasts/unknown unicasts and forward known unicasts; hubs repeat everything out every port; hosts,
+routers and switch SVIs ARP for the next hop and keep ARP caches; routers route between connected subnets and static
+routes; frames are animated on the cables (amber = broadcast, teal = unicast) and explained step by step in a
+"What just happened on the wire" log. Links follow real rules: fibre needs matching optics, fibre type and Tx/Rx
+polarity; interfaces must be `no shutdown`; consoles need 9600 8N1 with no flow control; fixed speed/duplex on one
+end and auto on the other gives a **duplex mismatch** (link up, CRC/runts on the full side, late collisions on the half side);
+different fixed speeds keep the link down.
+
+**PC Command Prompt:** `ipconfig`, `ipconfig /all`, `ping`, `arp -a`, `arp -d`, `ssh -l <user> <ip>` / `ssh user@ip`,
+`telnet <ip>`, `cls`. SSH/Telnet open a real session on the device (needs a reachable management IP and the right VTY,
+user, domain-name and RSA key config); `exit` closes it.
+
+**Pre-configured devices:** `{..., config: env => { env.exec("en"); env.exec("conf t"); ... }}` runs commands at
+creation (that config counts as saved startup-config; add `fresh:true` for an out-of-the-box device).
+`challenge:true` + tasks with `hint` = module challenge mode. `openLog:true` opens the frame log by default.
+
+Task helpers: `Bench.upAt(B, ref)`, `Bench.up(B, a, b)`, `Bench.linked(B, a, b)`, `Bench.cableType(B, ref)`,
+`Bench.consoleOk(B, devId)`, `Bench.pinged(B, fromId, ip)`, `Bench.macKnown(B, swId, mac)`, `Bench.macCount(B, swId)`,
+`Bench.arpHas(B, devId, ip)`, `Bench.remoteTo(B, pcId)` (IP of a logged-in ssh/telnet session), `Bench.session(B, pcId)`
+(`{host, proto:"ssh"|"telnet", user}` after login), `Bench.tried(B, pcId, /regex/)` (did the learner run that PC command), `Bench.mismatch(B, a, b)`,
+never read `B.remote` / `B.events` directly,
+plus `B.devs[id].ip / .mac` and `B.devs[id].env` (the IOS state — see below). Solve actions: `plug unplug insert remove
+flip ip pc power console term` (`["term",""]` answers a `[confirm]` with Enter; `["pc","pc1","Str0ng!"]` answers an ssh password).
 
 ## Simulator commands available to `K.term`
 
-**Cisco IOS (`env:"ios"`)** — `opts: {host, kind:"router"|"switch", intfs, strictPing, neighbor, motd}`.
+**Cisco IOS v2 (`env:"ios2"`) — use this for all new CCNA content** (and it is what bench switches/routers run).
+`opts: {kind:"switch"|"router", host, model}`. It behaves like real IOS: abbreviations (`sh ip int br`), `?` help,
+Tab completion, `% Invalid input detected at '^' marker.` with the caret, `% Incomplete command.`, `% Ambiguous command`,
+the `Translating "typo"...domain server` trap (and `no ip domain-lookup`), `[confirm]` prompts, `Password:` prompts with
+no echo, `do` in config modes, global commands typed in a sub-mode drop back to global, reload loses unsaved changes.
+State for `done(env)`: `env.mode` (`user|priv|config|config-if|config-line|config-vlan`), `env.host`, `env.enableSecret`,
+`env.enablePassword`, `env.servicePwEnc`, `env.banner`, `env.lines.con/vty.{password,login,loginLocal,transport,timeout,sync}`,
+`env.users[name].{secret,password}`, `env.domain`, `env.domainLookup`, `env.rsa` (bits), `env.sshVer`, `env.defaultGw`,
+`env.routes`, `env.cdpRun`, `env.lldpRun`, `env.vlans[id]` (name), `env.intfs[name].{ip,mask,shut,desc,mode,vlan,allowed,native,speed,duplex,cdp,mac}`
+(includes `Vlan1` SVI on switches), `env.savedOnce`, `env.startup`, `env.history`, `env.sshReady()`.
+Exec: `enable disable exit logout ping traceroute show… copy running-config startup-config write [memory] erase startup-config
+reload clear mac address-table dynamic clear counters terminal length`. Show: `running-config startup-config version
+ip interface brief interfaces [status|<if>] vlan [brief] mac address-table [dynamic|address|interface|vlan] cdp neighbors [detail]
+lldp neighbors arp ip arp ip route history users ip ssh clock`.
+Global config: `hostname enable secret|password service password-encryption banner motd #…# interface <if>|range|vlan N
+vlan N (name) no vlan line console 0 line vty 0 4|0 15 username X secret|password Y ip domain-name ip domain-lookup
+crypto key generate rsa [modulus N] ip ssh version 2 ip default-gateway ip route cdp run lldp run` (and `no` forms).
+Interface: `description shutdown no shutdown ip address speed duplex switchport mode access|trunk switchport access vlan
+switchport trunk allowed vlan [add|remove] list switchport trunk native vlan switchport nonegotiate cdp enable`.
+Line: `password login login local no login transport input ssh|telnet|all|none exec-timeout logging synchronous`.
+Also: output modifiers `show … | include|exclude|begin|section <regex>`, `reload in N` / `reload cancel` / `show reload`,
+`show users` (lists live SSH/Telnet sessions on a bench), `%SYS-5-CONFIG_I` after leaving config mode, and switch
+running-configs show `line vty 0 4` and `line vty 5 15` blocks like a real Catalyst.
+Solve lists may include `""` to answer a `[confirm]` or default prompt.
+
+**Cisco IOS v1 (`env:"ios"`)** — the older, simpler engine used by Module 1 and the classic labs. — `opts: {host, kind:"router"|"switch", intfs, strictPing, neighbor, motd}`.
 State you can test in `done(env)`: `env.mode` (`user|priv|config|config-if|config-vlan|config-router`),
 `env.host`, `env.enableSecret`, `env.savedOnce`, `env.intfs["GigabitEthernet0/1"].{ip,mask,shut,vlan,mode,desc}`,
 `env.vlans`, `env.history` (every command typed), `env.pinged[ip]`, `env.staticRoutes`, `env.ospf`.
