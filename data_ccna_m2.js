@@ -1141,7 +1141,7 @@ ${K.check({q:"show interfaces status shows a modern PC's port as 'a-half a-100'.
 <h3>Hands-on: find and fix the mismatch</h3>
 <p>This is the Ikoyi office. The scan server on Gi0/5 was replaced last month; the new one is on auto, but the switch port still has the old server's fixed settings. Console in, prove the mismatch, fix it and verify.</p>
 ${K.bench({id:"m2-duplex-mismatch", points:80, from:"CCNA · Module 2 · lesson 3", title:"the slow print server", viewBox:"0 0 760 370",
-  intro:"Click switch port 5 to inspect the link (red light: up, but mismatched). Tray → <b>Console</b> from the laptop's <b>USB</b> to the switch's <b>CON</b>, then <b>Terminal app (PuTTY)</b> under the laptop.",
+  intro:"Click switch port 5 to inspect the link. Its light is green — a duplex mismatch doesn't show on the LED, which is exactly what makes it sneaky; the port inspector and the counters give it away. Tray → <b>Console</b> from the laptop's <b>USB</b> to the switch's <b>CON</b>, then <b>Terminal app (PuTTY)</b> under the laptop.",
   devices:[
     {id:"sw", kind:"switch", label:"SW-2F", model:"Catalyst 9200 · 2nd floor", x:300, y:30,
       config:env=>{ env.exec("enable"); env.exec("configure terminal"); env.exec("interface g0/2"); env.exec("description ACCTS-PC"); env.exec("interface g0/5"); env.exec("description PRINT-SRV"); env.exec("speed 100"); env.exec("duplex full"); env.exec("end"); }},
@@ -1155,7 +1155,7 @@ ${K.bench({id:"m2-duplex-mismatch", points:80, from:"CCNA · Module 2 · lesson 
     {text:"Console into SW-2F (laptop USB → switch CON, PuTTY at 9600 8N1, no flow control)", done:B=>Bench.consoleOk(B,"sw")},
     {text:"Run <code>show interfaces status</code>. Which port has fixed values with no <i>a-</i> prefix?", done:B=>B.devs.sw.env.history.some(h=>/^\s*(do\s+)?sh\w*\s+int\w*\s+st/i.test(h))},
     {text:"Run <code>show interfaces g0/5</code> and find the CRC and runt counters on this full-duplex side", done:B=>B.devs.sw.env.history.some(h=>/^\s*(do\s+)?sh\w*\s+int\w*\s+g\w*\s*0\/5\s*$/i.test(h))},
-    {text:"Fix it: on Gi0/5 set <code>speed auto</code> and <code>duplex auto</code> so both ends negotiate (the light turns green)", done:B=>{ const i=B.devs.sw.env.intfs["GigabitEthernet0/5"]; return i.speed==="auto" && i.duplex==="auto" && Bench.upAt(B,"srv:eth") && !Bench.mismatch(B,"srv:eth","sw:g5"); }},
+    {text:"Fix it: on Gi0/5 set <code>speed auto</code> and <code>duplex auto</code> so both ends negotiate again (<code>show interfaces status</code> shows a-full and a-1000)", done:B=>{ const i=B.devs.sw.env.intfs["GigabitEthernet0/5"]; return i.speed==="auto" && i.duplex==="auto" && Bench.upAt(B,"srv:eth") && !Bench.mismatch(B,"srv:eth","sw:g5"); }},
     {text:"Verify with <code>show interfaces status</code> again — Gi0/5 should read <i>a-full a-1000</i>", done:B=>{ const h=B.devs.sw.env.history; let fix=-1, sh=-1; h.forEach((x,k)=>{ if(/^\s*(speed|duplex)\s+a/i.test(x)) fix=k; if(/^\s*(do\s+)?sh\w*\s+int\w*\s+st/i.test(x)) sh=k; }); return fix>-1 && sh>fix && !Bench.mismatch(B,"srv:eth","sw:g5"); }},
     {text:"Save the configuration, then from ACCTS-PC <code>ping 10.20.0.30</code> to confirm the server is reachable", done:B=>B.devs.sw.env.savedOnce && Bench.pinged(B,"pc1","10.20.0.30")},
   ],

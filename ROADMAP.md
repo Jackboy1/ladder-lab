@@ -70,17 +70,19 @@ readiness meter (course progress + best Hard-mode exam). Aligned with the Infras
 checked Oct 2026 (CCNA v2.0 from Feb 2027, DevNet Associate → CCNA Automation, AWS Advanced Networking retiring).
 
 ## Part E — Next big builds (from the owner's testing)
-- ⬜ **Topology builder (sandbox):** a blank canvas with a device palette — routers, L2/L3 switches, access points, PCs,
-  servers, printers, firewalls, an ISP/Internet cloud — drag them on, cable them, name them, configure them, save and
-  reload your topology. Starter templates: small office/SOHO, two-tier campus, three-tier campus, branch + HQ over WAN,
-  data-centre spine-leaf. Built on the bench engine so everything you build really works (ARP, MAC learning, routing).
+- ✅ **Topology builder (sandbox)** — Labs → Topology builder: palette (router, L2 switch, multilayer switch, hub, PC,
+  laptop, server, printer, Internet/ISP), drag to place, cable from the tray, CLI/IP settings/Command Prompt on each
+  device, rename/delete, autosave, named saves, export/import. Templates: small office, two-tier campus, three-tier
+  campus, HQ + branch WAN, spine-leaf data centre. ⬜ Still to add to the palette: access points + wireless clients,
+  firewalls (needs the wireless and ACL/NAT engine work).
 - ⬜ **Wireless:** access points and wireless clients on the bench — SSIDs, bands/channels, WPA2/WPA3 PSK vs Enterprise,
   autonomous vs controller-based (WLC) and how APs look/mount in real offices and campuses (CCNA M9).
 - ⬜ **Routing protocols in the engine:** OSPF adjacencies and LSAs for Module 5, then **BGP** — eBGP to an ISP, AS
   numbers, path selection basics, and how it underpins internet edges and AWS Direct Connect/VPN (taught after CCNA as
   part of the cloud-networking track; BGP basics also appear in CCNP ENCOR).
-- ⬜ **VLANs, trunks and Spanning Tree on the bench** for Module 4 (802.1Q tagging, root bridge election, blocked ports,
-  a real broadcast storm when STP is off).
+- ✅ **VLANs, trunks, Spanning Tree and EtherChannel on the bench** — 802.1Q tags on the wire, DTP, native/allowed
+  VLANs, router-on-a-stick, SVIs, PVST/Rapid PVST+ elections with real blocked ports, a live broadcast storm when STP
+  is off, BPDU guard err-disable, LACP/PAgP/on bundles.
 - ✅ **Worked solutions everywhere:** every bench, in-lesson terminal and classic lab has "Show solution" and a
   step-by-step "Watch it / Type it for me" player; watching never awards points. ✅ Back button + browser history.
 

@@ -70,7 +70,7 @@ let navDepth = 0;
 function go(view, params){ route = Object.assign({view}, params||{}); try{ history.pushState({route, depth: ++navDepth}, "", "#"+encodeRoute(route)); }catch(e){} render(); window.scrollTo(0,0); }
 window.addEventListener("popstate", e => { const st = e.state; route = (st && st.route) ? Object.assign({}, st.route) : decodeRoute((location.hash||"").slice(1)); navDepth = st && st.depth ? st.depth : 0; render(); window.scrollTo(0,0); });
 const UP = { lesson:r=>["track",{id:r.id}], quiz:r=>["track",{id:r.id}], track:()=>["tracks"], cardsession:()=>["cards"], cert:r=>["track",{id:r.id}], exam:()=>["tracks"],
-  lab:()=>["labs"], bench:()=>["labs"], play:()=>["labs"], drills:()=>["labs"], drill:()=>["labs"], codelab:r=>["track",{id:r.tid}], ticket:()=>["tickets"], mock:()=>["interview"] };
+  lab:()=>["labs"], bench:()=>["labs"], builder:()=>["labs"], play:()=>["labs"], drills:()=>["labs"], drill:()=>["labs"], codelab:r=>["track",{id:r.tid}], ticket:()=>["tickets"], mock:()=>["interview"] };
 window.LLBack = () => { if (navDepth>0) history.back(); else { const u = UP[route.view]; u ? go(...u(route)) : go("home"); } };
 window.GO = go;
 
@@ -101,6 +101,7 @@ function renderView(){ clearLLTimers(); tabs(); statline();
   if (v==="play") return playView(route.env);
   if (v==="bench") return benchView(route.id);
   if (v==="drills") return drillsView(route.types);
+  if (v==="builder") return builderView();
   if (v==="drill") return drillView();
   if (v==="exam") return examView();
   if (v==="career") return careerView();
@@ -508,6 +509,7 @@ function labsView(){
   const envs = {linux:"Linux terminal", ios:"Cisco IOS console", git:"Git workstation", k8s:"Kubernetes bastion"};
   main.innerHTML = `<h1>Hands-on labs</h1>
   <p class="muted small">Real command practice in a simulated terminal — objectives tick off as your commands and device state prove them. Certificates here are earned by doing, not by guessing options.</p>
+  <div class="card"><h2>Topology builder</h2><p class="small muted">Your own sandbox: start from a template (small office, two- or three-tier campus, HQ + branch WAN, spine-leaf data centre) or a blank canvas, then add devices, cable and configure them. Saved in this browser.</p><button class="btn sm" onclick="GO('builder')">Open the topology builder</button></div>
   ${Object.keys(LL.benches).length?`<div class="card"><h2>Hands-on benches — cable it, configure it, prove it</h2>
     <p class="small muted">Real-looking switches, routers and PCs: plug in copper, fibre and console cables, fit SFP optics, set IP addresses, console in with PuTTY and ping across what you built. Tasks tick off from what you actually did.</p>
     ${Object.entries(LL.benches).map(([id,b])=>`<div class="listrow"><span class="check ${P.labsDone["bench:"+id]?"done":""}">✓</span>
@@ -626,6 +628,45 @@ function benchView(id){
   const el = $("#bnb");
   Bench.mount(el, b, b.tasks||[], ()=>LLBenchWin(id));
   $("#bnreset").onclick = ()=>el.reset();
+}
+
+/* ---------- topology builder (sandbox) ---------- */
+const TOPO_KEY = "ladderlab-topologies", TOPO_CUR = "ladderlab-topology-current";
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch(e){ return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch(e){ return false; } };
+let BUILDER = null; window.LLBuilder = () => BUILDER;
+function builderView(){
+  route.group="labs";
+  const T = (window.LLTOPO||{}).TEMPLATES || {};
+  const saved = lsGet(TOPO_KEY, {}), cur = lsGet(TOPO_CUR, null);
+  main.innerHTML = `<div class="card"><h1>Topology builder</h1>
+    <p class="small muted">Build any network you like — routers, switches, multilayer switches, hubs, PCs, servers, printers and an Internet/ISP cloud — then cable it, configure it from each device's CLI and prove it works. It runs on the same engine as the labs: ARP, MAC learning, VLANs, trunks, Spanning Tree, EtherChannel and routing all really happen. Your work autosaves in this browser.</p>
+    <div class="btnrow" style="align-items:center">
+      <select id="tpl" class="txt" style="max-width:320px">${Object.entries(T).map(([k,t])=>`<option value="${k}">${esc(t.name)}</option>`).join("")}</select>
+      <button class="btn sm" id="tplload">Start from template</button>
+      <button class="btn sm ghost" id="tsave">Save as…</button>
+      <select id="tsaved" class="txt" style="max-width:220px"><option value="">Saved topologies…</option>${Object.keys(saved).map(n=>`<option>${esc(n)}</option>`).join("")}</select>
+      <button class="btn sm ghost" id="topen">Open</button><button class="btn sm ghost" id="tdel">Delete saved</button>
+      <button class="btn sm ghost" id="texport">Export</button><button class="btn sm ghost" id="timport">Import</button>
+    </div>
+    <p class="small" id="tplabout"></p>
+    <div id="texbox" hidden><textarea class="txt" id="texta" rows="6" spellcheck="false" style="font-family:var(--mono);font-size:.78rem"></textarea><div class="btnrow"><button class="btn sm" id="texapply" hidden>Load this topology</button><button class="btn sm ghost" id="texclose">Close</button></div></div>
+    <div id="bldr"></div></div>`;
+  const about = () => { const t = T[$("#tpl").value]; $("#tplabout").textContent = t ? t.about : ""; };
+  $("#tpl").onchange = about; about();
+  const el = $("#bldr");
+  const onChange = B => lsSet(TOPO_CUR, Bench.exportTopology(B));
+  const start = cur && cur.devices && cur.devices.length ? cur : T.soho;
+  BUILDER = Bench.mount(el, Object.assign({builder:true, tray:["cat6","xover","console","mmf","smf","sfp-sx","sfp-lx"], onChange, start: cur ? "Welcome back — your last topology is restored." : "Started from the Small office template. Add, drag, cable and configure — or pick another template."}, start), [], null);
+  if (!cur) onChange(BUILDER.bench);
+  $("#tplload").onclick = () => { const t = T[$("#tpl").value]; if (!t) return; if (BUILDER.bench.order.length && !confirm("Replace the current topology with this template? (Save it first if you want to keep it.)")) return; el.load(Object.assign({}, t, {start:`Loaded "${t.name}".`})); onChange(BUILDER.bench); };
+  $("#tsave").onclick = () => { const n = (prompt("Name this topology:", "My network")||"").trim(); if (!n) return; const all = lsGet(TOPO_KEY, {}); all[n] = Bench.exportTopology(BUILDER.bench); if (!lsSet(TOPO_KEY, all)) return toast("Couldn't save — browser storage is unavailable here"); toast(`Saved "${n}"`); builderView(); };
+  $("#topen").onclick = () => { const n = $("#tsaved").value; const all = lsGet(TOPO_KEY, {}); if (!n || !all[n]) return; el.load(Object.assign({}, all[n], {start:`Opened "${n}".`})); onChange(BUILDER.bench); };
+  $("#tdel").onclick = () => { const n = $("#tsaved").value; if (!n || !confirm(`Delete the saved topology "${n}"?`)) return; const all = lsGet(TOPO_KEY, {}); delete all[n]; lsSet(TOPO_KEY, all); builderView(); };
+  $("#texport").onclick = () => { $("#texbox").hidden = false; $("#texapply").hidden = true; $("#texta").value = JSON.stringify(Bench.exportTopology(BUILDER.bench)); $("#texta").select(); };
+  $("#timport").onclick = () => { $("#texbox").hidden = false; $("#texapply").hidden = false; $("#texta").value = ""; $("#texta").placeholder = "Paste an exported topology here"; $("#texta").focus(); };
+  $("#texclose").onclick = () => { $("#texbox").hidden = true; };
+  $("#texapply").onclick = () => { try { const t = JSON.parse($("#texta").value); if (!t || !Array.isArray(t.devices)) throw 0; el.load(Object.assign({}, t, {start:"Imported."})); onChange(BUILDER.bench); $("#texbox").hidden = true; } catch(e){ toast("That isn't a Ladder Lab topology export"); } };
 }
 
 /* ---------- drills (all types, on demand) ---------- */
@@ -1056,7 +1097,7 @@ function selfTest(){
   Object.keys(LL.benches).forEach(id=>routes.push({view:"bench",id}));
   ["linux","ios","git","k8s"].forEach(env=>routes.push({view:"play",env}));
   LL.tickets.forEach(tk=>routes.push({view:"ticket",id:tk.id}));
-  routes.push({view:"drill"},{view:"mock",topic:"",timed:false},{view:"drills",types:"subnet,dec2bin,wildcard"});
+  routes.push({view:"drill"},{view:"mock",topic:"",timed:false},{view:"drills",types:"subnet,dec2bin,wildcard"},{view:"builder"});
   for (const t of LL.tracks) routes.push({view:"exam",track:t.id,mode:"hard"});
   const problems = [];
   for (const r of routes){

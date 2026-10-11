@@ -43,11 +43,13 @@ function ios2Env(opts){
   const baseMac = opts.mac || (kind==="router" ? "0c1a.2b00" : "00aa.bb00");
   const factory = () => {
     const intfs = {};
-    physical.forEach((n,i)=>{ intfs[n] = { ip:null, mask:null, shut: kind==="router", desc:"", mode: kind==="router"?"routed":"access", vlan:1, allowed:null, native:1, speed:"auto", duplex:"auto", cdp:true, mac: `${baseMac}.${String(i+1).padStart(4,"0")}` }; });
+    // Catalyst access ports default to "switchport mode dynamic auto" (DTP); router ports are routed and start shut
+    physical.forEach((n,i)=>{ intfs[n] = { ip:null, mask:null, shut: kind==="router", desc:"", mode: kind==="router"?"routed":"dynamic", dtp:"auto", nonegotiate:false, vlan:1, allowed:null, native:1, voiceVlan:null, speed:"auto", duplex:"auto", cdp:true, stp:{}, channel:null, errdis:null, mac: `${baseMac}.${String(i+1).padStart(4,"0")}` }; });
     if (kind==="switch") intfs["Vlan1"] = { ip:null, mask:null, shut:true, desc:"", mode:"svi", vlan:1, cdp:false, mac:`${baseMac}.00ff` };
     return { host: opts.host || (kind==="router"?"Router":"Switch"), enableSecret:null, enablePassword:null, servicePwEnc:false, banner:null,
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
+      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"",
       vlans: kind==="switch" ? {1:"default", 1002:"fddi-default", 1003:"token-ring-default", 1004:"fddinet-default", 1005:"trnet-default"} : {}, intfs };
   };
   const st = Object.assign(factory(), { kind, mode:"user", cur:null, curList:null, curLine:null, curVlan:null, history:[], savedOnce:false, startup:null, pending:null, noEcho:false, motd: opts.motd!=null?opts.motd:"" });
@@ -67,22 +69,84 @@ function ios2Env(opts){
     else if ("fastethernet".startsWith(p) && p.length>=2) base = "FastEthernet";
     else if ("vlan".startsWith(p) && p.length>=2) base = "Vlan";
     else if ("loopback".startsWith(p) && p.length>=2) base = "Loopback";
+    else if ("port-channel".startsWith(p) && p.length>=2) base = "Port-channel";
     if (!base) return null;
     const name = base + num;
     if (st.intfs[name]) return name;
+    const dot = num.indexOf(".");
+    if (create && base==="GigabitEthernet" && dot>0 && kind==="router"){ const parent = base + num.slice(0,dot), sid = +num.slice(dot+1);
+      if (!st.intfs[parent] || !(sid>=1 && sid<=4094)) return null;
+      st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"routed", sub:true, parent, encap:null, encapNative:false, vlan:1, cdp:false, mac: st.intfs[parent].mac }; return name; }
     if (create && base==="Vlan" && kind==="switch" && /^\d+$/.test(num) && +num>=1 && +num<=4094){ st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"svi", vlan:+num, cdp:false, mac:`${baseMac}.0${num.padStart(3,"0")}` }; return name; }
     if (create && base==="Loopback" && /^\d+$/.test(num)){ st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"routed", vlan:1, cdp:false, mac:null, loop:true }; return name; }
     return null;
   }
-  const short = n => n.replace("GigabitEthernet","Gi").replace("FastEthernet","Fa").replace("Loopback","Lo");
+  const short = n => n.replace("GigabitEthernet","Gi").replace("FastEthernet","Fa").replace("Loopback","Lo").replace("Port-channel","Po");
   const sortIf = (a,b) => { const na = a.match(/\d+/g).map(Number), nb = b.match(/\d+/g).map(Number); const ta = a.replace(/[\d\/.]+/g,""), tb = b.replace(/[\d\/.]+/g,""); if (ta!==tb) return ta==="Vlan"?1:tb==="Vlan"?-1:ta<tb?-1:1; for (let i=0;i<Math.max(na.length,nb.length);i++) if ((na[i]||0)!==(nb[i]||0)) return (na[i]||0)-(nb[i]||0); return 0; };
   const ifNames = () => Object.keys(st.intfs).sort(sortIf);
 
   /* ---------- state helpers ---------- */
-  const up = n => { const i = st.intfs[n]; if (!i || i.shut) return false; if (i.mode==="svi") return svIUp(i.vlan); if (i.loop) return true; return !!hooks.linkUp(n); };
-  function svIUp(v){ if (!st.vlans[v]) return false; return physical.some(n=>{ const i = st.intfs[n]; return !i.shut && hooks.linkUp(n) && (i.mode==="trunk" ? (!i.allowed || i.allowed.includes(v)) : i.vlan===v); }); }
+  const up = n => { const i = st.intfs[n]; if (!i || i.shut || i.errdis) return false; if (i.mode==="svi") return svIUp(i.vlan); if (i.loop) return true;
+    if (i.sub) return up(i.parent); if (n.startsWith("Port-channel")) return !!hooks.linkUp(n); return !!hooks.linkUp(n); };
+  // DTP: what a port is actually doing, given its own mode and its neighbour's (no bench ⇒ dynamic ports stay access)
+  st.opMode = n => { const i = st.intfs[n]; if (!i) return null; if (i.mode==="routed"||i.mode==="svi"||i.sub||i.loop) return "routed";
+    if (i.mode==="trunk") return "trunk"; if (i.mode==="access") return "access";
+    const pr = hooks.peer ? hooks.peer(n) : null; if (!pr || pr.kind!=="switch" || pr.mode==="routed") return "access";
+    if (pr.mode==="trunk") return pr.nonegotiate ? "access" : "trunk";
+    if (pr.mode==="dynamic") return (i.dtp==="desirable" || pr.dtp==="desirable") ? "trunk" : "access";
+    return "access"; };
+  const isTrunk = n => st.opMode(n)==="trunk";
+  function svIUp(v){ if (!st.vlans[v]) return false; return physical.some(n=>{ const i = st.intfs[n]; return !i.shut && !i.errdis && hooks.linkUp(n) && (isTrunk(n) ? (!i.allowed || i.allowed.includes(v)) : st.opMode(n)==="access" && (i.vlan===v || i.voiceVlan===v)); }); }
   const hasVlan = v => kind==="switch" && !!st.vlans[v];
   const pw = (p, type7) => p==null ? null : st.servicePwEnc ? `7 ${fakeHash(p,"7")}` : p;
+
+  const compactList = arr => { const a = [...arr].sort((x,y)=>x-y), out = []; for (let k=0;k<a.length;k++){ let j = k; while (j+1<a.length && a[j+1]===a[j]+1) j++; out.push(j>k ? `${a[k]}-${a[j]}` : `${a[k]}`); k = j; } return out.join(","); };
+  const activeVlans = () => Object.keys(st.vlans).map(Number).filter(v=>v<1002).sort((a,b)=>a-b);
+  function trunkTable(){
+    const tr = Object.keys(st.intfs).filter(n=>!st.intfs[n].channel && (physical.includes(n)||n.startsWith("Port-channel")) && isTrunk(n) && up(n)).sort(sortIf);
+    if (!tr.length) return "";
+    const modeOf = n => { const i = st.intfs[n]; return i.mode==="trunk" ? "on" : i.dtp==="desirable" ? "desirable" : "auto"; };
+    const allowed = n => st.intfs[n].allowed || [...Array(4094)].map((_,k)=>k+1);
+    const fwd = (n, v) => { const s = hooks.stpState ? hooks.stpState(n, v) : "FWD"; return s==="FWD"; };
+    let o = "Port        Mode             Encapsulation  Status        Native vlan\n";
+    for (const n of tr) o += pad(short(n),12) + pad(modeOf(n),17) + pad("802.1q",15) + pad("trunking",14) + st.intfs[n].native + "\n";
+    o += "\nPort        Vlans allowed on trunk\n"; for (const n of tr) o += pad(short(n),12) + compactList(allowed(n)) + "\n";
+    o += "\nPort        Vlans allowed and active in management domain\n"; for (const n of tr) o += pad(short(n),12) + (compactList(allowed(n).filter(v=>activeVlans().includes(v)))||"none") + "\n";
+    o += "\nPort        Vlans in spanning tree forwarding state and not pruned\n"; for (const n of tr) o += pad(short(n),12) + (compactList(allowed(n).filter(v=>activeVlans().includes(v) && fwd(n,v)))||"none") + "\n";
+    return o.trimEnd();
+  }
+  function switchportInfo(n){
+    const i = st.intfs[n]; if (kind!=="switch" || !i || i.mode==="svi" || i.loop) return "% Invalid interface";
+    if (i.mode==="routed") return `Name: ${short(n)}\nSwitchport: Disabled`;
+    const adm = i.mode==="trunk" ? "trunk" : i.mode==="access" ? "static access" : `dynamic ${i.dtp}`, op = st.opMode(n)==="trunk" ? "trunk" : up(n) ? "static access" : "down";
+    return [`Name: ${short(n)}`, "Switchport: Enabled", `Administrative Mode: ${adm}`, `Operational Mode: ${op}`, "Administrative Trunking Encapsulation: dot1q", `Operational Trunking Encapsulation: ${op==="trunk"?"dot1q":"native"}`,
+      `Negotiation of Trunking: ${i.nonegotiate||i.mode==="access"?"Off":"On"}`, `Access Mode VLAN: ${i.vlan} (${st.vlans[i.vlan]||"Inactive"})`, `Trunking Native Mode VLAN: ${i.native} (${st.vlans[i.native]||"Inactive"})`,
+      `Voice VLAN: ${i.voiceVlan?`${i.voiceVlan} (${st.vlans[i.voiceVlan]||"Inactive"})`:"none"}`, "Administrative private-vlan host-association: none", `Trunking VLANs Enabled: ${i.allowed?compactList(i.allowed):"ALL"}`, "Pruning VLANs Enabled: 2-1001", "Capture Mode Disabled"].join("\n");
+  }
+  function stpShow(onlyVlan){
+    if (kind!=="switch") return "% Invalid input detected at '^' marker.";
+    const vls = activeVlans().filter(v=>onlyVlan==null || v===+onlyVlan);
+    const blocks = [];
+    for (const v of vls){
+      if (st.stpOff[v]){ if (onlyVlan!=null) blocks.push(`Spanning tree instance(s) for vlan ${v} does not exist.`); continue; }
+      const d = hooks.stp ? hooks.stp(v) : null; if (!d || !d.ports.length){ if (onlyVlan!=null) blocks.push(`Spanning tree instance(s) for vlan ${v} does not exist.`); continue; }
+      const proto = st.stpMode==="rapid-pvst" ? "rstp" : "ieee";
+      const L = [`VLAN${String(v).padStart(4,"0")}`, `  Spanning tree enabled protocol ${proto}`, `  Root ID    Priority    ${d.root.prio}`, `             Address     ${d.root.mac}`];
+      if (d.isRoot) L.push("             This bridge is the root"); else L.push(`             Cost        ${d.rootCost}`, `             Port        ${d.rootPortNum} (${d.rootPort})`);
+      L.push("             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec", "", `  Bridge ID  Priority    ${d.bridge.prio}  (priority ${d.bridge.prio - v} sys-id-ext ${v})`, `             Address     ${d.bridge.mac}`,
+        "             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec", "             Aging Time  300 sec", "", "Interface           Role Sts Cost      Prio.Nbr Type", "------------------- ---- --- --------- -------- --------------------------------");
+      for (const r of d.ports) L.push(pad(short(r.name),20) + pad(r.role,5) + pad(r.state,4) + pad(r.cost,10) + pad(r.prio,9) + r.type);
+      blocks.push(L.join("\n"));
+    }
+    return blocks.join("\n\n") || "No spanning tree instance exists.";
+  }
+  function etherSummary(){
+    const groups = hooks.ether ? hooks.ether() : [];
+    let o = "Flags:  D - down        P - bundled in port-channel\n        I - stand-alone s - suspended\n        H - Hot-standby (LACP only)\n        R - Layer3      S - Layer2\n        U - in use      f - failed to allocate aggregator\n\n        M - not in use, minimum links not met\n        u - unsuitable for bundling\n        w - waiting to be aggregated\n        d - default port\n\n";
+    o += `Number of channel-groups in use: ${groups.length}\nNumber of aggregators:           ${groups.length}\n\nGroup  Port-channel  Protocol    Ports\n------+-------------+-----------+-----------------------------------------------\n`;
+    for (const g of groups) o += pad(g.group,7) + pad(`Po${g.group}(${g.up?"SU":"SD"})`,14) + pad(g.proto,12) + g.members.map(m=>`${short(m.name)}(${m.flag})`).join("  ") + "\n";
+    return o.trimEnd();
+  }
 
   /* ---------- output builders ---------- */
   function runningCfg(){
@@ -96,13 +160,31 @@ function ios2Env(opts){
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
     if (!st.cdpRun) L.push("no cdp run");
     if (st.lldpRun) L.push("lldp run");
+    if (kind==="switch"){ L.push(`spanning-tree mode ${st.stpMode}`); if (st.pfDefault) L.push("spanning-tree portfast default"); if (st.bpduDefault) L.push("spanning-tree portfast bpduguard default"); L.push("spanning-tree extend system-id");
+      for (const v of Object.keys(st.stpPrio).map(Number).sort((a,b)=>a-b)) L.push(`spanning-tree vlan ${v} priority ${st.stpPrio[v]}`);
+      for (const v of Object.keys(st.stpOff).map(Number).sort((a,b)=>a-b)) if (st.stpOff[v]) L.push(`no spanning-tree vlan ${v}`);
+      if (st.vtpMode!=="server") L.push(`vtp mode ${st.vtpMode}`); if (st.ipRouting) L.push("ip routing"); }
     L.push("!");
     if (kind==="switch"){ for (const v of Object.keys(st.vlans).map(Number).sort((a,b)=>a-b)) if (v!==1 && v<1002){ L.push(`vlan ${v}`); if (st.vlans[v]!==`VLAN${String(v).padStart(4,"0")}`) L.push(` name ${st.vlans[v]}`); L.push("!"); } }
     for (const n of ifNames()){
       const i = st.intfs[n]; L.push(`interface ${n}`);
       if (i.desc) L.push(` description ${i.desc}`);
-      if (i.mode==="trunk"){ if (i.native!==1) L.push(` switchport trunk native vlan ${i.native}`); if (i.allowed) L.push(` switchport trunk allowed vlan ${i.allowed.join(",")}`); L.push(" switchport mode trunk"); }
-      else if (i.mode==="access"){ if (i.vlan!==1) L.push(` switchport access vlan ${i.vlan}`); if (i.accessMode) L.push(" switchport mode access"); }
+      if (i.sub && i.encap) L.push(` encapsulation dot1Q ${i.encap}${i.encapNative?" native":""}`);
+      if (kind==="switch" && !i.sub && i.mode!=="svi" && !i.loop){
+        if (i.mode==="routed") L.push(" no switchport");
+        else {
+          if (i.vlan!==1) L.push(` switchport access vlan ${i.vlan}`);
+          if (i.native!==1) L.push(` switchport trunk native vlan ${i.native}`);
+          if (i.allowed) L.push(` switchport trunk allowed vlan ${compactList(i.allowed)}`);
+          if (i.mode==="access") L.push(" switchport mode access"); else if (i.mode==="trunk") L.push(" switchport mode trunk"); else if (i.dtp==="desirable") L.push(" switchport mode dynamic desirable");
+          if (i.nonegotiate) L.push(" switchport nonegotiate");
+          if (i.voiceVlan) L.push(` switchport voice vlan ${i.voiceVlan}`);
+          if (i.channel) L.push(` channel-group ${i.channel.group} mode ${i.channel.mode}`);
+          const t = i.stp||{};
+          if (t.portfast) L.push(" spanning-tree portfast"); if (t.bpduguard===true) L.push(" spanning-tree bpduguard enable"); if (t.bpduguard===false) L.push(" spanning-tree bpduguard disable");
+          if (t.guard) L.push(` spanning-tree guard ${t.guard}`); if (t.cost) L.push(` spanning-tree cost ${t.cost}`); if (t.prio!=null) L.push(` spanning-tree port-priority ${t.prio}`);
+        }
+      }
       if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
       if (i.speed!=="auto" && i.speed) L.push(` speed ${i.speed}`);
       if (i.duplex!=="auto" && i.duplex) L.push(` duplex ${i.duplex}`);
@@ -116,7 +198,8 @@ function ios2Env(opts){
     L.push("!");
     if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
     L.push("!", "line con 0"); const c = st.lines.con;
-    if (c.timeout && c.timeout!=="10 0") L.push(` exec-timeout ${c.timeout}`);   // 10 0 is the default, which IOS hides if (c.password) L.push(` password ${pw(c.password)}`); if (c.sync) L.push(" logging synchronous"); if (c.loginLocal) L.push(" login local"); else if (c.login) L.push(" login");
+    if (c.timeout && c.timeout!=="10 0") L.push(` exec-timeout ${c.timeout}`);   // 10 0 is the default, which IOS hides
+    if (c.password) L.push(` password ${pw(c.password)}`); if (c.sync) L.push(" logging synchronous"); if (c.loginLocal) L.push(" login local"); else if (c.login) L.push(" login");
     const v = st.lines.vty;
     // Catalyst switches show the 16 VTY lines as two blocks (0 4 and 5 15); routers have 0 4
     for (const blk of (kind==="switch" ? ["0 4","5 15"] : ["0 4"])){
@@ -135,8 +218,8 @@ function ios2Env(opts){
   function intStatus(){
     let o = "Port      Name               Status       Vlan       Duplex  Speed Type\n";
     for (const n of physical){ const i = st.intfs[n], link = up(n);
-      const status = i.shut ? "disabled" : link ? "connected" : "notconnect";
-      const vl = i.mode==="trunk" ? "trunk" : i.mode==="routed" ? "routed" : String(i.vlan);
+      const status = i.errdis ? "err-disabled" : i.shut ? "disabled" : link ? "connected" : "notconnect";
+      const vl = i.mode==="routed" ? "routed" : isTrunk(n) ? "trunk" : String(i.vlan);
       const sfp = /0\/(9|10)$/.test(n) && kind==="switch";
       const c = hooks.counters(n) || {};
       const dup = i.duplex==="auto" ? (link ? "a-"+(c.duplex||"full") : "auto") : i.duplex;
@@ -147,6 +230,7 @@ function ios2Env(opts){
   function showInt(n){
     const i = st.intfs[n], link = up(n), c = hooks.counters(n) || {};
     const l1 = i.shut ? "administratively down" : (link || (i.mode==="svi" && st.vlans[i.vlan])) ? "up" : "down";
+    if (i.errdis) return `${n} is down, line protocol is down (err-disabled)\n  Hardware is Gigabit Ethernet, address is ${i.mac} (bia ${i.mac})${i.desc?`\n  Description: ${i.desc}`:""}\n  (err-disabled by ${i.errdis}: shutdown then no shutdown to recover, after fixing the cause)`;
     const hw = i.mode==="svi" ? "Ethernet SVI" : i.loop ? "Loopback" : "Gigabit Ethernet";
     const lines = [`${n} is ${l1}, line protocol is ${link?"up":"down"}${i.mode!=="svi"&&!i.loop&&kind==="switch"?` (${i.shut?"disabled":link?"connected":"notconnect"})`:""}`,
       `  Hardware is ${hw}${i.mac?`, address is ${i.mac} (bia ${i.mac})`:""}`];
@@ -168,7 +252,8 @@ function ios2Env(opts){
     if (kind!=="switch") return null;
     let o = "VLAN Name                             Status    Ports\n---- -------------------------------- --------- -------------------------------\n";
     for (const v of Object.keys(st.vlans).map(Number).sort((a,b)=>a-b)){
-      const ports = physical.filter(n=>st.intfs[n].mode==="access" && st.intfs[n].vlan===v).map(short);
+      const ports = physical.filter(n=>{ const i = st.intfs[n]; return st.opMode(n)==="access" && !i.channel && (i.vlan===v || i.voiceVlan===v); }).map(short)
+        .concat(Object.keys(st.intfs).filter(n=>n.startsWith("Port-channel") && st.opMode(n)==="access" && st.intfs[n].vlan===v).map(short));
       const chunks = []; for (let k=0;k<ports.length;k+=4) chunks.push(ports.slice(k,k+4).join(", "));
       o += pad(v,5) + pad(st.vlans[v],33) + pad(v>=1002?"act/unsup":"active",10) + (chunks[0]||"") + "\n";
       for (const ch of chunks.slice(1)) o += " ".repeat(48) + ch + "\n";
@@ -242,7 +327,7 @@ function ios2Env(opts){
 
   /* ---------- command tables ---------- */
   // pattern tokens: keywords (lowercase) or A:WORD A:IP A:MASK A:NUM A:IF A:LINE (rest of line)
-  const X = (p, run, help) => ({ p: p.split(" "), run, help });
+  const X = (p, run, help) => ({ p: p.split(" ").map(t=>t.startsWith("A:")?t:t.toLowerCase()), run, help });   // keywords match case-insensitively (dot1Q = dot1q)
   const execShow = [
     X("show running-config", ()=>runningCfg()), X("show startup-config", ()=>st.startup ? runningCfgFrom(st.startup) : "startup-config is not present"),
     X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()),
@@ -256,6 +341,13 @@ function ios2Env(opts){
       return L.join("\n"); }),
     X("show interfaces A:IF", a=>{ const n = parseIf(a[0]); return n ? showInt(n) : "% Invalid interface type and number"; }),
     X("show vlan brief", ()=>vlanBrief()||inv()), X("show vlan", ()=>vlanBrief()||inv()),
+    X("show interfaces trunk", ()=>kind==="switch"?trunkTable():inv()),
+    X("show interfaces A:IF switchport", a=>{ const n = parseIf(a[0]); return n ? switchportInfo(n) : "% Invalid interface type and number"; }),
+    X("show spanning-tree", ()=>stpShow(null)), X("show spanning-tree vlan A:NUM", a=>stpShow(a[0])),
+    X("show spanning-tree summary", ()=>kind!=="switch"?inv():`Switch is in ${st.stpMode} mode\nRoot bridge for: ${activeVlans().filter(v=>!st.stpOff[v] && hooks.stp && (hooks.stp(v)||{}).isRoot).map(v=>"VLAN"+String(v).padStart(4,"0")).join(", ")||"none"}\nPortFast Default                        is ${st.pfDefault?"enabled":"disabled"}\nPortFast BPDU Guard Default             is ${st.bpduDefault?"enabled":"disabled"}`),
+    X("show etherchannel summary", ()=>kind==="switch"?etherSummary():inv()),
+    X("show vtp status", ()=>kind!=="switch"?inv():`VTP Version capable             : 1 to 3\nVTP version running             : 1\nVTP Domain Name                 : ${st.vtpDomain}\nVTP Pruning Mode                : Disabled\nVTP Traps Generation            : Disabled\nDevice ID                       : ${baseMac}.0000\nVTP Operating Mode              : ${st.vtpMode[0].toUpperCase()+st.vtpMode.slice(1)}\nMaximum VLANs supported locally : 1005\nNumber of existing VLANs        : ${Object.keys(st.vlans).length}`),
+    X("show logging", ()=>{ const L = hooks.logs ? hooks.logs(st) : []; return "Syslog logging: enabled (0 messages dropped, 0 flushes, 0 overruns)\n    Console logging: level debugging\n    Buffer logging:  level debugging\n\nLog Buffer (8192 bytes):\n" + (L.length ? L.map(l=>"*Oct 11 10:"+l).join("\n") : ""); }),
     X("show mac address-table", ()=>macTable()||inv()), X("show mac address-table dynamic", ()=>macTable({type:"dynamic"})||inv()),
     X("show mac address-table address A:WORD", a=>macTable({addr:a[0].toLowerCase()})||inv()), X("show mac address-table interface A:IF", a=>{ const n = parseIf(a[0]); return n ? macTable({intf:n}) : "% Invalid interface"; }),
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
@@ -320,13 +412,25 @@ function ios2Env(opts){
       X("ip route A:IP A:MASK A:WORD", a=>{ const mOk = a[1]==="0.0.0.0" || maskOk(a[1]); if (!ipRe.test(a[0]) || !mOk || netOf(a[0], a[1])!==a[0]) return "%Inconsistent address and mask"; if (!st.routes.some(r=>r.net===a[0]&&r.mask===a[1]&&r.nh===a[2])) st.routes.push({net:a[0], mask:a[1], nh:a[2]}); return ""; }),
       X("no ip route A:IP A:MASK A:WORD", a=>{ st.routes = st.routes.filter(r=>!(r.net===a[0]&&r.mask===a[1]&&r.nh===a[2])); return ""; }),
       X("cdp run", ()=>{ st.cdpRun=true; return ""; }), X("no cdp run", ()=>{ st.cdpRun=false; return ""; }),
+      X("spanning-tree mode A:WORD", a=>{ const m = a[0].toLowerCase(); if (!["pvst","rapid-pvst","mst"].includes(m)) return inv(); if (kind!=="switch") return inv(); st.stpMode = m==="mst" ? "rapid-pvst" : m; return m==="mst" ? "(MST isn't modelled in this lab — staying in rapid-pvst)" : ""; }),
+      X("spanning-tree vlan A:WORD priority A:NUM", a=>{ if (kind!=="switch") return inv(); const p = +a[1]; if (p%4096 || p<0 || p>61440) return "% Bridge Priority must be in increments of 4096.\n% Allowed values are:\n  0     4096  8192  12288 16384 20480 24576 28672\n  32768 36864 40960 45056 49152 53248 57344 61440"; for (const v of vlist(a[0])) st.stpPrio[v] = p; return ""; }),   // stored as typed; the bridge ID adds the VLAN (sys-id-ext)
+      X("spanning-tree vlan A:WORD root A:WORD", a=>{ if (kind!=="switch") return inv(); const k = a[1].toLowerCase(); if (!/^(primary|secondary)$/.test(k)) return inv(); for (const v of vlist(a[0])){ let p = k==="primary" ? 24576 : 28672; const d = hooks.stp ? hooks.stp(v) : null; if (k==="primary" && d && !d.isRoot && d.root.prio - v <= 24576) p = Math.max(0, d.root.prio - v - 4096); st.stpPrio[v] = p; } return ""; }),
+      X("no spanning-tree vlan A:WORD priority", a=>{ for (const v of vlist(a[0])) delete st.stpPrio[v]; return ""; }),
+      X("no spanning-tree vlan A:WORD", a=>{ if (kind!=="switch") return inv(); for (const v of vlist(a[0])) st.stpOff[v] = true; return ""; }),
+      X("spanning-tree vlan A:WORD", a=>{ for (const v of vlist(a[0])) delete st.stpOff[v]; return ""; }),
+      X("spanning-tree portfast default", ()=>{ st.pfDefault = true; return "%Warning: this command enables portfast by default on all interfaces. You\n should now disable portfast explicitly on switched ports leading to hubs,\n switches and bridges as they may create temporary bridging loops."; }),
+      X("no spanning-tree portfast default", ()=>{ st.pfDefault = false; return ""; }),
+      X("spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = true; return ""; }), X("no spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = false; return ""; }),
+      X("ip routing", ()=>{ if (kind==="switch") st.ipRouting = true; return ""; }), X("no ip routing", ()=>{ if (kind==="switch") st.ipRouting = false; return ""; }),
+      X("vtp mode A:WORD", a=>{ const m = a[0].toLowerCase(); if (!/^(server|client|transparent|off)$/.test(m)) return inv(); st.vtpMode = m; return `Setting device to VTP ${m.toUpperCase()} mode for VLANS.`; }),
+      X("vtp domain A:WORD", a=>{ st.vtpDomain = a[0]; return `Changing VTP domain name from ${st.vtpDomain||"NULL"} to ${a[0]}`; }),
       X("lldp run", ()=>{ st.lldpRun=true; return ""; }), X("no lldp run", ()=>{ st.lldpRun=false; return ""; }),
     ],
     "config-if": [
       X("description A:LINE", a=>{ forCur(i=>i.desc=a[0].slice(0,240)); return ""; }), X("no description", ()=>{ forCur(i=>i.desc=""); return ""; }),
-      X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (!i.shut){ i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
+      X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ i.errdis = null; if (!i.shut){ i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
       X("no shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (i.shut){ i.shut=false; if (up(n)) out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to up`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to up`); else if (i.mode!=="svi") out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
-      X("ip address A:IP A:MASK", a=>{ const i = st.intfs[st.cur]; if (kind==="switch" && i.mode!=="svi" && !i.loop) return "                                   ^\n% Invalid input detected at '^' marker.\n(a Layer 2 switch port has no IP address — configure the management IP on interface vlan 1)"; if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; if (!maskOk(a[1])) return ipRe.test(a[1]) ? `% Bad mask 0x${toInt(a[1]).toString(16).toUpperCase().padStart(8,"0")} for address ${a[0]}` : "% Invalid input detected at '^' marker.";
+      X("ip address A:IP A:MASK", a=>{ const i = st.intfs[st.cur]; if (i.sub && !i.encap) return "% Configuring IP routing on a LAN subinterface is only allowed if that\nsubinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q,\nor ISL vLAN."; if (kind==="switch" && i.mode!=="svi" && i.mode!=="routed" && !i.loop) return "                                   ^\n% Invalid input detected at '^' marker.\n(a Layer 2 switch port has no IP address — configure the management IP on interface vlan 1)"; if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; if (!maskOk(a[1])) return ipRe.test(a[1]) ? `% Bad mask 0x${toInt(a[1]).toString(16).toUpperCase().padStart(8,"0")} for address ${a[0]}` : "% Invalid input detected at '^' marker.";
         const len = maskLen(a[1]);
         if (len<31 && (a[0]===netOf(a[0],a[1]) || a[0]===bcastOf(a[0],a[1]))) return `% Bad mask /${len} for address ${a[0]}`;
         for (const [n,o] of Object.entries(st.intfs)) if (n!==st.cur && o.ip){ const shorter = maskLen(o.mask) <= len ? o.mask : a[1]; if (sameNet(o.ip, a[0], shorter)) return `% ${netOf(a[0],a[1])} overlaps with ${n}`; }
@@ -335,14 +439,38 @@ function ios2Env(opts){
       X("no ip address", ()=>{ forCur(i=>{ i.ip=null; i.mask=null; }); return ""; }),
       X("speed A:WORD", a=>{ if (!/^(10|100|1000|auto)$/.test(a[0])) return "% Invalid input detected at '^' marker."; if (st.intfs[st.cur].mode==="svi") return inv(); forCur(i=>i.speed=a[0]==="auto"?"auto":+a[0]); return ""; }),
       X("duplex A:WORD", a=>{ const d = ["full","half","auto"].find(x=>x.startsWith(a[0].toLowerCase())); if (!d) return "% Invalid input detected at '^' marker."; if (st.intfs[st.cur].mode==="svi") return inv(); forCur(i=>i.duplex=d); return ""; }),
-      X("switchport mode access", ()=>l2(i=>{ i.mode="access"; i.accessMode=true; })), X("switchport mode trunk", ()=>l2(i=>{ i.mode="trunk"; })),
+      X("switchport mode access", ()=>l2(i=>{ i.mode="access"; })), X("switchport mode trunk", ()=>l2(i=>{ i.mode="trunk"; })),
+      X("switchport mode dynamic A:WORD", a=>{ const d = ["auto","desirable"].find(x=>x.startsWith(a[0].toLowerCase())); if (!d) return inv(); if ((st.curList||[st.cur]).some(n=>st.intfs[n].nonegotiate)) return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."; return l2(i=>{ i.mode="dynamic"; i.dtp=d; }); }),
+      X("no switchport nonegotiate", ()=>l2(i=>{ i.nonegotiate=false; })),
+      X("switchport voice vlan A:NUM", a=>{ const v = +a[0]; const r = l2(i=>{ i.voiceVlan=v; }); if (r) return r; if (!st.vlans[v]){ st.vlans[v] = `VLAN${String(v).padStart(4,"0")}`; return `% Voice VLAN does not exist. Creating vlan ${v}`; } return ""; }),
+      X("no switchport voice vlan", ()=>l2(i=>{ i.voiceVlan=null; })),
+      X("no switchport", ()=>{ if (kind!=="switch" || (st.curList||[st.cur]).some(n=>!physical.includes(n))) return inv(); forCur(i=>{ i.mode="routed"; }); return ""; }),
+      X("switchport", ()=>{ if (kind!=="switch" || (st.curList||[st.cur]).some(n=>!physical.includes(n))) return inv(); forCur(i=>{ if (i.mode==="routed"){ i.mode="dynamic"; i.ip=null; i.mask=null; } }); return ""; }),
+      X("encapsulation dot1Q A:NUM", a=>{ const i = st.intfs[st.cur]; if (!i.sub) return "% Invalid input detected at '^' marker.\n(encapsulation dot1Q goes on a router subinterface, e.g. interface g0/0.10)"; const v = +a[0]; if (!(v>=1&&v<=4094)) return inv(); i.encap = v; i.encapNative = false; return ""; }),
+      X("encapsulation dot1Q A:NUM native", a=>{ const i = st.intfs[st.cur]; if (!i.sub) return inv(); i.encap = +a[0]; i.encapNative = true; return ""; }),
+      X("spanning-tree portfast", ()=>{ const r = l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:true}); }); return r || "%Warning: portfast should only be enabled on ports connected to a single\n host. Connecting hubs, concentrators, switches, bridges, etc... to this\n interface  when portfast is enabled, can cause temporary bridging loops.\n Use with CAUTION"; }),
+      X("spanning-tree portfast edge", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:true}); })),
+      X("no spanning-tree portfast", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {portfast:false}); })),
+      X("spanning-tree bpduguard enable", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {bpduguard:true}); })),
+      X("spanning-tree bpduguard disable", ()=>l2(i=>{ i.stp = Object.assign({}, i.stp, {bpduguard:false}); })),
+      X("no spanning-tree bpduguard", ()=>l2(i=>{ const t = Object.assign({}, i.stp); delete t.bpduguard; i.stp = t; })),
+      X("spanning-tree guard A:WORD", a=>{ const g = a[0].toLowerCase(); if (!/^(root|loop|none)$/.test(g)) return inv(); return l2(i=>{ i.stp = Object.assign({}, i.stp, {guard: g==="none"?null:g}); }); }),
+      X("spanning-tree cost A:NUM", a=>l2(i=>{ i.stp = Object.assign({}, i.stp, {cost:+a[0]}); })),
+      X("spanning-tree port-priority A:NUM", a=>{ const p = +a[0]; if (p%16 || p>240) return "% Port Priority in increments of 16 is required"; return l2(i=>{ i.stp = Object.assign({}, i.stp, {prio:p}); }); }),
+      X("channel-group A:NUM mode A:WORD", a=>{ const g = +a[0], m = ["active","passive","on","desirable","auto"].find(x=>x.startsWith(a[1].toLowerCase())); if (!m || !(g>=1&&g<=48)) return inv();
+        const msg = []; const po = "Port-channel"+g;
+        const other = Object.values(st.intfs).find(i=>i.channel && i.channel.group===g);
+        if (other && ((["active","passive"].includes(other.channel.mode)) !== (["active","passive"].includes(m)) || (["desirable","auto"].includes(other.channel.mode)) !== (["desirable","auto"].includes(m)))) return `Command rejected (Channel protocol mismatch for interface ${short(st.cur)} in group ${g}): the interface can not be added to the channel group`;
+        if (!st.intfs[po]){ st.intfs[po] = { ip:null, mask:null, shut:false, desc:"", mode:st.intfs[st.cur].mode, dtp:st.intfs[st.cur].dtp, nonegotiate:false, vlan:st.intfs[st.cur].vlan, allowed:st.intfs[st.cur].allowed, native:st.intfs[st.cur].native, voiceVlan:null, speed:"auto", duplex:"auto", cdp:false, stp:{}, channel:null, errdis:null, mac:st.intfs[st.cur].mac, po:true }; msg.push(`Creating a port-channel interface Port-channel ${g}`); }
+        const r = l2(i=>{ i.channel = {group:g, mode:m}; }); return r || msg.join("\n"); }),
+      X("no channel-group", ()=>l2(i=>{ i.channel = null; })),
       X("switchport access vlan A:NUM", a=>{ const v=+a[0]; if (!(v>=1&&v<=4094)) return "% Bad VLAN"; const r = l2(i=>{ i.vlan=v; }); if (r) return r; if (!st.vlans[v]){ st.vlans[v]=`VLAN${String(v).padStart(4,"0")}`; return `% Access VLAN does not exist. Creating vlan ${v}`; } return ""; }),
       X("switchport trunk allowed vlan A:LINE", a=>{ const s=a[0].trim(); let cur = st.intfs[st.cur].allowed;
         const parse = t=>t.split(",").flatMap(x=>{ const m=x.match(/^(\d+)-(\d+)$/); return m?[...Array(+m[2]-+m[1]+1)].map((_,k)=>+m[1]+k):[+x]; }).filter(n=>n>=1&&n<=4094);
         let list; const m = s.match(/^(add|remove|except)\s+(.+)$/); if (s==="all") list=null; else if (m){ const set = parse(m[2]); const base = cur || [...Array(4094)].map((_,k)=>k+1); list = m[1]==="add" ? [...new Set([...(cur||[]), ...set])].sort((x,y)=>x-y) : m[1]==="remove" ? base.filter(x=>!set.includes(x)) : [...Array(4094)].map((_,k)=>k+1).filter(x=>!set.includes(x)); if (list.length===4094) list=null; } else list = parse(s);
         return l2(i=>{ i.allowed = list; }); }),
       X("switchport trunk native vlan A:NUM", a=>l2(i=>{ i.native=+a[0]; })),
-      X("switchport nonegotiate", ()=>l2(()=>{})), X("switchport trunk encapsulation dot1q", ()=>""),
+      X("switchport nonegotiate", ()=>{ if ((st.curList||[st.cur]).some(n=>st.intfs[n].mode==="dynamic")) return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."; return l2(i=>{ i.nonegotiate=true; }); }), X("switchport trunk encapsulation dot1q", ()=>""),
       X("ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=true); return ""; }), X("no ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=false); return ""; }),
       X("cdp enable", ()=>{ forCur(i=>i.cdp=true); return ""; }), X("no cdp enable", ()=>{ forCur(i=>i.cdp=false); return ""; }),
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
@@ -363,8 +491,17 @@ function ios2Env(opts){
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
   function forCur(fn){ for (const n of (st.curList||[st.cur])) fn(st.intfs[n], n); }
-  function l2(fn){ const bad = (st.curList||[st.cur]).find(n=>st.intfs[n].mode==="routed"||st.intfs[n].mode==="svi"); if (bad || kind!=="switch") return inv(); forCur(fn); return ""; }
-  function parseRange(s){ const m = s.replace(/\s+/g,"").match(/^([a-z]+)(\d+\/)(\d+)-(\d+)$/i); if (!m) return null; const out = []; for (let k=+m[3]; k<=+m[4]; k++){ const n = parseIf(m[1]+m[2]+k); if (!n) return null; out.push(n); } return out.length ? out : null; }
+  function l2(fn){ const bad = (st.curList||[st.cur]).find(n=>st.intfs[n].mode==="routed"||st.intfs[n].mode==="svi"); if (bad || kind!=="switch") return inv(); forCur(fn);
+    for (const n of (st.curList||[st.cur])) if (n.startsWith("Port-channel")){ const g = +n.slice(12); for (const m of physical){ const i = st.intfs[m]; if (i.channel && i.channel.group===g){ const keep = i.channel; fn(i, m); i.channel = keep; } } }
+    return ""; }
+  function vlist(s){ return String(s).split(",").flatMap(x=>{ const m = x.match(/^(\d+)-(\d+)$/); return m ? [...Array(+m[2]-+m[1]+1)].map((_,k)=>+m[1]+k) : [+x]; }).filter(v=>v>=1&&v<=4094); }
+  // interface range: "g0/1 - 4", "g0/8", "g0/1 - 2 , g0/5 , g0/7 - 8" (like IOS)
+  function parseRange(s){ const out = [];
+    for (const part of s.replace(/\s+/g,"").split(",")){ if (!part) continue;
+      let m = part.match(/^([a-z]+)(\d+\/)(\d+)-(\d+)$/i);
+      if (m){ for (let k=+m[3]; k<=+m[4]; k++){ const n = parseIf(m[1]+m[2]+k); if (!n) return null; out.push(n); } continue; }
+      m = part.match(/^([a-z]+)(\d+\/)(\d+)$/i); if (!m) return null; const n = parseIf(part); if (!n) return null; out.push(n); }
+    return out.length ? out : null; }
   function save(){ st.startup = snapshot(); st.savedOnce = true; return "Building configuration...\n[OK]"; }
   function runningCfgFrom(snap){ const cur = snapshot(); restore(snap); const out = runningCfg().replace("Current configuration","Using 2104 out of 524288 bytes\n!\n! Last configuration change"); restore(cur); return out; }
   function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; if (st.confregNext) st.confreg = st.confregNext;
@@ -457,7 +594,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;
@@ -482,7 +619,11 @@ function ios2Env(opts){
     }
     return {text: ban + "Press RETURN to get started."};
   };
-  st.baseline = () => { st.startup = snapshot(); };   // treat the current config as already saved (without counting as the learner saving)
+  st.baseline = () => { st.startup = snapshot(); };
+  st.exportConfig = () => snapshot();                                   // the whole config, for saving a topology
+  st.importConfig = snap => { restore(snap); st.startup = snapshot(); };   // load it back as the saved startup-config
+  st.isUp = n => up(n);        // for the bench: is this interface (incl. SVIs, subinterfaces, port-channels) up/up?
+  st.baseMac = baseMac + ".0000";   // treat the current config as already saved (without counting as the learner saving)
   st.sshReady = () => !!(st.rsa && st.domain && st.lines.vty.loginLocal && Object.keys(st.users).length && /ssh|all/.test(st.lines.vty.transport));
 
   st.exec = function(line){

@@ -184,6 +184,25 @@ polarity; interfaces must be `no shutdown`; consoles need 9600 8N1 with no flow 
 end and auto on the other gives a **duplex mismatch** (link up, CRC/runts on the full side, late collisions on the half side);
 different fixed speeds keep the link down.
 
+**Layer 2 (Module 4+):** frames carry real 802.1Q tags on trunks (shown as a number on the moving dot); ports default
+to `switchport mode dynamic auto` and DTP negotiates trunks (auto+auto = access; trunk/desirable + auto = trunk;
+`nonegotiate` silences DTP; routers never speak DTP, so a switch port to a router-on-a-stick must be `switchport mode trunk`);
+native VLAN (untagged) and `switchport trunk allowed vlan` are enforced, mismatches are logged by CDP; voice VLAN tags voice
+frames on an access port. Router subinterfaces (`interface g0/0.10`, `encapsulation dot1Q 10 [native]`) and Layer 3
+switches (`ip routing`, SVIs, `no switchport` routed ports) route between VLANs. **Spanning Tree (PVST+/Rapid PVST+,
+per VLAN)** elects the root (priority + VLAN sys-id-ext, then MAC), computes costs (1G=4, 100M=19, 10G=2, 2×1G bundle=3),
+picks root/designated/alternate ports and really blocks; `no spanning-tree vlan N` with a loop gives a **broadcast storm**
+(frames circle, MAC flapping in `show logging`, nothing works). PortFast, BPDU guard (err-disables the port; recover with
+`shutdown` / `no shutdown` after removing the cause), root guard (root-inconsistent). **EtherChannel** bundles with
+LACP (active/passive), PAgP (desirable/auto) or `on`; incompatible modes or mismatched member settings don't bundle
+(stand-alone or suspended), and STP treats a bundle as one port (Po). Port LEDs behave like a Catalyst: off = no link,
+green = forwarding, amber = STP blocking or err-disabled. Helpers: `Bench.trunking(B,sw,port)`, `Bench.stpRoot(B,vlan)`,
+`Bench.stpRole(B,sw,port,vlan)` ("Root FWD", "Desg FWD", "Altn BLK", "Root BKN"), `Bench.stp(B,sw,vlan)`,
+`Bench.bundled(B,sw,group)`, `Bench.errdis(B,sw,port)`, `Bench.stormed(B)`, `Bench.logged(B,sw,/regex/)`.
+IOS show commands: `show interfaces trunk`, `show interfaces <if> switchport`, `show spanning-tree [vlan N|summary]`,
+`show etherchannel summary`, `show vtp status`, `show logging`. Cisco 9000 default STP mode here is rapid-pvst (say so;
+older 2960s default to pvst).
+
 **PC Command Prompt:** `ipconfig`, `ipconfig /all`, `ping`, `arp -a`, `arp -d`, `ssh -l <user> <ip>` / `ssh user@ip`,
 `telnet <ip>`, `cls`. SSH/Telnet open a real session on the device (needs a reachable management IP and the right VTY,
 user, domain-name and RSA key config); `exit` closes it.

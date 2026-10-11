@@ -107,6 +107,71 @@ ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0
   ok(/Reply from 10\.1\.1\.1: Destination net unreachable\./.test(out(B2,["pc","p","ping 10.2.2.5"])),"router with the egress interface shut answers Destination net unreachable");
   ok(Bench.act(B2,["ip","q","10.2.2.255","255.255.255.0","10.2.2.1"]).ok===false && Bench.act(B2,["ip","q","10.2.2.0","255.255.255.0","10.2.2.1"]).ok===false,"Windows refuses the subnet's network or broadcast address");
   ok(/Internet address is 10\.1\.1\.1\/24/.test(B2.devs.r.env.exec("show ip interface g0/0")) && /Proxy ARP is disabled/.test(B2.devs.r.env.exec("show ip interface g0/0")),"show ip interface shows the address and proxy ARP state"); }
+// 11 Layer 2: VLANs, DTP trunks, native VLAN, allowed lists, ROAS, L3 switch, STP, storms, BPDU guard, EtherChannel
+{ const cfgSw = (cmds) => e => { e.exec("en"); e.exec("conf t"); for (const c of cmds) e.exec(c); e.exec("end"); };
+  const two = (c1, c2, extra) => Bench.create({devices:[
+      {id:"s1",kind:"switch",label:"SW1",config:cfgSw(["vlan 10","int g0/1","switchport mode access","switchport access vlan 10",...c1])},
+      {id:"s2",kind:"switch",label:"SW2",config:cfgSw(["vlan 10","int g0/1","switchport mode access","switchport access vlan 10",...c2])},
+      {id:"a",kind:"pc",label:"A",ip:"10.10.0.1",mask:"255.255.255.0"},{id:"b",kind:"pc",label:"B",ip:"10.10.0.2",mask:"255.255.255.0"}].concat(extra||[]),
+    cables:[{type:"cat6",a:"a:eth",b:"s1:g1"},{type:"cat6",a:"b:eth",b:"s2:g1"},{type:"cat6",a:"s1:g8",b:"s2:g8"}]});
+  let L = two([],[]);
+  ok(!Bench.trunking(L,"s1","g8") && /timed out|unreachable/.test(out(L,["pc","a","ping 10.10.0.2"])),"DTP: auto + auto stays access, so VLAN 10 can't cross the uplink");
+  L = two(["int g0/8","switchport mode trunk"],[]);
+  ok(Bench.trunking(L,"s1","g8") && Bench.trunking(L,"s2","g8") && /Reply from 10\.10\.0\.2/.test(out(L,["pc","a","ping 10.10.0.2"])),"DTP: trunk + auto negotiates a trunk; VLAN 10 crosses tagged");
+  ok(L.log.some(l=>/802\.1Q tag for VLAN 10/.test(l)),"frame log explains the 802.1Q tag on the trunk");
+  ok(/Gi0\/8\s+auto\s+802\.1q\s+trunking\s+1/.test(L.devs.s2.env.exec("show interfaces trunk")) && /Operational Mode: trunk/.test(L.devs.s2.env.exec("show interfaces g0/8 switchport")),"show interfaces trunk / switchport show the negotiated trunk");
+  L = two(["int g0/8","switchport mode trunk","switchport nonegotiate"],[]);
+  ok(!Bench.trunking(L,"s2","g8"),"nonegotiate: the auto side never hears DTP and stays access");
+  L = two(["int g0/8","switchport mode trunk","switchport trunk allowed vlan 1,20"],["int g0/8","switchport mode trunk"]);
+  ok(/timed out|unreachable/.test(out(L,["pc","a","ping 10.10.0.2"])),"VLAN pruned from the allowed list can't cross the trunk");
+  L = two(["int g0/8","switchport mode trunk","switchport trunk native vlan 99"],["int g0/8","switchport mode trunk"]);
+  out(L,["pc","a","ping 10.10.0.2"]); ok(Bench.logged(L,"s1",/NATIVE_VLAN_MISMATCH/),"native VLAN mismatch is logged by CDP");
+  // router-on-a-stick
+  const roas = (swUplink) => Bench.create({devices:[
+      {id:"r",kind:"router",label:"R1",config:cfgSw(["int g0/0","no shut","int g0/0.10","encapsulation dot1Q 10","ip add 10.10.0.1 255.255.255.0","int g0/0.20","encapsulation dot1Q 20","ip add 10.20.0.1 255.255.255.0"])},
+      {id:"s",kind:"switch",label:"SW1",config:cfgSw(["vlan 10","vlan 20","int g0/1","switchport mode access","switchport access vlan 10","int g0/2","switchport mode access","switchport access vlan 20",...swUplink])},
+      {id:"a",kind:"pc",label:"A",ip:"10.10.0.5",mask:"255.255.255.0",gw:"10.10.0.1"},{id:"b",kind:"pc",label:"B",ip:"10.20.0.5",mask:"255.255.255.0",gw:"10.20.0.1"}],
+    cables:[{type:"cat6",a:"a:eth",b:"s:g1"},{type:"cat6",a:"b:eth",b:"s:g2"},{type:"cat6",a:"s:g8",b:"r:g0"}]});
+  L = roas([]); ok(/timed out|unreachable/.test(out(L,["pc","a","ping 10.20.0.5"])),"ROAS: the switch port to the router stays access (routers don't speak DTP) — no inter-VLAN routing");
+  L = roas(["int g0/8","switchport mode trunk"]); ok(/Reply from 10\.20\.0\.5.*TTL=127/.test(out(L,["pc","a","ping 10.20.0.5"])),"ROAS: trunk to the router + dot1Q subinterfaces route between VLANs");
+  ok(/% Configuring IP routing on a LAN subinterface/.test((()=>{ const R = SIM.ios2Env({kind:"router"}); ["en","conf t","int g0/0.30"].forEach(c=>R.exec(c)); return R.exec("ip add 10.30.0.1 255.255.255.0"); })()),"IP on a subinterface without encapsulation is refused like real IOS");
+  // Layer 3 switch
+  L = Bench.create({devices:[{id:"s",kind:"switch",label:"L3SW",config:cfgSw(["ip routing","vlan 10","vlan 20","int g0/1","switchport mode access","switchport access vlan 10","int g0/2","switchport mode access","switchport access vlan 20","int vlan 10","ip add 10.10.0.1 255.255.255.0","no shut","int vlan 20","ip add 10.20.0.1 255.255.255.0","no shut"])},
+      {id:"a",kind:"pc",label:"A",ip:"10.10.0.5",mask:"255.255.255.0",gw:"10.10.0.1"},{id:"b",kind:"pc",label:"B",ip:"10.20.0.5",mask:"255.255.255.0",gw:"10.20.0.1"}],
+    cables:[{type:"cat6",a:"a:eth",b:"s:g1"},{type:"cat6",a:"b:eth",b:"s:g2"}]});
+  ok(/Reply from 10\.20\.0\.5/.test(out(L,["pc","a","ping 10.20.0.5"])),"Layer 3 switch with ip routing routes between SVIs");
+  // STP triangle
+  const tri = (extra) => Bench.create({devices:[
+      {id:"s1",kind:"switch",label:"SW1",config:cfgSw(extra.s1||[])},{id:"s2",kind:"switch",label:"SW2",config:cfgSw(extra.s2||[])},{id:"s3",kind:"switch",label:"SW3",config:cfgSw(extra.s3||[])},
+      {id:"a",kind:"pc",label:"A",ip:"10.0.0.1",mask:"255.255.255.0"},{id:"b",kind:"pc",label:"B",ip:"10.0.0.2",mask:"255.255.255.0"}],
+    cables:[{type:"cat6",a:"s1:g7",b:"s2:g7"},{type:"cat6",a:"s2:g8",b:"s3:g8"},{type:"cat6",a:"s3:g6",b:"s1:g6"},{type:"cat6",a:"a:eth",b:"s2:g1"},{type:"cat6",a:"b:eth",b:"s3:g1"}]});
+  L = tri({s1:["spanning-tree vlan 1 priority 4096"]});
+  const blocked = ["s1","s2","s3"].flatMap(sw=>["g6","g7","g8"].map(p=>Bench.stpRole(L,sw,p,1))).filter(r=>r==="Altn BLK").length;
+  ok(Bench.stpRoot(L,1)==="s1" && blocked===1,"STP: lowest priority wins root and exactly one port blocks in a triangle");
+  ok(/This bridge is the root/.test(L.devs.s1.env.exec("show spanning-tree vlan 1")) && /Altn BLK/.test(L.devs.s2.env.exec("show spanning-tree")+L.devs.s3.env.exec("show spanning-tree")),"show spanning-tree shows the root and the alternate (blocking) port");
+  ok(/Reply from 10\.0\.0\.2/.test(out(L,["pc","a","ping 10.0.0.2"])) && !Bench.stormed(L),"traffic flows over the loop-free tree, no storm");
+  L = tri({s1:["no spanning-tree vlan 1"],s2:["no spanning-tree vlan 1"],s3:["no spanning-tree vlan 1"]});
+  ok(/timed out|unreachable/.test(out(L,["pc","a","ping 10.0.0.2"])) && Bench.stormed(L) && Bench.logged(L,"s1",/MACFLAP/),"with STP off a triangle melts down: broadcast storm, MAC flapping, nothing works");
+  // BPDU guard
+  L = tri({s1:["spanning-tree vlan 1 priority 4096"],s2:["int g0/7","spanning-tree portfast","spanning-tree bpduguard enable"]});
+  out(L,["pc","a","ping 10.0.0.2"]);
+  ok(Bench.errdis(L,"s2","g7")==="bpduguard" && /err-disabled/.test(L.devs.s2.env.exec("show interfaces status")) && Bench.logged(L,"s2",/BLOCK_BPDUGUARD/),"BPDU guard err-disables a portfast port that hears another switch");
+  for (const c of ["conf t","int g0/7","no spanning-tree bpduguard","no spanning-tree portfast","shutdown","no shutdown","end"]) L.devs.s2.env.exec(c);
+  ok(!Bench.errdis(L,"s2","g7"),"shutdown / no shutdown recovers the err-disabled port once the guard is removed");
+  // EtherChannel
+  const ec = (m1, m2) => Bench.create({devices:[
+      {id:"s1",kind:"switch",label:"SW1",config:cfgSw(["spanning-tree vlan 1 priority 4096","int range g0/7 - 8","switchport mode trunk",`channel-group 1 mode ${m1}`])},
+      {id:"s2",kind:"switch",label:"SW2",config:cfgSw(["int range g0/7 - 8","switchport mode trunk",`channel-group 1 mode ${m2}`])}],
+    cables:[{type:"cat6",a:"s1:g7",b:"s2:g7"},{type:"cat6",a:"s1:g8",b:"s2:g8"}]});
+  L = ec("active","passive");
+  ok(Bench.bundled(L,"s1",1) && /Po1\(SU\)\s+LACP\s+Gi0\/7\(P\)\s+Gi0\/8\(P\)/.test(L.devs.s1.env.exec("show etherchannel summary")) && !/Altn/.test(L.devs.s2.env.exec("show spanning-tree")),"LACP active + passive bundles both links into Po1, which STP treats as one link");
+  L = ec("passive","passive"); ok(!Bench.bundled(L,"s1",1) && /Altn BLK/.test(L.devs.s2.env.exec("show spanning-tree")),"passive + passive never bundles: two separate links, STP blocks one");
+}
+// 12 topology builder templates: every starter network works, and survives export → import
+if (ctx.LLTOPO){ const T = ctx.LLTOPO.TEMPLATES;
+  const tests = {soho:[["pc1","192.168.1.12"],["pc1","8.8.8.8"]], campus2:[["pc1","10.10.20.51"],["pc2","10.10.10.11"]], campus3:[["pc1","10.2.10.11"],["pc2","10.100.0.10"]], wan:[["hqpc","10.20.0.11"],["brpc","8.8.8.8"]], spineleaf:[["srv1","10.1.2.10"],["srv3","10.1.1.10"]]};
+  for (const [k,list] of Object.entries(tests)){ const B1 = Bench.create(T[k]); const B2 = Bench.create(JSON.parse(JSON.stringify(Bench.exportTopology(B1))));
+    ok(list.every(([pc,ip])=>/Reply from [\d.]+: bytes/.test(out(B1,["pc",pc,"ping "+ip]))) && /Reply from [\d.]+: bytes/.test(out(B2,["pc",list[0][0],"ping "+list[0][1]])), `template "${T[k].name}" works and survives save/reload`); } }
 // 10 drills: thousands of generated answers checked against an independent BigInt calculation
 { const D = ctx.DRILL; D._seed(12345);
   const bi = s => s.split(".").reduce((a,o)=>a*256n+BigInt(o),0n), bs = n => [24n,16n,8n,0n].map(k=>String((n>>k)&255n)).join(".");
