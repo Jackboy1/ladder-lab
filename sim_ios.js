@@ -106,6 +106,7 @@ function ios2Env(opts){
       if (i.speed!=="auto" && i.speed) L.push(` speed ${i.speed}`);
       if (i.duplex!=="auto" && i.duplex) L.push(` duplex ${i.duplex}`);
       if (i.cdp===false && i.mode!=="svi" && !i.loop) L.push(" no cdp enable");
+      if (i.proxyArp===false) L.push(" no ip proxy-arp");
       if (i.shut) L.push(" shutdown");
       L.push("!");
     }
@@ -316,6 +317,7 @@ function ios2Env(opts){
         return l2(i=>{ i.allowed = list; }); }),
       X("switchport trunk native vlan A:NUM", a=>l2(i=>{ i.native=+a[0]; })),
       X("switchport nonegotiate", ()=>l2(()=>{})), X("switchport trunk encapsulation dot1q", ()=>""),
+      X("ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=true); return ""; }), X("no ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=false); return ""; }),
       X("cdp enable", ()=>{ forCur(i=>i.cdp=true); return ""; }), X("no cdp enable", ()=>{ forCur(i=>i.cdp=false); return ""; }),
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
     ],

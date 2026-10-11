@@ -126,6 +126,7 @@ optional `hint`. No step-by-step instructions — the learner diagnoses with rea
 | `K.out(text, caption)` | CLI output block (text is escaped for you) |
 | `K.check({q, o:[...], a, why})` | inline quick-check question, `a` = index of the right option |
 | `K.q({...})` | inline practice question of any type in `qtypes.js` |
+| `K.drill({title, types:[...], count})` | endless generated practice with worked explanations (`drills.js`): `dec2bin bin2dec dec2hex hex2dec bin2hex prefix2mask mask2prefix wildcard subnet hosts2prefix subnets2prefix samesub nth` |
 | `K.bench({...})` | hands-on bench: cable devices, fit optics, console in, address PCs, ping (see above) |
 | `K.term({env, title, intro, opts, setup(env), tasks:[{text, done(env)}], win, solve:[cmds]})` | live terminal inside the lesson with ticking tasks. `solve` = the commands that complete every task; the validator replays them to prove the tasks are achievable |
 | `K.svg(viewBox, inner, caption)` | diagram frame (theme-aware) |
@@ -167,7 +168,12 @@ K.bench({ id:"m1-office-lan", points:60, from:"CCNA M1 · lesson 1",   // id ⇒
           ["console","lap",{speed:"9600",data:"8",parity:"None",stop:"1",flow:"None"}], ["term","enable"] ] })
 ```
 Ports: switch `g1`–`g8` (RJ45, IOS `GigabitEthernet0/1`–`0/8`), `g9`–`g10` (SFP), `con`; router `g0`, `g1`, `con`;
-hub `p1`–`p4`; hosts `eth` (+ `usb` on laptops). Device kinds: `pc laptop server switch router hub`.
+hub `p1`–`p4`; hosts `eth` (+ `usb` on laptops). Device kinds: `pc laptop server printer switch router hub`.
+
+**Proxy ARP is modelled and ON by default on router interfaces (like real IOS).** A router answers ARP for an address it
+can route out of a different interface, and an IOS switch with no `ip default-gateway` ARPs for every destination — so
+a proxy-ARP router can hide a missing gateway or a too-wide mask. When a lesson's point is that such a fault breaks
+things, configure the router with `no ip proxy-arp` (and say so on the build sheet). `Bench.proxied(B)` tells you it happened.
 
 **What the bench simulates (v2):** every NIC and interface has a MAC address; switches learn source MACs per port and
 VLAN, flood broadcasts/unknown unicasts and forward known unicasts; hubs repeat everything out every port; hosts,

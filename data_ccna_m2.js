@@ -1526,7 +1526,29 @@ ${K.bench({id:"m2-arp-mask", points:50, from:"CCNA · Module 2 · lesson 4", tit
 <h3>Duplicate IP addresses: the MAC flip</h3>
 <p>When two devices share an IP, both answer ARP for it. Everyone else's entry flips between two MACs depending on who spoke last, so <b>both</b> devices drop in and out. The fingerprint: <code>arp -a</code> or <code>show ip arp</code> for that IP, twice, shows two different MACs.</p>
 <h3>Proxy ARP: the router answers for someone else</h3>
-<p>With ${K.g("proxy ARP","A router answering an ARP for a remote IP with its own MAC. On by default in Cisco IOS.")}, a router answers an ARP for an IP on <i>another</i> network that it can route to, with <b>its own MAC</b>. The host sends the frame to the router, which routes it — rescuing hosts with a too-wide mask, like host D. IOS enables it by default (<code>ip proxy-arp</code>); many security baselines disable it (<code>no ip proxy-arp</code>) because it hides misconfigured hosts. Tell-tale sign: several remote IPs in <code>arp -a</code> sharing the router's MAC. (The lab routers don't do proxy ARP.)</p>
+<p>With ${K.g("proxy ARP","A router answering an ARP for a remote IP with its own MAC. On by default in Cisco IOS.")}, a router that hears an ARP for an IP on <i>another</i> network — one it can route to out of a <i>different</i> interface — answers with <b>its own MAC</b>. The host frames the packet to the router, which routes it. That rescues hosts with a too-wide mask, like host D, and even hosts with no gateway at all. IOS enables it by default on every interface (<code>ip proxy-arp</code>). Many security baselines, such as the ${K.g("CIS benchmarks","Free, consensus security configuration guides from the Center for Internet Security, including ones for Cisco IOS.")}, disable it (<code>no ip proxy-arp</code>) because it hides misconfigured hosts until the router changes. Tell-tale sign: remote IPs in <code>arp -a</code> carrying the router's MAC. The bench routers behave like real IOS: proxy ARP is on unless a lab says the router is hardened.</p>
+<p>At an HR office in Ikeja, a contractor set up HR-PC by hand: <code>192.168.10.40</code>, mask <code>255.255.0.0</code>, <b>no gateway</b>. It still opens the HR server at <code>192.168.30.5</code>, behind the router. Find out why, harden the router, then fix the PC properly.</p>
+${K.bench({id:"m2-proxy-arp", points:40, from:"CCNA · Module 2 · lesson 4", title:"proxy ARP: the router covering for a broken PC", viewBox:"0 0 760 400", openLog:true,
+  intro:"Use <b>Command Prompt</b> and <b>IP settings</b> under HR-PC. IKJ-RTR2 has proxy ARP at the IOS default (on) and no enable secret; your laptop is on its console (9600 8N1, no flow control).",
+  devices:[
+    {id:"sw1", kind:"switch", label:"IKJ-SW2", model:"Catalyst 9200 · HR floor", x:40, y:150},
+    {id:"r1", kind:"router", label:"IKJ-RTR2", model:"ISR 1100 · HR router", x:500, y:20,
+      config:env=>{ ["enable","configure terminal","interface g0/0","description LAN - HR 192.168.10.0/24","ip address 192.168.10.1 255.255.255.0","no shutdown","interface g0/1","description LAN - servers 192.168.30.0/24","ip address 192.168.30.1 255.255.255.0","no shutdown","end"].forEach(c=>env.exec(c)); }},
+    {id:"pc", kind:"pc", label:"HR-PC", x:60, y:290, ip:"192.168.10.40", mask:"255.255.0.0"},
+    {id:"lap", kind:"laptop", label:"YOUR LAPTOP", x:330, y:290},
+    {id:"srv", kind:"server", label:"HRSRV", x:610, y:290, ip:"192.168.30.5", mask:"255.255.255.0", gw:"192.168.30.1"},
+  ],
+  cables:[ {type:"cat6", a:"pc:eth", b:"sw1:g1"}, {type:"cat6", a:"r1:g0", b:"sw1:g8"}, {type:"cat6", a:"r1:g1", b:"srv:eth"}, {type:"console", a:"lap:usb", b:"r1:con"} ],
+  tray:["cat6","console"],
+  tasks:[
+    {text:"On HR-PC, run <code>ipconfig</code> (mask 255.255.0.0, gateway blank), then <code>ping 192.168.30.5</code>. It works! In the log, HR-PC ARPs for the <b>server's</b> IP and the router sends a <b>Proxy ARP reply</b>", done:B=>Bench.proxied(B) && Bench.tried(B,"pc",/^\s*ipconfig/i)},
+    {text:"Run <code>arp -a</code> on HR-PC: 192.168.30.5 is listed with the MAC from the proxy reply — the <b>router's</b> G0/0 MAC (<code>show interfaces g0/0</code> on the console confirms it), not the server's. The odd broadcast row, 192.168.255.255, gives away the /16 mask", done:B=>Bench.proxied(B) && Bench.tried(B,"pc",/^\s*arp\s+-a\s*$/i)},
+    {text:"Harden the router: on the console, <code>enable</code>, <code>configure terminal</code>, <code>interface g0/0</code>, <code>no ip proxy-arp</code>. On HR-PC, <code>arp -d *</code> and ping again: <code>Destination host unreachable</code> — nobody answers the ARP now", done:B=>B.devs.r1.env.intfs["GigabitEthernet0/0"].proxyArp===false && Bench.tried(B,"pc",/^\s*arp\s+-d/i)},
+    {text:"Fix HR-PC properly in <b>IP settings</b>: mask <code>255.255.255.0</code>, gateway <code>192.168.10.1</code>. Ping 192.168.30.5 again — it works through the gateway, with proxy ARP still off", done:B=>{ const d=B.devs.pc; return d.mask==="255.255.255.0" && d.gw==="192.168.10.1" && B.devs.r1.env.intfs["GigabitEthernet0/0"].proxyArp===false && Bench.pinged(B,"pc","192.168.30.5"); }},
+  ],
+  win:"You watched proxy ARP cover for a PC with a wrong mask and no gateway — the router answered for the server with its own MAC. Hardening the router exposed the hidden fault, and fixing the PC made it work the right way. That's why baselines switch proxy ARP off.",
+  solve:[["pc","pc","ipconfig"],["pc","pc","ping 192.168.30.5"],["pc","pc","arp -a"],["console","lap",{speed:"9600",data:"8",parity:"None",stop:"1",flow:"None"}],["term",""],["term","enable"],["term","configure terminal"],["term","interface g0/0"],["term","no ip proxy-arp"],["term","end"],["pc","pc","arp -d *"],["pc","pc","ping 192.168.30.5"],["ip","pc","192.168.10.40","255.255.255.0","192.168.10.1"],["pc","pc","ping 192.168.30.5"]]})}
+<p>Nothing on HR-PC changed when you hardened the router, yet it "broke". Until you ran <code>arp -d *</code> it kept working on the cached proxy entry — on a real network that lasts until the cache ages out or the router reboots. That's how such faults surface months later, after a router swap or an audit. Fix the host, don't lean on the router.</p>
 <h3>ARP spoofing: a security weak spot</h3>
 <p>ARP has no authentication: any device can send a reply or gratuitous ARP claiming any IP, and most hosts believe it. In ${K.g("ARP spoofing","Also called ARP poisoning: forged ARP messages claim another device's IP (usually the gateway) so victims send traffic to the attacker.")} an attacker keeps telling victims <i>"192.168.10.1 is at</i> <b>my</b> <i>MAC"</i>. Their caches are poisoned: gateway-bound frames go to the attacker, who can read or alter them and pass them on to the real router. That's a ${K.g("man-in-the-middle (MITM)","An attacker secretly relaying — and able to read or change — traffic between two parties.")} attack, and free tools make it trivial on an unprotected LAN.</p>
 ${K.svg("0 0 720 250",
@@ -1748,7 +1770,7 @@ ${K.steps([
   ["NOC-PC sends the request", `<p>192.168.10.2 is off-subnet, so it goes to <b>its</b> gateway, R1 (lesson 4).</p>`],
   ["R1 routes it", `<p>R1 ARPs for 192.168.10.2 on G0/0, the SVI answers, and the request is delivered.</p>`],
   ["The switch builds the reply", `<p>10.10.10.50 isn't on 192.168.10.0/24, so the reply needs a router.</p>`],
-  ["No gateway: the reply dies", `<p>No default gateway: the switch drops the reply. NOC-PC prints <code>Request timed out.</code></p>`],
+  ["No gateway: the reply dies", `<p>With no default gateway, IOS ARPs for 10.10.10.50 itself, as if it were local. Nobody on 192.168.10.0/24 owns it, nobody answers, and the switch drops the reply. NOC-PC prints <code>Request timed out.</code></p>`],
   ["With a gateway: the reply goes home", `<p>With <code>ip default-gateway 192.168.10.1</code>, the reply goes to R1's MAC and on to the NOC.</p>`],
 ])}
 ${K.svg("0 0 740 300",
@@ -1784,7 +1806,10 @@ Type escape sequence to abort.
 Sending 5, 100-byte ICMP Echos to 192.168.10.1, timeout is 2 seconds:
 .!!!!
 Success rate is 80 percent (4/5), round-trip min/avg/max = 1/1/3 ms`, "Setting the gateway, then testing it from the switch. The first dot is normal: the switch was ARPing for the router's MAC while the first echo timed out.")}
-<p>As on a PC, the gateway must be on the SVI's <b>own subnet</b> — the router's address on <b>this</b> side (192.168.10.1, not 10.10.10.1). On a Layer 2 switch, <code>show ip route</code> shows no routing table, only <code>Default gateway is 192.168.10.1</code> — or <code>Default gateway is not set</code>. (On real kit, a router with proxy ARP on — the default on Cisco router interfaces — can sometimes answer for the remote address and hide a missing gateway. Never rely on it: configure the gateway.)</p>
+<p>As on a PC, the gateway must be on the SVI's <b>own subnet</b> — the router's address on <b>this</b> side (192.168.10.1, not 10.10.10.1). On a Layer 2 switch, <code>show ip route</code> shows no routing table, only <code>Default gateway is 192.168.10.1</code> — or <code>Default gateway is not set</code>. </p>
+<h3>The trap: proxy ARP can hide a missing gateway</h3>
+<p>Remember <b>proxy ARP</b> from lesson 4: a router answers an ARP for an address on <i>another</i> network it can route to, with its own MAC. It is <b>on by default</b> on every Cisco router interface. So when the gateway-less switch broadcasts <i>"Who has 10.10.10.50?"</i>, a default-config R1 replies <i>"10.10.10.50 is at my MAC"</i>, the reply goes to R1, and the NOC ping <b>works</b> — with no gateway configured. The fault hides until someone hardens or replaces the router — then management "breaks" for no visible reason.</p>
+<p>That is one reason hardened baselines, such as the ${K.g("CIS benchmarks","Free, consensus security configuration guides from the Center for Internet Security, including ones for Cisco IOS.")} for Cisco IOS, tell you to disable it on router interfaces with <code>no ip proxy-arp</code>: it hides misconfigured hosts, and it makes the router answer ARP on behalf of whole networks. The bench router below is hardened this way, so a missing gateway really shows; the last task switches proxy ARP back on so you can watch it mask the fault.</p>
 ${K.when([
   ["<code>ip default-gateway A.B.C.D</code>","A normal Layer 2 access switch (IP routing off)","The switch acts as a host: one gateway for its off-subnet replies","<code>ip routing</code> is on — IOS then ignores it"],
   ["<code>ip route 0.0.0.0 0.0.0.0 A.B.C.D</code>","A multilayer switch with <code>ip routing</code> on","A routing device uses its routing table, so it needs a default route","A plain Layer 2 switch"],
@@ -1795,11 +1820,11 @@ ${K.mistake(`Pointing the gateway at the router's far side (10.10.10.1) or any o
 <p>The Maitama job in miniature: a factory-fresh <b>NEW-SW</b>, SRV-PC on 192.168.10.0/24, R1 as the office router and WAN, and <b>NOC-PC</b> (10.10.10.50) in the NOC. After each ping, read the frame log to see where the reply dies.</p>
 ${K.hint(`Console settings are 9600 baud, 8 data bits, no parity, 1 stop bit, no flow control. Then: <code>enable</code> → <code>configure terminal</code> → <code>interface g0/1</code> → try <code>ip address 192.168.10.2 255.255.255.0</code> and read the error → <code>interface vlan 1</code> → the same <code>ip address</code> → <code>no shutdown</code>.`)}
 ${K.bench({id:"m2-sw-mgmt", points:70, from:"CCNA · Module 2 · lesson 5", title:"make a new switch reachable from the NOC", viewBox:"0 0 820 380", openLog:true,
-  intro:"Console in with the laptop, give the switch a management IP, and test from both PCs. Click a PC's <b>Command Prompt</b> to ping. Watch the log: amber dots are broadcasts (ARP), teal ones unicasts.",
+  intro:"Console in with the laptop, give the switch a management IP, and test from both PCs. Click a PC's <b>Command Prompt</b> to ping. Watch the log: amber dots are broadcasts (ARP), teal ones unicasts. <b>R1 is hardened:</b> proxy ARP is disabled on both interfaces (<code>no ip proxy-arp</code>), as CIS-style baselines require. R1 has no enable secret here.",
   devices:[
     {id:"sw1", kind:"switch", label:"NEW-SW", host:"Switch", model:"Catalyst switch · factory default", x:40, y:30, fresh:true},
     {id:"r1", kind:"router", label:"R1", model:"ISR · office router + WAN to NOC", x:580, y:30,
-      config: env => { ["enable","configure terminal","hostname R1","interface g0/0","description LAN 192.168.10.0/24","ip address 192.168.10.1 255.255.255.0","no shutdown","interface g0/1","description to NOC 10.10.10.0/24","ip address 10.10.10.1 255.255.255.0","no shutdown","end"].forEach(c=>env.exec(c)); }},
+      config: env => { ["enable","configure terminal","hostname R1","interface g0/0","description LAN 192.168.10.0/24","ip address 192.168.10.1 255.255.255.0","no ip proxy-arp","no shutdown","interface g0/1","description to NOC 10.10.10.0/24","ip address 10.10.10.1 255.255.255.0","no ip proxy-arp","no shutdown","end"].forEach(c=>env.exec(c)); }},
     {id:"pc1", kind:"pc", label:"SRV-PC", x:60, y:250, ip:"192.168.10.11", mask:"255.255.255.0", gw:"192.168.10.1"},
     {id:"lap", kind:"laptop", label:"LAPTOP", x:260, y:250},
     {id:"noc", kind:"pc", label:"NOC-PC", x:640, y:250, ip:"10.10.10.50", mask:"255.255.255.0", gw:"10.10.10.1"},
@@ -1812,11 +1837,12 @@ ${K.bench({id:"m2-sw-mgmt", points:70, from:"CCNA · Module 2 · lesson 5", titl
     {text:"Give <code>interface vlan 1</code> the address 192.168.10.2 255.255.255.0", done:B=>{ const v = B.devs.sw1.env.intfs.Vlan1; return v.ip==="192.168.10.2" && v.mask==="255.255.255.0"; }},
     {text:"Bring the SVI up with <code>no shutdown</code> (it comes up/up because SRV-PC's port is live in VLAN 1)", done:B=>{ const v = B.devs.sw1.env.intfs.Vlan1; return !!v.ip && v.shut===false; }},
     {text:"From <b>SRV-PC</b> (same subnet), <code>ping 192.168.10.2</code> — replies", done:B=>Bench.pinged(B,"pc1","192.168.10.2")},
-    {text:"Before adding any gateway, ping 192.168.10.2 from <b>NOC-PC</b> (other subnet) — it times out. Open the log: the request arrives, the reply can't leave", done:B=>Bench.tried(B,"pc1",/^\s*ping\s+192\.168\.10\.2\s*$/i) && Bench.tried(B,"noc",/^\s*ping\s+192\.168\.10\.2\s*$/i)},
+    {text:"Before adding any gateway, ping 192.168.10.2 from <b>NOC-PC</b> (other subnet) — it times out. Open the log: the request arrives; the switch ARPs for 10.10.10.50 itself and nobody answers, so the reply can't leave", done:B=>Bench.tried(B,"pc1",/^\s*ping\s+192\.168\.10\.2\s*$/i) && Bench.tried(B,"noc",/^\s*ping\s+192\.168\.10\.2\s*$/i)},
     {text:"Configure <code>ip default-gateway 192.168.10.1</code> and ping again from NOC-PC — replies", done:B=>B.devs.sw1.env.defaultGw==="192.168.10.1" && Bench.pinged(B,"noc","192.168.10.2")},
     {text:"Save it: <code>copy running-config startup-config</code>", done:B=>!!B.devs.sw1.env.savedOnce && !!B.devs.sw1.env.startup && B.devs.sw1.env.startup.defaultGw==="192.168.10.1"},
+    {text:"<b>Experiment — why baselines turn proxy ARP off.</b> On NEW-SW, <code>no ip default-gateway</code>. Move the console to <b>R1</b> and turn proxy ARP back on: <code>interface g0/0</code>, <code>ip proxy-arp</code>. Ping 192.168.10.2 from NOC-PC: it replies with no gateway — find the <b>Proxy ARP reply</b> from R1 in the log. Then restore both: <code>no ip proxy-arp</code> on R1 G0/0, and <code>ip default-gateway 192.168.10.1</code> on NEW-SW", done:B=>Bench.proxied(B) && B.devs.r1.env.intfs["GigabitEthernet0/0"].proxyArp===false && B.devs.sw1.env.defaultGw==="192.168.10.1"},
   ],
-  win:"You gave a factory-fresh switch a management address on its SVI, proved the same-subnet test can fool you, watched the reply die without a gateway, fixed it and saved. That is exactly the 'pings from the server room, not from the NOC' ticket — solved before anyone raised it.",
+  win:"You gave a factory-fresh switch a management address on its SVI, proved the same-subnet test can fool you, watched the reply die without a gateway, fixed it and saved — then saw how a router's proxy ARP can hide that same fault. That is exactly the 'pings from the server room, not from the NOC' ticket — solved before anyone raised it.",
   solve:[
     ["plug","console","lap:usb","sw1:con"],
     ["console","lap",{speed:"9600",data:"8",parity:"None",stop:"1",flow:"None"}],
@@ -1828,6 +1854,14 @@ ${K.bench({id:"m2-sw-mgmt", points:70, from:"CCNA · Module 2 · lesson 5", titl
     ["term","configure terminal"],["term","ip default-gateway 192.168.10.1"],["term","end"],
     ["pc","noc","ping 192.168.10.2"],
     ["term","copy running-config startup-config"],["term",""],
+    ["term","configure terminal"],["term","no ip default-gateway"],["term","end"],
+    ["unplug","lap:usb"],["plug","console","lap:usb","r1:con"],["console","lap",{speed:"9600",data:"8",parity:"None",stop:"1",flow:"None"}],["term",""],
+    ["term","enable"],["term","configure terminal"],["term","interface g0/0"],["term","ip proxy-arp"],["term","end"],
+    ["pc","noc","ping 192.168.10.2"],
+    ["term","configure terminal"],["term","interface g0/0"],["term","no ip proxy-arp"],["term","end"],
+    ["unplug","lap:usb"],["plug","console","lap:usb","sw1:con"],["console","lap",{speed:"9600",data:"8",parity:"None",stop:"1",flow:"None"}],["term",""],
+    ["term","enable"],["term","configure terminal"],["term","ip default-gateway 192.168.10.1"],["term","end"],
+    ["pc","noc","ping 192.168.10.2"],
   ]})}
 ${K.check({q:"SRV-PC (192.168.10.11) can ping the switch at 192.168.10.2, but the NOC at 10.10.10.50 cannot. The SVI is up/up. What is the most likely fix?", o:["no shutdown on interface vlan 1","ip default-gateway 192.168.10.1 on the switch","ip address 10.10.10.2 on Gi0/1","Change SRV-PC's default gateway"], a:1, why:"Same-subnet works, so the SVI is fine. The NOC's request arrives, but the switch can't route its reply off 192.168.10.0/24 without a default gateway on its own subnet."})}
 
@@ -2072,7 +2106,7 @@ ${K.job("Day-one switch baseline in Maitama — and 'it pings from the server ro
 <ol>
 <li><code>show ip interface brief</code> — <code>Vlan1 192.168.10.2 YES manual up up</code>. SVI fine.</li>
 <li><code>ping 192.168.10.1</code> from the switch — <code>!!!!!</code>. The local subnet works.</li>
-<li><code>show ip route</code> — <code>Default gateway is not set</code>. There's the fault: the NOC's pings arrive, the replies have no router to go to.</li>
+<li><code>show ip route</code> — <code>Default gateway is not set</code>. There's the fault: the NOC's pings arrive, the replies have no router to go to. (ABJ-MAI-RTR01 runs the MSP's hardened template with <code>no ip proxy-arp</code>, so nothing masks it.)</li>
 <li><code>show running-config | include default-gateway</code> — nothing. The template line was missed while pasting in pieces.</li>
 </ol>
 <p><b>Fix.</b> <code>configure terminal</code>, <code>ip default-gateway 192.168.10.1</code>, <code>end</code>, <code>copy running-config startup-config</code>. <code>show ip route</code> now says <code>Default gateway is 192.168.10.1</code>; the NOC retests and monitoring turns green.</p>
@@ -2095,7 +2129,7 @@ ${K.recap([
   "A Layer 2 switch forwards by MAC with no IP; the management IP is for managing the switch itself.",
   "That IP lives on an SVI — interface vlan 1 — because Layer 2 ports can't take one.",
   "SVI: ip address, no shutdown; up/up only if its VLAN has an active port (autostate).",
-  "No ip default-gateway = pings work from the same subnet, fail from the NOC.",
+  "No ip default-gateway = pings work from the same subnet, fail from the NOC — unless a router's proxy ARP (on by default) hides it.",
   "enable secret is a hash and wins; remove enable password. Type 7 reverses in seconds.",
   "Console: password + login, exec-timeout (never 0 0), logging synchronous. Banner: legal warning only.",
   "no ip domain-lookup; describe used ports, shut unused ones; show interfaces status is the inventory.",
@@ -2900,9 +2934,9 @@ ${K.check({q:"Why save show interfaces status and show cdp neighbors output from
 <p>There are <b>at least five independent faults</b> drawn from Modules 1 and 2: cabling and optics, port state, duplex, VLANs and switch management. No step-by-step instructions: climb the ladder on each complaint, with the switch show commands and the PCs' <code>ipconfig</code>, <code>arp -a</code> and <code>ping</code>. Click any port to read its link state. Some faults hide others, so fix shared causes first.</p>
 ${K.tip(`Every complaint has a <b>Hint</b> button. Hints cost nothing — no points lost — but try each complaint without one first. Being stuck for ten minutes and then finding it yourself teaches more than any hint.`)}
 ${K.bench({id:"m2-challenge", points:150, challenge:true, from:"CCNA · Module 2 · lesson 7", title:"Module 2 challenge — the Monday-morning tickets", viewBox:"0 0 780 560",
-  intro:"Console cable is on SW1 (9600 8N1, no flow control) — move it to SW2 when you need to, or SSH from NOC-PC once a switch is reachable. Enable secret on both switches: <code>NocLab26</code>. NOC SSH login: user <code>noc</code>, password <code>Lagos2026</code>. You can't change the printer's own settings.",
+  intro:"Console cable is on SW1 (9600 8N1, no flow control) — move it to SW2 when you need to, or SSH from NOC-PC once a switch is reachable. Enable secret on both switches: <code>NocLab26</code>. NOC SSH login: user <code>noc</code>, password <code>Lagos2026</code>. You can't change the printer's own settings. EDGE-R1 is built to the MSP's hardened baseline (proxy ARP disabled, <code>no ip proxy-arp</code>) and is not at fault.",
   devices:[
-    {id:"r1", kind:"router", label:"EDGE-R1", model:"ISR 1100 · comms room", x:20, y:20, config:e=>{ ["en","conf t","hostname EDGE-R1","interface g0/0","description LAN to SW1 Gi0/1","ip address 10.20.1.1 255.255.255.0","no shutdown","interface g0/1","description NOC segment","ip address 10.20.99.1 255.255.255.0","no shutdown","end"].forEach(c=>e.exec(c)); e.history.length=0; }},
+    {id:"r1", kind:"router", label:"EDGE-R1", model:"ISR 1100 · comms room", x:20, y:20, config:e=>{ ["en","conf t","hostname EDGE-R1","interface g0/0","description LAN to SW1 Gi0/1","ip address 10.20.1.1 255.255.255.0","no ip proxy-arp","no shutdown","interface g0/1","description NOC segment","ip address 10.20.99.1 255.255.255.0","no ip proxy-arp","no shutdown","end"].forEach(c=>e.exec(c)); e.history.length=0; }},
     {id:"sw1", kind:"switch", label:"SW1", model:"Catalyst 9200 · comms room", x:330, y:20, sfp:{g10:"sfp-lx"}, config:e=>{ ["en","conf t","hostname SW1","enable secret NocLab26","ip domain-name office.lan","username noc secret Lagos2026","crypto key generate rsa modulus 2048","ip ssh version 2","line vty 0 15","login local","transport input ssh","exit",
       "interface g0/1","description EDGE-R1 G0/0","interface g0/2","description FS1 file and print server","interface g0/3","description PRN-1 Accounts printer","speed 100","duplex full","interface g0/10","description UPLINK to SW2 Gi0/10",
       "interface vlan 1","ip address 10.20.1.2 255.255.255.0","no shutdown","exit","ip default-gateway 10.20.1.1","end"].forEach(c=>e.exec(c)); e.history.length=0; }},
@@ -2936,7 +2970,7 @@ ${K.reveal("Instructor walkthrough — every fault, how you'd find it, the fix",
 <p><b>Fault 2 — ACC-PC1 in the wrong VLAN.</b> <i>Found:</i> after the uplink fix, ACC-PC1 still gets <code>Destination host unreachable</code> from its own IP. SW2 shows Gi0/1 in VLAN <code>99</code> (QUARANTINE in <code>show vlan brief</code>); everything else is VLAN 1. <i>Fix:</i> <code>interface g0/1</code>, <code>switchport access vlan 1</code>. <i>Proof:</i> FS1 replies; her MAC appears in VLAN 1.</p>
 <p><b>Fault 3 — ACC-PC2's port shut.</b> <i>Found:</i> <code>Media disconnected</code> on the PC; SW2 Gi0/2 <code>disabled</code> — the unused-port policy, never reversed. <i>Fix:</i> <code>no shutdown</code>. <i>Proof:</i> <code>connected a-full a-1000</code>; ACC-PC2 pings FS1.</p>
 <p><b>Fault 4 — printer duplex mismatch.</b> <i>Found:</i> SW1 Gi0/3 at <code>full 100</code>, no <code>a-</code>: hard-coded switch side, so the auto printer fell to half. <code>show interfaces g0/3</code> shows CRC and runts on this full side. <i>Fix:</i> <code>speed auto</code>, <code>duplex auto</code> (the printer can't be changed, so auto on both ends). <i>Proof:</i> <code>a-full a-1000</code>, no mismatch, FS1 pings PRN-1; on a real job, clear counters and print a test page.</p>
-<p><b>Fault 5 — SW2 has no default gateway.</b> <i>Found:</i> SSH to SW1 works, so NOC-PC, the router and SSH are fine. SW2's Vlan1 is <code>up / up</code> and its SSH config matches SW1's — but SW1 has <code>ip default-gateway 10.20.1.1</code> and SW2 has none, so it can't reply to 10.20.99.10. <i>Fix:</i> <code>ip default-gateway 10.20.1.1</code>. <i>Proof:</i> <code>ssh -l noc 10.20.1.3</code> logs in.</p>
+<p><b>Fault 5 — SW2 has no default gateway.</b> <i>Found:</i> SSH to SW1 works, so NOC-PC, the router and SSH are fine. SW2's Vlan1 is <code>up / up</code> and its SSH config matches SW1's — but SW1 has <code>ip default-gateway 10.20.1.1</code> and SW2 has none, so it can't reply to 10.20.99.10. (With proxy ARP left at its default, EDGE-R1 would have answered SW2's ARP for 10.20.99.10 and hidden this fault; its baseline disables it.) <i>Fix:</i> <code>ip default-gateway 10.20.1.1</code>. <i>Proof:</i> <code>ssh -l noc 10.20.1.3</code> logs in.</p>
 <p><b>Finally</b> <code>write memory</code> on both switches. Ticket note: <i>&ldquo;SW1–SW2 fibre polarity flipped at SW1. SW2 Gi0/1 VLAN 99 → 1. SW2 Gi0/2 no shut. SW1 Gi0/3 100/full hard-code → auto. SW2 ip default-gateway 10.20.1.1 added; NOC SSH OK. Verified, saved.&rdquo;</i></p>`)}
 
 <h2>Interview corner</h2>

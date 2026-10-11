@@ -92,6 +92,7 @@ function render(){ clearLLTimers(); tabs(); statline();
   if (v==="lab") return labView(route.id);
   if (v==="play") return playView(route.env);
   if (v==="bench") return benchView(route.id);
+  if (v==="drills") return drillsView(route.types);
   if (v==="drill") return drillView();
   if (v==="exam") return examView();
   if (v==="career") return careerView();
@@ -518,6 +519,7 @@ function labsView(){
       <button class="btn sm" onclick="GO('play',{env:'git'})">Git workstation</button>
       <button class="btn sm" onclick="GO('play',{env:'k8s'})">K8s bastion</button>
       <button class="btn sm ghost" onclick="GO('drill')">Subnetting drills</button>
+      <button class="btn sm ghost" onclick="GO('drills',{types:'subnet,samesub,nth'})">All drills (binary, hex, masks, subnetting)</button>
     </div></div>
   <div class="card"><h3>Code labs</h3><p class="small muted">Write real Python / Dockerfile / Terraform / CI YAML and get it checked:</p>
     ${LL.tracks.flatMap(t=>t.codelabs.map(c=>`<div class="listrow"><span class="check ${P.codelabsDone[c.id]?"done":""}">✓</span><div class="grow">${esc(c.t)} <span class="tag">${esc(t.title)}</span></div><button class="btn sm ghost" onclick="GO('codelab',{tid:'${t.id}',cid:'${c.id}'})">Open</button></div>`)).join("")}
@@ -598,6 +600,20 @@ function benchView(id){
   const el = $("#bnb");
   Bench.mount(el, b, b.tasks||[], ()=>LLBenchWin(id));
   $("#bnreset").onclick = ()=>el.reset();
+}
+
+/* ---------- drills (all types, on demand) ---------- */
+function drillsView(types){
+  route.group="labs";
+  const all = window.DRILL ? DRILL.types : [];
+  const pick = (types||"").split(",").filter(t=>all.includes(t));
+  main.innerHTML = `<div class="crumbs"><a href="#" onclick="GO('labs');return false">Labs</a> / Drills</div>
+  <div class="card"><h2>Drills — binary, hex, masks and subnetting</h2>
+    <p class="small muted">Endless generated questions with a worked answer for every miss. Pick one skill, or several to mix them.</p>
+    <div class="btnrow">${all.map(t=>`<button class="btn sm ${pick.includes(t)?"":"ghost"}" data-dt="${t}">${esc(DRILL.LABELS[t])}</button>`).join("")}</div>
+    <div id="drillhost">${pick.length?K.drill({title: pick.map(t=>DRILL.LABELS[t]).join(" + "), types:pick, count:10}):`<p class="small">Choose a skill above to start.</p>`}</div></div>`;
+  main.querySelectorAll("[data-dt]").forEach(b=>b.onclick=()=>{ const t=b.dataset.dt, s=new Set(pick); s.has(t)?s.delete(t):s.add(t); go("drills",{types:[...s].join(",")}); });
+  K.hydrate($("#drillhost"));
 }
 
 /* ---------- playground (free practice) ---------- */
@@ -1014,7 +1030,7 @@ function selfTest(){
   Object.keys(LL.benches).forEach(id=>routes.push({view:"bench",id}));
   ["linux","ios","git","k8s"].forEach(env=>routes.push({view:"play",env}));
   LL.tickets.forEach(tk=>routes.push({view:"ticket",id:tk.id}));
-  routes.push({view:"drill"},{view:"mock",topic:"",timed:false});
+  routes.push({view:"drill"},{view:"mock",topic:"",timed:false},{view:"drills",types:"subnet,dec2bin,wildcard"});
   for (const t of LL.tracks) routes.push({view:"exam",track:t.id,mode:"hard"});
   const problems = [];
   for (const r of routes){

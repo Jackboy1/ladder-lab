@@ -52,6 +52,7 @@ function checkQuiz(q, where){
 }
 
 const report = [];
+const kdCount = h => (h.match(/class="kc kd"/g)||[]).length;
 for (const t of LL.tracks){
   const ids = new Set();
   t.lessons.forEach((l,i)=>{
@@ -132,6 +133,8 @@ if (K && K._terms){
   }
 }
 
+// in-lesson drills: types must exist
+if (K && K._drills && ctx.DRILL) for (const [id,d] of Object.entries(K._drills())){ const bad = (d.types||[]).filter(t=>!ctx.DRILL.GEN[t]); if (bad.length) err(`drill "${d.title||id}": unknown types ${bad.join(", ")} (valid: ${ctx.DRILL.types.join(", ")})`); }
 // in-lesson practice questions
 if (K && K._qs) for (const [id,q] of Object.entries(K._qs())){ const p = ctx.QT.problem(q); if (p) err(`practice question "${String(q.q||id).slice(0,50)}": ${p}`); }
 // hands-on benches: tasks must start incomplete and the solve actions must complete all of them

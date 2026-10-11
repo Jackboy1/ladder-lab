@@ -9,6 +9,7 @@ let uid = 0;
 const terms = {};   // id -> {env, opts, setup, title, intro, tasks}
 const benches = {}; // id -> bench config (see bench.js)
 const qs = {};      // id -> practice question (see qtypes.js)
+const drills = {};  // id -> drill config (see drills.js)
 const live = {};    // id -> {env, lines}  (survives re-renders during the session)
 // simulators mutate opts (e.g. opts.intfs), so each box gets its own deep copy (functions such as setup/hooks are kept)
 const fresh = o => { const c = JSON.parse(JSON.stringify(o||{}));
@@ -54,6 +55,9 @@ const K = {
 
   /* in-lesson practice question of any QT type (multi, order, match, fill, mcq) */
   q: q => { const id = "q"+(++uid); qs[id] = q; return `<div class="kc kq" data-kq="${id}"><div class="kc-h">Practice</div><div class="kq-body"></div></div>`; },
+
+  /* endless practice drill (drills.js) — {title, types:["subnet","dec2bin",...], count:5} */
+  drill: cfg => { const id = "d"+(++uid); drills[id] = cfg; return `<div class="kc kd" data-kd="${id}"><div class="kc-h">Drill · ${cfg.title||"practice until it's automatic"}</div><div class="kd-body"></div></div>`; },
 
   /* in-lesson terminal — {env:'ios'|'linux'|'git'|'k8s', title, intro, opts, setup(env), tasks:[{text, done(env)}]} */
   term: cfg => { const id = "t"+(++uid); terms[id] = cfg;
@@ -115,6 +119,7 @@ const K = {
   _terms: () => terms,   // for tools/validate.js
   _benches: () => benches,
   _qs: () => qs,
+  _drills: () => drills,
   _fresh: fresh,
   slug: s => String(s).toLowerCase().replace(/<[^>]+>/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,60),
 
@@ -127,6 +132,23 @@ const K = {
         if (+b.dataset.i!==a) b.classList.add("wrong");
         if (why && why.innerHTML.trim()){ why.hidden=false; why.insertAdjacentHTML("afterbegin", +b.dataset.i===a?"<b>Correct.</b> ":"<b>Not quite.</b> "); }
       });
+    });
+    root.querySelectorAll(".kd").forEach(box=>{
+      const cfg = drills[box.dataset.kd]; if (!cfg || !window.DRILL) return;
+      const body = box.querySelector(".kd-body"), types = (cfg.types||["subnet"]).filter(t=>DRILL.GEN[t]), set = cfg.count||5;
+      let q = DRILL.gen(types), n = 0, right = 0, checked = false, vals = [], marks = [];
+      const draw = () => {
+        if (n>=set){ body.innerHTML = `<p><b>${right}/${set}</b> fully correct${right===set?" — clean sweep.":". Misses are the method you still need: read their walkthroughs and go again."}</p><button class="btn sm kd-again">Another ${set}</button>`; body.querySelector(".kd-again").onclick = () => { n=0; right=0; q=DRILL.gen(types); checked=false; vals=[]; draw(); }; return; }
+        body.innerHTML = `<div class="small muted">Question ${n+1} of ${set} · ${right} right · ${esc(DRILL.LABELS[q.type]||q.type)}</div><div class="kc-q">${esc(q.q)}</div>
+          <div class="kd-fields">${q.fields.map((f,i)=>`<label><span>${esc(f.label)}</span><input class="txt mono" data-i="${i}" value="${esc(vals[i]||"")}" autocomplete="off" spellcheck="false" ${checked?"disabled":""}>${checked?(marks[i]?`<span class="small" style="color:var(--ok)">✓</span>`:`<span class="small" style="color:var(--bad)">✗ ${esc(f.a)}</span>`):""}</label>`).join("")}</div>
+          ${checked?`<div class="kc-why"><b>${marks.every(Boolean)?"Correct.":"Worked answer:"}</b> ${esc(q.why)}</div><button class="btn sm kd-next">${n+1>=set?"Finish":"Next question"}</button>`:`<button class="btn sm kd-check">Check</button> <button class="btn sm ghost kd-skip">Different question</button>`}`;
+        const ins = [...body.querySelectorAll("input")]; if (!checked && ins[0]) ins[0].focus();
+        ins.forEach(inp=>{ inp.oninput = () => { vals[+inp.dataset.i] = inp.value; }; inp.onkeydown = e => { if (e.key==="Enter"){ const c = body.querySelector(".kd-check"); if (c) c.click(); } }; });
+        const c = body.querySelector(".kd-check"); if (c) c.onclick = () => { marks = DRILL.grade(q, vals); checked = true; if (marks.every(Boolean)) right++; draw(); };
+        const sk = body.querySelector(".kd-skip"); if (sk) sk.onclick = () => { q = DRILL.gen(types); vals=[]; draw(); };
+        const nx = body.querySelector(".kd-next"); if (nx) nx.onclick = () => { n++; q = DRILL.gen(types); checked=false; vals=[]; marks=[]; draw(); };
+      };
+      draw();
     });
     root.querySelectorAll(".kq").forEach(box=>{
       const q = qs[box.dataset.kq]; if (!q || !window.QT) return;

@@ -82,5 +82,42 @@ E.exec("hostname R9"); ok(E.host==="R9" && E.mode==="config","global command fro
 E.exec("line con 0"); E.exec("password c0n"); E.exec("login"); E.exec("end");
 const g=E.connect("con"); ok(g.ask==="Password: ","console login asks for the line password");
 E.exec("c0n"); ok(E.mode==="user" && !E.pending,"console password accepted");
+// 9 proxy ARP: a switch with no default gateway reaches a remote PC only while the router proxy-ARPs
+B=Bench.create({devices:[{id:"r",kind:"router",label:"R1",config:e=>{for(const c of ["en","conf t","int g0/0","ip add 10.1.1.1 255.255.255.0","no shut","int g0/1","ip add 10.9.9.1 255.255.255.0","no shut","end"])e.exec(c)}},
+ {id:"s",kind:"switch",label:"S1",config:e=>{for(const c of ["en","conf t","int vlan 1","ip add 10.1.1.2 255.255.255.0","no shut","end"])e.exec(c)}},
+ {id:"noc",kind:"pc",label:"NOC",ip:"10.9.9.50",mask:"255.255.255.0",gw:"10.9.9.1"}],
+ cables:[{type:"cat6",a:"s:g8",b:"r:g0"},{type:"cat6",a:"noc:eth",b:"r:g1"}]});
+ok(/Reply from 10.1.1.2/.test(out(B,["pc","noc","ping 10.1.1.2"])) && Bench.proxied(B),"proxy ARP (IOS default) hides the switch's missing default gateway");
+for (const c of ["conf t","int g0/0","no ip proxy-arp","end"]) B.devs.r.env.exec(c); for (const k of Object.keys(B.arp)) B.arp[k]={};
+ok(/timed out/.test(out(B,["pc","noc","ping 10.1.1.2"])),"with no ip proxy-arp the missing gateway breaks remote management");
+ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0/0")),"running-config shows no ip proxy-arp");
+// 10 drills: thousands of generated answers checked against an independent BigInt calculation
+{ const D = ctx.DRILL; D._seed(12345);
+  const bi = s => s.split(".").reduce((a,o)=>a*256n+BigInt(o),0n), bs = n => [24n,16n,8n,0n].map(k=>String((n>>k)&255n)).join(".");
+  const maskBI = p => p===0 ? 0n : ((1n<<32n)-1n) ^ ((1n<<BigInt(32-p))-1n);
+  let bad = 0, n = 0;
+  for (const t of D.types) for (let i=0;i<400;i++){ const q = D.GEN[t](); n++;
+    const A = q.fields.map(f=>f.a); let okq = true;
+    if (t==="subnet"){ const ip = bi(q.ip), m = maskBI(q.p), net = ip & m, bc = net | (((1n<<32n)-1n) ^ m);
+      okq = A[0]===bs(net) && A[1]===bs(bc) && A[2]===bs(net+1n) && A[3]===bs(bc-1n) && A[4]===String((1n<<BigInt(32-q.p))-2n); }
+    if (t==="dec2bin"){ const d = +q.q.match(/Convert (\d+)/)[1]; okq = parseInt(A[0],2)===d && A[0].length===8; }
+    if (t==="bin2dec"){ const b = q.q.match(/Convert ([01 ]+) to/)[1].replace(/ /g,""); okq = parseInt(b,2)===+A[0]; }
+    if (t==="dec2hex"){ const d = +q.q.match(/Convert (\d+)/)[1]; okq = parseInt(A[0],16)===d; }
+    if (t==="hex2dec"){ const h = q.q.match(/0x([0-9A-F]+)/)[1]; okq = parseInt(h,16)===+A[0]; }
+    if (t==="bin2hex"){ const b = q.q.match(/Convert ([01 ]+) to/)[1].replace(/ /g,""); okq = parseInt(b,2)===parseInt(A[0],16); }
+    if (t==="prefix2mask"){ const p = +q.q.match(/\/(\d+)/)[1]; okq = A[0]===bs(maskBI(p)); }
+    if (t==="mask2prefix"){ const m = q.q.match(/mask ([\d.]+)/)[1]; okq = bs(maskBI(+A[0].slice(1)))===m; }
+    if (t==="wildcard"){ const m = q.q.match(/mask ([\d.]+)/)[1]; okq = bs(((1n<<32n)-1n) ^ bi(m))===A[0]; }
+    if (t==="hosts2prefix"){ const need = +q.q.match(/hold (\d+)/)[1], p = +A[0].slice(1), h = 32-p; okq = 2**h-2>=need && 2**(h-1)-2<need; }
+    if (t==="subnets2prefix"){ const base = +q.q.match(/\/(\d+) into/)[1], need = +q.q.match(/at least (\d+)/)[1], p = +A[0].slice(1); okq = 2**(p-base)>=need && 2**(p-base-1)<need && +A[1]===2**(32-p)-2; }
+    if (t==="samesub"){ const m = q.q.match(/^Are ([\d.]+) and ([\d.]+) .*\/(\d+)/), M = maskBI(+m[3]); okq = ((bi(m[1])&M)===(bi(m[2])&M)) === (A[0]==="yes"); }
+    if (t==="nth"){ const m = q.q.match(/^([\d.]+)\/24 is divided into \/(\d+) subnets.*subnet (\d+),/), size = 1n<<BigInt(32-+m[2]), net = bi(m[1]) + BigInt(+m[3]-1)*size; okq = A[0]===bs(net) && A[1]===bs(net+size-1n); }
+    if (!D.grade(q, A).every(Boolean)) okq = false;                       // the stated answer must be accepted
+    if (q.fields.length && D.grade(q, ["999.1.2.3","x","x","x","x"]).every(Boolean)) okq = false;   // nonsense must be rejected
+    if (!okq){ bad++; if (bad<5) console.log("  bad drill:", t, q.q, A); }
+  }
+  ok(bad===0, `${n} generated drill questions all correct and graded properly`);
+  D._seed(null);
+}
 console.log(fails?`\n${fails} FAILED`:"\nALL PASSED");
 process.exit(fails?1:0);

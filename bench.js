@@ -208,14 +208,21 @@ function hop(B, node, nhIp, label, ttl){
     const req = deliver(B, fromSpec, {src:node.mac, dst:BCAST, kind:"arp", label:"ARP?"}, B.step);
     out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast to ${BCAST}) from ${node.dev.label}: "Who has ${nhIp}? Tell ${node.ip}"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n));
     B.step += Math.max(1, ...req.hops.map(h=>h.step+1-B.step));
-    const owner = req.recv.find(r=>{ if (r.svi) return r.dev.env.intfs[r.svi].ip===nhIp; if (r.ios) return r.dev.env.intfs[r.ios].ip===nhIp; return r.dev.ip===nhIp; });
+    let owner = req.recv.find(r=>{ if (r.svi) return r.dev.env.intfs[r.svi].ip===nhIp; if (r.ios) return r.dev.env.intfs[r.ios].ip===nhIp; return r.dev.ip===nhIp; });
+    let viaProxy = false;
+    if (!owner){
+      // proxy ARP (on by default in IOS): a router answers for an address it can route to out of a DIFFERENT interface
+      owner = req.recv.find(r=>{ if (!r.ios) return false; const i = r.dev.env.intfs[r.ios]; if (!i.ip || i.proxyArp===false || sameNet(i.ip, nhIp, i.mask)) return false; const rt = routeLookup(r.dev, nhIp); return !!(rt && rt.ios!==r.ios); });
+      viaProxy = !!owner;
+    }
     if (!owner){ out.log.push(`&nbsp;&nbsp;· No device answered — nothing on this network has ${nhIp} (or it can't be reached at Layer 2)`); return Object.assign(out, {ok:false, arped}); }
     const ownerMac = owner.svi ? owner.dev.env.intfs[owner.svi].mac : owner.ios ? owner.dev.env.intfs[owner.ios].mac : owner.dev.mac;
     const ownerFrom = owner.svi ? {svi:owner.dev.id, vlan:owner.vlan} : owner.ref;
     const ownerCache = B.arp[owner.dev.id] || (B.arp[owner.dev.id] = {});
     ownerCache[node.ip] = {mac:node.mac, intf: owner.svi || owner.ios || "eth"};
     const rep = deliver(B, ownerFrom, {src:ownerMac, dst:node.mac, kind:"arp", label:"ARP"}, B.step);
-    out.frames.push(...rep.hops); out.log.push(`<b>ARP reply</b> (unicast) from ${owner.dev.label}: "${nhIp} is at ${ownerMac}"`, ...rep.notes.map(n=>"&nbsp;&nbsp;· "+n));
+    out.frames.push(...rep.hops); out.log.push(viaProxy ? `<b>Proxy ARP reply</b> (unicast) from ${owner.dev.label} ${shortIf(owner.ios)}: "${nhIp} is at ${ownerMac}" — the router answers with ITS OWN MAC because it has a route to ${nhIp} out of another interface` : `<b>ARP reply</b> (unicast) from ${owner.dev.label}: "${nhIp} is at ${ownerMac}"`, ...rep.notes.map(n=>"&nbsp;&nbsp;· "+n));
+    if (viaProxy) B.proxied = (B.proxied||0) + 1;
     B.step += Math.max(1, ...rep.hops.map(h=>h.step+1-B.step));
     if (!rep.recv.some(r=>r.dev===node.dev)) return Object.assign(out, {ok:false, arped});
     entry = cache[nhIp] = {mac:ownerMac, intf: node.svi || node.ios || "eth"};
@@ -241,6 +248,7 @@ function sendIp(B, node, dstIp, label){
       if (cur.ip===dstIp){ res.ok = true; res.final = cur; return res; }
       if (sameNet(cur.ip, dstIp, cur.mask)) nh = dstIp;
       else if (cur.gw && sameNet(cur.ip, cur.gw, cur.mask)) nh = cur.gw;
+      else if (cur.svi && !cur.gw) nh = dstIp;   // an IOS switch with no default gateway ARPs for every destination (works only if a router answers with proxy ARP)
       else { res.kind = n===0 ? "general" : "timeout"; res.log.push(`${cur.dev.label} has no default gateway for ${dstIp}`); return res; }
     }
     const h = hop(B, cur, nh, label, ttl);
@@ -654,6 +662,7 @@ window.Bench = { create, act, mount, linkState, linkUpAt, cableAt, CABLES, SFPS,
   remoteTo: (B, pc) => B.remote[pc] && !B.remote[pc].pendingAuth ? B.remote[pc].host : null,
   session: (B, pc) => { const r = B.remote[pc]; return r && !r.pendingAuth ? {host:r.host, proto:r.proto, user:r.user||null} : null; },
   tried: (B, pc, re) => B.events.some(e=>e.a[0]==="pc" && e.a[1]===pc && re.test(e.a[2]||"")),
+  proxied: B => (B.proxied||0) > 0,
   mismatch: (B, a, b) => B.cables.some(c=>((c.a===a&&c.b===b)||(c.a===b&&c.b===a)) && linkState(B,c).mismatch),
 };
 })();
