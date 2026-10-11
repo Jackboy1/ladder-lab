@@ -225,7 +225,7 @@ SPF per area with ECMP; loopbacks advertised as /32; ABRs give `O IA`; `default-
 and Windows `tracert` list each router by the interface the probe arrived on (`!N` / "Destination net unreachable"
 where routing stops). Helpers: `Bench.ospfNbr(B,r,rid[,state])`, `Bench.ospfNbrCount(B,r)`, `Bench.ospfDr(B,r,ios)`,
 `Bench.route(B,r,"10.1.0.0/24"[,code])` → {code, ad, metric, via}, `Bench.routeVia(B,r,dstIp)`, `Bench.traced(B,from,ip)`,
-`Bench.hsrpState(B,r,ios,grp)`. Routers have three ports by default (G0/0–G0/2). Tests: `node tools/routing_test.js`.
+`Bench.hsrpState(B,r,ios,grp)`. No route = ICMP host unreachable ("Destination host unreachable" from the router, IOS `U.U.U`, traceroute `!H`); a routing loop ends in TTL expired in transit (`&&&&&`, alternating traceroute hops); traceroute hops with no return route print `* * *`; `ping|traceroute <ip> source <if|ip>`; `show ip route <ip>` says Subnet/Network not in table. Routers have three ports by default (G0/0–G0/2). Tests: `node tools/routing_test.js`.
 
 **PC Command Prompt:** `ipconfig`, `ipconfig /all`, `ping`, `tracert`, `arp -a`, `arp -d`, `ssh -l <user> <ip>` / `ssh user@ip`,
 `telnet <ip>`, `cls`. SSH/Telnet open a real session on the device (needs a reachable management IP and the right VTY,

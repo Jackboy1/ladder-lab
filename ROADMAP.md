@@ -26,7 +26,7 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 ✅ M2 Ethernet switching & ARP — MAC learning and the MAC table, flooding, broadcast & collision domains, ARP, switch basics and verification
 ✅ M3 Binary, IPv4 addressing & subnetting — binary/hex, address classes & private ranges, masks & CIDR, subnetting the fast way, VLSM, drills
 ✅ M4 VLANs, trunks & Spanning Tree — 7 lessons (VLANs + voice VLAN, 802.1Q trunks/native/allowed/DTP/VTP, inter-VLAN routing ROAS + L3 switch, STP basics, Rapid PVST+ in practice with PortFast/BPDU guard/root guard, EtherChannel LACP/PAgP/on, troubleshooting + 8-fault challenge); 13 benches, 7 terminals, 25 diagrams, all fact-checked
-⬜ M5 Routing — routing table logic, static & default routes, longest-prefix match, administrative distance, OSPF (single/multi-area, DR/BDR, cost, troubleshooting), RIP/EIGRP overview, FHRP/HSRP
+✅ M5 Routing — 8 lessons (reading the routing table: longest match, AD, metric; static/default/host/floating routes and recursion; OSPF concepts; single-area OSPF config; DR/BDR and network types; OSPF cost and adjacency troubleshooting + multi-area first look; HSRP with VRRP/GLBP compared; end-to-end troubleshooting + 7-fault challenge + first portfolio project); 14 benches, 8 terminals, 27 diagrams, all fact-checked
 ⬜ M6 IPv6 — addressing & shortening, types, EUI-64, SLAAC, DHCPv6, static IPv6 routing
 ⬜ M7 IP services — DHCP (and relay), DNS, NAT/PAT, NTP, SNMP, syslog, SSH, FTP/TFTP, QoS
 ⬜ M8 Security — CIA, threats & attacks (DoS/DDoS, spoofing, MITM, social engineering), AAA/RADIUS/TACACS+, standard & extended ACLs, port security, DHCP snooping, DAI, VPNs, wireless security
