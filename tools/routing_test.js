@@ -4,7 +4,7 @@
 const fs = require("fs"), vm = require("vm"), path = require("path");
 const root = path.join(__dirname, "..");
 const ctx = { console }; ctx.window = ctx; vm.createContext(ctx);
-for (const f of ["sim.js", "sim_ios.js", "bench.js"]) vm.runInContext(fs.readFileSync(path.join(root, f), "utf8"), ctx, { filename: f });
+for (const f of ["sim.js", "ipv6.js", "sim_ios.js", "bench.js"]) vm.runInContext(fs.readFileSync(path.join(root, f), "utf8"), ctx, { filename: f });
 const { Bench, SIM } = ctx; let fails = 0;
 const ok = (c, msg, extra) => { if (!c){ fails++; console.log("FAIL:", msg); if (extra) console.log(String(extra).split("\n").map(l=>"      "+l).join("\n")); } else console.log("ok  ", msg); };
 const cfg = cmds => e => { e.exec("en"); e.exec("conf t"); for (const c of cmds) e.exec(c); e.exec("end"); };

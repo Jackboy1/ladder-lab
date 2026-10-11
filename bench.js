@@ -34,7 +34,7 @@ const shortIf = n => n.replace("GigabitEthernet","Gi").replace("FastEthernet","F
 
 /* ---------------- model ---------------- */
 function create(cfg){
-  const B = { cfg, devs:{}, order:[], cables:[], pinged:{}, console:null, events:[], mac:{}, arp:{}, frames:[], log:[], remote:{}, syslog:{} };
+  const B = { cfg, devs:{}, order:[], cables:[], pinged:{}, console:null, events:[], mac:{}, arp:{}, nd:{}, frames:[], log:[], remote:{}, syslog:{} };
   for (const d0 of cfg.devices) addDevice(B, d0);
   for (const c of (cfg.cables||[])){ const r = plug(B, c.type, c.a, c.b, true); if (r.ok && c.swapped) r.cable.swapped = true; }
   if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}
@@ -55,6 +55,7 @@ function addDevice(B, d0){
       B.mac[d.id] = {}; B.arp[d.id] = {};
     } else if (d.kind!=="hub"){
       d.mac = d0.mac || macFor(d.id); B.arp[d.id] = {};
+      d.ip6 = Object.assign({auto:true}, d0.ip6 || {});   // Windows default: "Obtain an IPv6 address automatically" (SLAAC from router advertisements)
     }
     if (d0.snap && d.env) d.env.importConfig(d0.snap);   // a saved topology: restore the device's config
     if (d0.setup) d0.setup(d);
@@ -384,15 +385,15 @@ function deliver(B, from, frame, step0){
       const i = d.env.intfs[x.port.ios]; if (!i || i.shut) return;
       let ln = null;
       const subs = Object.entries(d.env.intfs).filter(([n,s])=>s.sub && s.parent===x.port.ios && !s.shut);
-      if (tag==null){ ln = i.ip ? x.port.ios : ((subs.find(([n,s])=>s.encapNative)||[])[0] || null); }
+      if (tag==null){ ln = (i.ip || i.ip6 || i.ll || i.ip6en || i.ip6auto) ? x.port.ios : ((subs.find(([n,s])=>s.encapNative)||[])[0] || null); }
       else ln = (subs.find(([n,s])=>s.encap===tag && !s.encapNative)||[])[0] || null;
       if (!ln){ if (tag!=null) pushNote(`${d.label} has no subinterface for VLAN ${tag} on ${shortIf(x.port.ios)} — frame dropped`); return; }
       const li = d.env.intfs[ln];
-      if (frame.dst===BCAST || frame.dst===li.mac || hsrpOwnsMac(B, d, ln, frame.dst)) recv.push({dev:d, ref, ios:ln, tag});
+      if (frame.dst===BCAST || frame.dst===li.mac || isV6Mc(frame.dst) || hsrpOwnsMac(B, d, ln, frame.dst)) recv.push({dev:d, ref, ios:ln, tag});
       return;
     }
     if (tag!=null){ pushNote(`${d.label} received a frame with an 802.1Q tag and ignored it (a normal NIC expects untagged frames)`); return; }
-    if (frame.dst===BCAST || frame.dst===d.mac) recv.push({dev:d, ref}); else if (frame.kind!=="arp") pushNote(`${d.label} saw a frame for ${frame.dst} and ignored it (not its MAC)`);
+    if (frame.dst===BCAST || frame.dst===d.mac || isV6Mc(frame.dst)) recv.push({dev:d, ref}); else if (frame.kind!=="arp") pushNote(`${d.label} saw a frame for ${frame.dst} and ignored it (not its MAC)`);
   };
   if (from && from.svi){ const sw = B.devs[from.svi]; switchIn(sw, null, from.vlan, step0||0); }
   else if (from && from.ref) sendPhys(from.ref, from.tag==null?null:from.tag, step0||0);
@@ -538,14 +539,14 @@ function l3Hear(B, d, ios){
   return (r.recv||[]).filter(x=>x.dev!==d && x.dev.env).map(x=>({dev:x.dev, ios: x.svi || x.ios}));
 }
 function l3Sig(B){
-  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask]; }),
+  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask, d.ip6]; }),
     B.cables.map(c=>[c.a, c.b, c.type])]);
 }
 function computeL3(B){
   if (B._l3busy) return B._l3 || {ospf:{}, hsrp:{}};
   const sig = l3Sig(B); if (B._l3 && B._l3.sig===sig) return B._l3;
   B._l3busy = true; const keepStorm = B.stormSeen;
-  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; return res; }
+  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; res.ra = computeRa(B); return res; }
   finally { B._l3busy = false; B.stormSeen = keepStorm; }
 }
 function computeOspf(B, hears){
@@ -728,11 +729,131 @@ function winTraceText(t, dst){
   L.push("", "Trace complete."); return L.join("\n");
 }
 
+/* ---- IPv6: router advertisements (SLAAC), Neighbor Discovery, forwarding, ping and traceroute ---- */
+const v6InPlay = (B, cfg) => !!(cfg && (cfg.builder || cfg.ipv6)) || B.order.some(id=>{ const d = B.devs[id]; if (d.env) return d.env.v6info().ifaces.length > 0 || !!d.env.v6info().routing; return !!(d.ip6 && !d.ip6.auto); });
+const isV6Mc = mac => typeof mac==="string" && mac.startsWith("3333.");
+const I6 = () => window.IP6;
+// who advertises a prefix on this segment: routers with ipv6 unicast-routing and a /64 on the interface that hears us
+function raFrom(B, from, srcMac){
+  const r = deliver(B, from, {src:srcMac, dst:"3333.0000.0002", kind:"nd", label:"RS"}, 0);
+  for (const x of (r.recv||[])){ const d = x.dev; if (!d.env || !d.env.v6info || d.kind!=="router") continue; const v = d.env.v6info(); if (!v.routing) continue;
+    const f = v.ifaces.find(i=>i.ios===x.ios && i.up); if (!f) continue; const g = f.globals.find(gg=>gg.len===64 && !gg.auto); if (!g) continue;
+    return {prefix: I6().str(I6().mask(I6().parse(g.addr), 64)), len:64, rtrLL:f.ll, dev:d.id, ios:f.ios}; }
+  return null;
+}
+function computeRa(B){
+  const out = {};
+  // only matters when some router advertises IPv6; and working it out must not teach the switches any MACs (lessons rely on empty tables)
+  if (!B.order.some(id=>{ const d = B.devs[id]; return d.env && d.kind==="router" && d.env.v6info && d.env.v6info().routing; })) return out;
+  const savedMac = JSON.stringify(B.mac);
+  try { computeRaInner(B, out); } finally { B.mac = JSON.parse(savedMac); }
+  return out;
+}
+function computeRaInner(B, out){
+  for (const id of B.order){ const d = B.devs[id]; if (d.on===false) continue;
+    if (!d.env && d.kind!=="hub" && d.ip6 && d.ip6.auto){ const ref = hostNode(d).ref; if (ref && linkUpAt(B, ref)) out[id] = raFrom(B, ref, d.mac); }
+    if (d.env && d.kind==="router") for (const [n,i] of Object.entries(d.env.intfs)) if (i.ip6auto && d.env.isUp(n)){ const node = routerNodeFor(d, n); out[id+"|"+n] = raFrom(B, node.tag!=null ? {ref:node.ref, tag:node.tag} : node.ref, i.mac); } }
+  return out;
+}
+// a host's IPv6 identity: link-local always; global from static settings or SLAAC (prefix from the RA + EUI-64 — real Windows uses a random interface ID)
+function host6(B, d){
+  const I = I6(), ll = I.str(I.linkLocal(d.mac)), ra = (B._l3 && B._l3.ra || {})[d.id];
+  const globals = d.ip6 && !d.ip6.auto ? (d.ip6.addr ? [{addr:I.str(I.parse(d.ip6.addr)), len:d.ip6.len||64}] : []) : ra ? [{addr: I.str(I.withIid(I.parse(ra.prefix), I.eui64(d.mac))), len:64, slaac:true}] : [];
+  const gw = d.ip6 && !d.ip6.auto ? (d.ip6.gw ? I.str(I.parse(d.ip6.gw)) : null) : ra ? ra.rtrLL : null;
+  return {dev:d, ref: hostNode(d).ref, mac:d.mac, ll, globals, gw, host:true};
+}
+function router6(r, ios){ const v = r.env.v6info(), f = v.ifaces.find(i=>i.ios===ios) || {}; const base = routerNodeFor(r, ios); return Object.assign({}, base, {ll:f.ll, globals:f.globals||[], v6:true}); }
+const addrs6 = n => [n.ll, ...(n.globals||[]).map(g=>g.addr)].filter(Boolean);
+// ND: one hop. Neighbor Solicitation to the solicited-node multicast group, Neighbor Advertisement back, then the packet
+function hop6(B, node, nh, label){
+  const I = I6(), cache = B.nd[node.dev.id] || (B.nd[node.dev.id] = {}), out = {frames:[], log:[]};
+  const fromSpec = node.svi ? {svi:node.dev.id, vlan:node.vlan} : (node.tag!=null ? {ref:node.ref, tag:node.tag} : node.ref);
+  let entry = cache[nh];
+  if (!entry){
+    const ns = deliver(B, fromSpec, {src:node.mac, dst:I.solicitedMac(nh), kind:"nd", label:"NS?"}, B.step);
+    out.frames.push(...ns.hops); out.log.push(`<b>Neighbor Solicitation</b> (to the solicited-node group ${I.str(I.solicited(nh))}) from ${node.dev.label}: "Who has ${nh}?"`, ...ns.notes.map(x=>"&nbsp;&nbsp;· "+x));
+    B.step += Math.max(1, ...ns.hops.map(h=>h.step+1-B.step));
+    const owner = ns.recv.find(r=>{ if (r.dev===node.dev) return false; if (r.dev.env){ if (!r.ios || !r.dev.env.v6info) return false; const f = r.dev.env.v6info().ifaces.find(i=>i.ios===r.ios && i.up); return !!f && addrs6({ll:f.ll, globals:f.globals}).some(a=>I.eq(a, nh)); }
+      const h = host6(B, r.dev); return addrs6(h).some(a=>I.eq(a, nh)); });
+    if (!owner){ out.log.push(`&nbsp;&nbsp;· No Neighbor Advertisement came back — nothing on this link has ${nh}`); return Object.assign(out, {ok:false}); }
+    const omac = owner.ios ? owner.dev.env.intfs[owner.ios].mac : owner.dev.mac;
+    (B.nd[owner.dev.id] || (B.nd[owner.dev.id] = {}))[addrs6(node)[0]] = {mac:node.mac, ios: owner.ios || "eth"};
+    const na = deliver(B, owner.tag!=null ? {ref:owner.ref, tag:owner.tag} : owner.ref, {src:omac, dst:node.mac, kind:"nd", label:"NA"}, B.step);
+    out.frames.push(...na.hops); out.log.push(`<b>Neighbor Advertisement</b> (unicast) from ${owner.dev.label}: "${nh} is at ${omac}"`, ...na.notes.map(x=>"&nbsp;&nbsp;· "+x));
+    B.step += Math.max(1, ...na.hops.map(h=>h.step+1-B.step));
+    if (!na.recv.some(r=>r.dev===node.dev)) return Object.assign(out, {ok:false});
+    entry = cache[nh] = {mac:omac, ios: node.ios || "eth"};
+  }
+  const f = deliver(B, fromSpec, {src:node.mac, dst:entry.mac, kind:"ip", label}, B.step);
+  out.frames.push(...f.hops); out.log.push(`<b>${label}</b> (IPv6) ${node.dev.label} → frame to ${entry.mac}`, ...f.notes.map(x=>"&nbsp;&nbsp;· "+x));
+  B.step += Math.max(1, ...f.hops.map(h=>h.step+1-B.step));
+  const rcv = f.recv.find(r=>{ const m = r.ios ? r.dev.env.intfs[r.ios].mac : r.dev.mac; return m===entry.mac; });
+  return Object.assign(out, {ok:!!rcv, to:rcv});
+}
+const pick6 = (n, dst) => { const I = I6(); if (I.isLL(dst)) return n.ll; const g = (n.globals||[])[0]; return g ? g.addr : n.ll; };
+function sendIp6(B, node, dst, label, outIf){
+  const I = I6(), res = {frames:[], log:[], ok:false, kind:"timeout", path:[]};
+  let cur = node, hl = node.dev.env ? 64 : 128;
+  for (let n=0; n<300; n++){
+    let nh;
+    if (cur.dev.env && cur.dev.kind==="router"){
+      const v = cur.dev.env.v6info();
+      if (v.ifaces.some(f=>f.up && addrs6(f).some(a=>I.eq(a, dst)))){ res.ok = true; res.final = {dev:cur.dev}; if (n>0) res.path.push(dst); return res; }
+      if (n>0 && !v.routing){ res.log.push(`${cur.dev.label} isn't routing IPv6 (no <b>ipv6 unicast-routing</b>) — it drops the packet`); res.kind = "timeout"; return res; }
+      if (I.isLL(dst)){ if (n>0) return res; const ios = outIf || cur.ios; if (!ios) { res.kind = "noroute"; return res; } cur = router6(cur.dev, ios); nh = dst; }
+      else { const r = cur.dev.env.lookup6(dst) || (n===0 ? (()=>{ for (const f of v.ifaces) if (f.up) for (const g of f.globals) if (I.inPrefix(dst, g.addr, g.len)) return {ios:f.ios, nh:dst}; return null; })() : null);
+        if (!r){ if (n===0){ res.kind = "noroute"; res.log.push(`${cur.dev.label} has no IPv6 route to ${dst}`); return res; }
+          res.kind = "unreach"; res.unreachFrom = cur.inAddr; res.log.push(`${cur.dev.label} has no IPv6 route to ${dst} — it drops the packet and sends ICMPv6 <b>Destination Unreachable</b> (no route to destination) back from ${cur.inAddr}`); return res; }
+        cur = router6(cur.dev, r.ios); nh = r.nh; }
+    } else {
+      if (addrs6(cur).some(a=>I.eq(a, dst))){ res.ok = true; res.final = cur; return res; }
+      if (I.isLL(dst) || (cur.globals||[]).some(g=>I.inPrefix(dst, g.addr, g.len))) nh = dst;
+      else if (cur.gw) nh = cur.gw;
+      else { res.kind = n===0 ? "general" : "timeout"; res.log.push(`${cur.dev.label} has no IPv6 default gateway for ${dst}`); return res; }
+    }
+    const h = hop6(B, cur, nh, label);
+    if (n < 12){ res.frames.push(...h.frames); res.log.push(...h.log); }
+    if (!h.ok){ if (n===0){ res.kind = "addrunreach"; res.unreachFrom = pick6(cur, dst); } else { res.kind = "addrunreach"; res.unreachFrom = cur.inAddr; } return res; }
+    const to = h.to;
+    if (to.ios && to.dev.env){ const rn = router6(to.dev, to.ios); const inAddr = pick6(rn, dst);
+      if (to.dev.env.v6info().ifaces.some(f=>f.up && addrs6(f).some(a=>I.eq(a, dst)))){ res.ok = true; res.final = {dev:to.dev, ios:to.ios}; res.path.push(dst); return res; }
+      hl--; res.path.push(inAddr);
+      if (hl<=0){ res.kind = "ttlexpired"; res.unreachFrom = inAddr; return res; }
+      cur = {dev:to.dev, inAddr}; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements the hop limit to ${hl} and routes it`); continue; }
+    const hn = host6(B, to.dev); if (addrs6(hn).some(a=>I.eq(a, dst))){ res.ok = true; res.final = hn; res.path.push(dst); return res; }
+    return res;
+  }
+  return res;
+}
+function node6For(B, d, dst, outIf){ if (d.env){ return {dev:d, ios: outIf || null}; } return host6(B, d); }
+function ping6(B, d, dst, outIf){
+  B_ctx.B = B; B.step = 0; computeL3(B); const I = I6(); dst = I.str(I.parse(dst));
+  const node = node6For(B, d, dst, outIf), go = sendIp6(B, node, dst, "ICMPv6 echo request", outIf);
+  let frames = go.frames, log = go.log.slice(), ok = false, kind = go.kind;
+  if (go.ok){ const fin = go.final.dev.env ? {dev:go.final.dev, ios:go.final.ios} : go.final;   // a link-local reply leaves by the interface the request came in on
+    const src = d.env ? (I.isLL(dst) ? d.env.v6info().ifaces.find(f=>f.ios===outIf)?.ll : (()=>{ const r = d.env.lookup6(dst); const f = r && d.env.v6info().ifaces.find(x=>x.ios===r.ios); return f && f.globals[0] ? f.globals[0].addr : null; })()) : pick6(node, dst);
+    const back = src ? sendIp6(B, fin, src, "ICMPv6 echo reply", go.final.dev.env ? go.final.ios : null) : {ok:false, frames:[], log:[]};
+    frames = frames.concat(back.frames); log = log.concat(back.log); ok = back.ok; if (!ok) kind = "timeout"; }
+  B.frames = frames; B.log = log;
+  return {ok, kind, unreachFrom: go.unreachFrom};
+}
+function trace6(B, d, dst){
+  B_ctx.B = B; B.step = 0; computeL3(B); const I = I6(); dst = I.str(I.parse(dst));
+  const node = node6For(B, d, dst), go = sendIp6(B, node, dst, "Traceroute probe (IPv6)");
+  B.frames = go.frames; B.log = go.log;
+  return {hops: go.path || [], ok: go.ok, kind: go.kind === "unreach" ? "netunreach" : go.kind, silent:new Set()};
+}
+
 /* ---- hooks the IOS engine calls ---- */
 function makeHooks(B, d){
   const l3 = () => computeL3(B), os = () => l3().ospf[d.id] || null;
   return {
     ospfRoutes: () => (os() || {}).routes || [],
+    ra: ios => (l3().ra || {})[d.id+"|"+ios] || null,
+    nd6: () => Object.entries(B.nd[d.id]||{}).map(([addr, e])=>({addr, mac:e.mac, ios:e.ios})),
+    ping6: (ip, outIf) => ping6(B, d, ip, outIf),
+    trace6: ip => { const t = trace6(B, d, ip); const U = a => I6().str(I6().parse(a), true);
+      return iosTraceText({hops:t.hops.map(U), ok:t.ok, kind:t.kind, silent:t.silent}, U(ip)).replace("VRF info: (vrf in name/id, vrf out name/id)\n", "\n"); },
     ospfNbrs: () => (os() || {}).nbrs || [],
     ospfIf: ios => ((os() || {}).ifs || {})[ios] || null,
     ospfSelf: () => { const o = os(); return o ? {abr:o.abr, spfRuns:o.spfRuns} : null; },
@@ -813,7 +934,9 @@ function pcExec(B, d, line){
     if (!media) return o + `   Media State . . . . . . . . . . . : Media disconnected\n   Connection-specific DNS Suffix  . :`+(all?`\n   Physical Address. . . . . . . . . : ${winMac(d.mac)}`:"");
     if (all) o += `   Description . . . . . . . . . . . : Intel(R) Ethernet Connection I219-LM\n   Physical Address. . . . . . . . . : ${winMac(d.mac)}\n   DHCP Enabled. . . . . . . . . . . : No\n`;
     if (!d.ip) return o + `   Autoconfiguration IPv4 Address. . : 169.254.${(d.id.length*37)%250+1}.${(d.id.length*91)%250+2}\n   Subnet Mask . . . . . . . . . . . : 255.255.0.0\n   Default Gateway . . . . . . . . . :`;
-    return o + `   IPv4 Address. . . . . . . . . . . : ${d.ip}\n   Subnet Mask . . . . . . . . . . . : ${d.mask}\n   Default Gateway . . . . . . . . . : ${d.gw||""}`;
+    computeL3(B); const h6 = host6(B, d), v6 = [...h6.globals.map(g=>`   IPv6 Address. . . . . . . . . . . : ${g.addr}`), `   Link-local IPv6 Address . . . . . : ${h6.ll}%4`].join("\n") + "\n";
+    const gws = [h6.gw ? h6.gw + (I6().isLL(h6.gw) ? "%4" : "") : null, d.gw].filter(Boolean);
+    return o + v6 + `   IPv4 Address. . . . . . . . . . . : ${d.ip}\n   Subnet Mask . . . . . . . . . . . : ${d.mask}\n   Default Gateway . . . . . . . . . : ${gws[0]||""}${gws.slice(1).map(g=>"\n                                       "+g).join("")}`;
   }
   if (/^arp\s+-a$/.test(l) || l==="arp -g"){
     if (!d.ip || !media) return "No ARP Entries Found.";
@@ -822,6 +945,20 @@ function pcExec(B, d, line){
     return `\nInterface: ${d.ip} --- 0x4\n  Internet Address      Physical Address      Type\n` + rows.join("\n");
   }
   if (/^arp\s+-d/.test(l)){ B.arp[d.id] = {}; return ""; }
+  const v6arg = t.slice(1).find(x=>window.IP6 && window.IP6.valid(x.replace(/%\d+$/,"")));
+  if ((t[0].toLowerCase()==="ping" || t[0].toLowerCase()==="tracert") && v6arg){
+    const ip = window.IP6.str(window.IP6.parse(v6arg.replace(/%\d+$/,"")));
+    if (!media) return t[0].toLowerCase()==="ping" ? `\nPinging ${ip} with 32 bytes of data:\n` + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") : "\nTransmit error: code 1231.";
+    if (t[0].toLowerCase()==="tracert"){ const r = trace6(B, d, ip); B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: r.ok}); return winTraceText(r, ip); }
+    const res = ping6(B, d, ip); B.pinged[d.id+">"+ip] = res.ok;
+    const head = `\nPinging ${ip} with 32 bytes of data:\n`, stat = n => `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = ${n}, Lost = ${4-n} (${(4-n)*25}% loss),`;
+    if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${ip}: time<1ms`).join("\n") + stat(4);
+    if (res.kind==="unreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination net unreachable.`).join("\n") + stat(4);
+    if (res.kind==="addrunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination host unreachable.`).join("\n") + stat(4);
+    if (res.kind==="ttlexpired") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: TTL expired in transit.`).join("\n") + stat(4);
+    if (res.kind==="general" || res.kind==="noroute") return head + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") + stat(0);
+    return head + [...Array(4)].map(()=>"Request timed out.").join("\n") + stat(0);
+  }
   if (t[0].toLowerCase()==="tracert"){
     const ip = t[t.length-1]; if (t.length<2 || ipToInt(ip)==null) return `Unable to resolve target system name ${t[1]||""}.`;
     if (!media || !d.ip) return "\nTransmit error: code 1231.";   // no link / no address
@@ -880,6 +1017,13 @@ function act(B, a){
   else if (op==="insert"){ const p = P(B, x[0]); if (!p || p.port.type!=="sfp") r = {ok:false, msg:"Transceivers go into an SFP cage."}; else if (p.port.sfp) r = {ok:false, msg:"There's already a module in that cage — remove it first."}; else { p.port.sfp = x[1]; r = {ok:true, msg:`Inserted ${SFPS[x[1]].short} into ${portName(p)}.`}; } }
   else if (op==="remove"){ const p = P(B, x[0]); if (!p || !p.port.sfp) r = {ok:false, msg:"No module there."}; else if (cableAt(B, x[0])) r = {ok:false, msg:"Unplug the fibre before pulling the transceiver."}; else { p.port.sfp = null; r = {ok:true, msg:"Module removed."}; } }
   else if (op==="flip"){ const c = cableAt(B, x[0]); if (!c || CABLES[c.type].kind!=="fibre") r = {ok:false, msg:"Only duplex fibre connectors have a Tx/Rx polarity to flip."}; else { c.swapped = !c.swapped; r = {ok:true, msg:"Flipped the LC duplex connector (Tx↔Rx) at this end."}; } }
+  else if (op==="ip6"){ const d = B.devs[x[0]], I = window.IP6;   // ["ip6", dev, "auto"|"static", address, prefix length, gateway]
+    if (x[1]==="auto"){ d.ip6 = {auto:true}; B.nd[d.id] = {}; r = {ok:true, msg:`${d.label}: IPv6 set to obtain an address automatically (SLAAC).`}; }
+    else if (x[2] && !I.valid(x[2])) r = {ok:false, msg:"That IPv6 address isn't valid (e.g. 2001:db8:acad:1::10)."};
+    else if (x[3] && !(+x[3]>=1 && +x[3]<=128)) r = {ok:false, msg:"The subnet prefix length must be 1–128 (usually 64)."};
+    else if (x[4] && !I.valid(x[4])) r = {ok:false, msg:"The default gateway isn't a valid IPv6 address."};
+    else if (x[2] && ["multicast","unspecified","loopback"].includes(I.type(x[2]))) r = {ok:false, msg:`${x[2]} can't be a host address (it's ${I.type(x[2])}).`};
+    else { d.ip6 = {auto:false, addr: x[2] ? I.str(I.parse(x[2])) : null, len: +(x[3]||64), gw: x[4] ? I.str(I.parse(x[4])) : null}; B.nd[d.id] = {}; r = {ok:true, msg:`${d.label}: IPv6 settings saved.`}; } }
   else if (op==="ip"){ const d = B.devs[x[0]];
     if (x[1] && ipToInt(x[1])==null) r = {ok:false, msg:"That IP address isn't valid — four numbers 0–255 separated by dots."};
     else if (x[2] && !validMask(x[2])) r = {ok:false, msg:"That subnet mask isn't valid (e.g. 255.255.255.0)."};
@@ -1051,6 +1195,7 @@ function mount(el, cfg, tasks, onWin){
     if (op==="insert") return `Insert a <b>${esc(SFPS[x[1]].name)}</b> into <b>${esc(pn(x[0]))}</b>`;
     if (op==="remove") return `Remove the transceiver from <b>${esc(pn(x[0]))}</b>`;
     if (op==="flip") return `Click <b>${esc(pn(x[0]))}</b> → <b>Flip Tx/Rx</b> (swap the LC connector polarity)`;
+    if (op==="ip6") return x[1]==="auto" ? `<b>${esc(lab(x[0]))} → IPv6 settings</b>: Obtain an IPv6 address automatically → OK` : `<b>${esc(lab(x[0]))} → IPv6 settings</b>: address <code>${esc(x[2]||"(blank)")}</code>/<code>${esc(x[3]||"64")}</code>, gateway <code>${esc(x[4]||"(blank)")}</code> → OK`;
     if (op==="ip") return `<b>${esc(lab(x[0]))} → IP settings</b>: IP <code>${esc(x[1]||"(blank)")}</code>, mask <code>${esc(x[2]||"(blank)")}</code>, gateway <code>${esc(x[3]||"(blank)")}</code> → OK`;
     if (op==="pc") return `<b>${esc(lab(x[0]))} → Command Prompt</b>: <code>${esc(x[1]||"(press Enter)")}</code>`;
     if (op==="console"){ const s = x[1]||{}; return `<b>${esc(lab(x[0]))} → Terminal app (PuTTY)</b>: Serial, COM3, speed <code>${esc(s.speed)}</code>, data bits <code>${esc(s.data)}</code>, parity <code>${esc(s.parity)}</code>, stop bits <code>${esc(s.stop)}</code>, flow control <code>${esc(s.flow)}</code> → Open`; }
@@ -1087,7 +1232,7 @@ function mount(el, cfg, tasks, onWin){
           <div class="btnrow">${selC?`<button class="btn sm ghost" data-unplug="${sel}">Unplug</button>`:""}${selC&&CABLES[selC.type].kind==="fibre"?`<button class="btn sm ghost" data-flip="${sel}">Flip Tx/Rx at this end</button>`:""}${selX.port.type==="sfp"&&selX.port.sfp&&!selC?`<button class="btn sm ghost" data-remove="${sel}">Remove ${esc(SFPS[selX.port.sfp].short)} module</button>`:""}<button class="btn sm ghost" data-desel="1">Close</button></div></div>`:""}
       <div class="bn-devs">${B.order.map(id=>{ const d = B.devs[id];
         const btns = [];
-        if (d.kind==="pc"||d.kind==="server"||d.kind==="laptop"){ btns.push(`<button class="btn sm ghost" data-tool="ip:${id}">IP settings</button>`, `<button class="btn sm ghost" data-tool="cmd:${id}">Command Prompt</button>`); }
+        if (d.kind==="pc"||d.kind==="server"||d.kind==="laptop"){ btns.push(`<button class="btn sm ghost" data-tool="ip:${id}">IP settings</button>`); if (v6InPlay(B, cfg)) btns.push(`<button class="btn sm ghost" data-tool="ip6:${id}">IPv6 settings</button>`); btns.push(`<button class="btn sm ghost" data-tool="cmd:${id}">Command Prompt</button>`); }
         if (d.kind==="laptop") btns.push(`<button class="btn sm ghost" data-tool="putty:${id}">Terminal app (PuTTY)</button>`);
         if (cfg.builder && d.env) btns.push(`<button class="btn sm ghost" data-tool="cli:${id}">CLI</button>`);
         if (cfg.builder) btns.push(`<button class="btn sm ghost" data-rename="${id}">Rename</button>`, `<button class="btn sm ghost" data-del="${id}">Delete</button>`);
@@ -1111,6 +1256,13 @@ function mount(el, cfg, tasks, onWin){
   function toolHtml(){
     if (!tool) return "";
     const [kind, id] = tool.split(":"), d = B.devs[id];
+    if (kind==="ip6"){ const v = d.ip6 || {auto:true};
+      return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · Internet Protocol Version 6 (TCP/IPv6) Properties</div>
+      <div class="bn-form"><label><input type="radio" name="bn6m" value="auto" ${v.auto?"checked":""}> Obtain an IPv6 address automatically</label><label><input type="radio" name="bn6m" value="static" ${v.auto?"":"checked"}> Use the following IPv6 address:</label>
+      <label>IPv6 address<input class="txt" id="bn-ip6" value="${esc(v.addr||"")}" placeholder="e.g. 2001:db8:acad:1::10"></label>
+      <label>Subnet prefix length<input class="txt" id="bn-len6" value="${esc(String(v.len||64))}" placeholder="64"></label>
+      <label>Default gateway<input class="txt" id="bn-gw6" value="${esc(v.gw||"")}" placeholder="e.g. fe80::1"></label></div>
+      <div class="btnrow"><button class="btn sm" id="bn-ip6save">OK</button><button class="btn sm ghost" data-tool="">Cancel</button></div></div>`; }
     if (kind==="ip") return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · Internet Protocol Version 4 (TCP/IPv4) Properties</div>
       <div class="bn-form"><label>IP address<input class="txt" id="bn-ip" value="${esc(d.ip||"")}" placeholder="e.g. 192.168.10.11"></label>
       <label>Subnet mask<input class="txt" id="bn-mask" value="${esc(d.mask||"")}" placeholder="e.g. 255.255.255.0"></label>
@@ -1226,6 +1378,8 @@ function mount(el, cfg, tasks, onWin){
     el.querySelectorAll("[data-desel]").forEach(b=>b.onclick=()=>{ sel=null; draw(); });
     el.querySelectorAll("[data-power]").forEach(b=>b.onclick=()=>{ const d = B.devs[b.dataset.power]; after(act(B,["power", d.id, !d.on])); });
     el.querySelectorAll("[data-tool]").forEach(b=>b.onclick=()=>{ tool = b.dataset.tool || null; draw(); focusSel("#bn-cmd,#bn-ip,#bn-tin"); });
+    const ip6s = el.querySelector("#bn-ip6save");
+    if (ip6s) ip6s.onclick = () => { const id = tool.split(":")[1]; const m = (el.querySelector('input[name="bn6m"]:checked')||{}).value || "auto"; const r = act(B, ["ip6", id, m, el.querySelector("#bn-ip6").value.trim(), el.querySelector("#bn-len6").value.trim(), el.querySelector("#bn-gw6").value.trim()]); if (r.ok) tool=null; after(r); };
     const ips = el.querySelector("#bn-ipsave");
     if (ips) ips.onclick = () => { const id = tool.split(":")[1]; const r = act(B, ["ip", id, el.querySelector("#bn-ip").value.trim(), el.querySelector("#bn-mask").value.trim(), el.querySelector("#bn-gw").value.trim()]); if (r.ok) tool=null; after(r); };
     if (el.querySelector("#bn-cmd")){ const id = tool.split(":")[1], d = B.devs[id];

@@ -52,7 +52,7 @@ function ios2Env(opts){
     return { host: opts.host || (kind==="router"?"Router":"Switch"), enableSecret:null, enablePassword:null, servicePwEnc:false, banner:null,
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
-      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null,
+      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[],
       vlans: kind==="switch" ? {1:"default", 1002:"fddi-default", 1003:"token-ring-default", 1004:"fddinet-default", 1005:"trnet-default"} : {}, intfs };
   };
   const st = Object.assign(factory(), { kind, mode:"user", cur:null, curList:null, curLine:null, curVlan:null, history:[], savedOnce:false, startup:null, pending:null, noEcho:false, motd: opts.motd!=null?opts.motd:"" });
@@ -162,6 +162,7 @@ function ios2Env(opts){
     if (!st.domainLookup) L.push("no ip domain lookup");
     if (st.domain) L.push(`ip domain name ${st.domain}`);
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
+    if (st.v6routing) L.push("ipv6 unicast-routing");
     if (!st.cdpRun) L.push("no cdp run");
     if (st.lldpRun) L.push("lldp run");
     if (kind==="switch"){ L.push(`spanning-tree mode ${st.stpMode}`); if (st.pfDefault) L.push("spanning-tree portfast default"); if (st.bpduDefault) L.push("spanning-tree portfast bpduguard default"); L.push("spanning-tree extend system-id");
@@ -191,6 +192,9 @@ function ios2Env(opts){
       }
       if (i.bw) L.push(` bandwidth ${i.bw}`);
       if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
+      if (i.ll) L.push(` ipv6 address ${U(i.ll)} link-local`);
+      for (const a of (i.ip6||[])) L.push(a.eui ? ` ipv6 address ${U(I6.mask(I6.parse(a.addr), 64))}/${a.len} eui-64` : ` ipv6 address ${U(a.addr)}/${a.len}`);
+      if (i.ip6auto) L.push(" ipv6 address autoconfig"); if (i.ip6en) L.push(" ipv6 enable");
       if (i.hsrpVer===2) L.push(" standby version 2");
       if (i.hsrp) for (const [g,h] of Object.entries(i.hsrp)){ if (h.ip) L.push(` standby ${g} ip ${h.ip}`); if (h.prio!=null && h.prio!==100) L.push(` standby ${g} priority ${h.prio}`); if (h.preempt) L.push(` standby ${g} preempt`); }
       if (i.ospfNet==="point-to-point") L.push(" ip ospf network point-to-point");
@@ -209,6 +213,7 @@ function ios2Env(opts){
       if (o.passiveDefault){ L.push(" passive-interface default"); for (const n of (o.noPassive||[])) L.push(` no passive-interface ${n}`); } else for (const n of (o.passive||[])) L.push(` passive-interface ${n}`);
       for (const w of o.networks) L.push(` network ${w.net} ${w.wild} area ${w.area}`); if (o.defOrig) L.push(` default-information originate${o.defAlways?" always":""}`); L.push("!"); }
     if (st.defaultGw) L.push(`ip default-gateway ${st.defaultGw}`);
+    for (const r of (st.routes6||[])) L.push(`ipv6 route ${U(r.net)}/${r.len}${r.ios?" "+r.ios:""}${r.nh?" "+U(r.nh):""}${r.ad?" "+r.ad:""}`);
     for (const r of st.routes.slice().sort((x,y)=>toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.ad?" "+r.ad:""}`);
     L.push("!");
     if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
@@ -373,6 +378,79 @@ function ios2Env(opts){
   st.ospfInfo = () => st.ospf && routingOn() ? {pid:st.ospf.pid, rid:ospfRid(), ifaces:ospfIfaces(), defOrig:st.ospf.defOrig, defAlways:st.ospf.defAlways, resets:st.ospfResets||0,
     hasDefault: ribAll().some(e=>e.len===0 && e.code!=="O*E2")} : null;
   st.hsrpGroups = () => { const out = []; for (const n of ifNames()){ const i = st.intfs[n]; if (i.hsrp) for (const [g, h] of Object.entries(i.hsrp)) if (h.ip) out.push({ios:n, grp:+g, vip:h.ip, prio: h.prio!=null ? h.prio : 100, preempt:!!h.preempt, ver: i.hsrpVer||1, ip:i.ip, up: up(n) && !!i.ip && sameNet(i.ip, h.ip, i.mask), badVip: !!i.ip && !sameNet(i.ip, h.ip, i.mask)}); } return out; };
+  /* ---------- IPv6: link-local + global addresses, a separate RIB (C, L, S), longest match, ND neighbours from the bench ---------- */
+  const I6 = window.IP6;
+  const v6on = n => { const i = st.intfs[n]; return !!(i && (i.ip6en || (i.ip6 && i.ip6.length) || i.ll || i.ip6auto)); };
+  const macOf = n => { const i = st.intfs[n]; return (i && i.mac) || (i && i.sub && st.intfs[i.parent] && st.intfs[i.parent].mac) || (st.intfs[physical[0]]||{}).mac || baseMac + ".0001"; };
+  const llOf = n => v6on(n) ? (st.intfs[n].ll || I6.str(I6.linkLocal(macOf(n)))) : null;
+  function globals6(n){ const i = st.intfs[n]; if (!i) return [];
+    const out = (i.ip6||[]).map(a=>({addr: a.eui ? I6.str(I6.withIid(I6.mask(I6.parse(a.addr), 64), I6.eui64(macOf(n)))) : a.addr, len:a.len, eui:!!a.eui}));
+    if (i.ip6auto && hooks.ra){ const ra = hooks.ra(n); if (ra) out.push({addr: I6.str(I6.withIid(I6.parse(ra.prefix), I6.eui64(macOf(n)))), len: ra.len, auto:true}); }
+    return out; }
+  const v6Routing = () => kind==="router" && !!st.v6routing;
+  const U = a => I6.str(a, true);
+  function rib6(){
+    const cand = [];
+    for (const n of ifNames()){ if (!up(n) || !v6on(n)) continue;
+      for (const g of globals6(n)){ cand.push({code:"C", net:I6.str(I6.mask(I6.parse(g.addr), g.len)), len:g.len, ad:0, metric:0, nhs:[{ios:n}]}); cand.push({code:"L", net:g.addr, len:128, ad:0, metric:0, nhs:[{ios:n}]}); } }
+    const best6 = (ip, skip) => { let b = null; for (const e of cand){ if (skip && e.net+"/"+e.len===skip) continue; if (I6.inPrefix(ip, e.net, e.len) && (!b || e.len > b.len)) b = e; } return b; };
+    let pend = (st.routes6||[]).slice();
+    for (let pass=0; pass<4 && pend.length; pass++){ const left = [];
+      for (const r of pend){ const base = {code:"S", net:r.net, len:r.len, ad:r.ad||1, metric:0};
+        if (r.ios){ if (st.intfs[r.ios] && up(r.ios) && v6on(r.ios)) cand.push(Object.assign(base, {nhs:[{ios:r.ios, nh:r.nh||null, cfgNh:r.nh||null, direct:!r.nh}]})); else left.push(r); continue; }
+        const m = best6(r.nh, r.net+"/"+r.len); if (!m || m.code==="L"){ left.push(r); continue; }
+        cand.push(Object.assign(base, {nhs:[{ios:m.nhs[0].ios, nh: m.nhs[0].nh || r.nh, cfgNh:r.nh}]})); }
+      if (left.length===pend.length) break; pend = left; }
+    const best = new Map();
+    for (const c of cand){ const k = c.net+"/"+c.len, b = best.get(k); if (!b || c.ad < b.ad) best.set(k, Object.assign({}, c, {nhs:[...c.nhs]})); else if (c.ad===b.ad && c.code==="S" && b.code==="S") b.nhs.push(...c.nhs); }
+    return [...best.values()];
+  }
+  st.rib6 = () => rib6();
+  st.lookup6 = dst => { if (!v6Routing()) return null; let b = null; for (const e of rib6()) if (I6.inPrefix(dst, e.net, e.len) && (!b || e.len > b.len)) b = e; if (!b) return null;
+    const x = b.nhs[0]; return {ios:x.ios, nh: x.nh || dst, code:b.code, net:b.net, len:b.len}; };
+  st.v6info = () => ({routing: v6Routing(), ifaces: ifNames().filter(n=>v6on(n)).map(n=>({ios:n, up:up(n), ll:llOf(n), globals:globals6(n), mac:macOf(n)}))});
+  function ipv6IntBrief(){
+    return ifNames().filter(n=>!n.startsWith("Port-channel")).map(n=>{ const i = st.intfs[n], s = i.shut ? "administratively down/down" : up(n) ? "up/up" : "down/down";
+      const addrs = v6on(n) ? [llOf(n), ...globals6(n).map(g=>g.addr)].map(U) : ["unassigned"];
+      return pad(n, 23) + "[" + s + "]\n" + addrs.map(a=>"    " + a).join("\n"); }).join("\n");
+  }
+  function ipv6IntDetail(only){
+    const list = ifNames().filter(n=>v6on(n) && (!only || n===only));
+    if (only && !list.length){ const i = st.intfs[only]; return `${only} is ${i.shut?"administratively down":up(only)?"up":"down"}, line protocol is ${up(only)?"up":"down"}\n  IPv6 is disabled`; }
+    return list.map(n=>{ const i = st.intfs[n], g = globals6(n), ll = llOf(n);
+      const groups = ["FF02::1", ...(v6Routing() ? ["FF02::2"] : []), ...[ll, ...g.map(x=>x.addr)].map(a=>U(I6.solicited(a)))];
+      const L = [`${n} is ${i.shut?"administratively down":up(n)?"up":"down"}, line protocol is ${up(n)?"up":"down"}`, `  IPv6 is enabled, link-local address is ${U(ll)} `, "  No Virtual link-local address(es):"];
+      if (g.length){ L.push("  Global unicast address(es):"); for (const x of g) L.push(`    ${U(x.addr)}, subnet is ${U(I6.mask(I6.parse(x.addr), x.len))}/${x.len} ${x.eui?"[EUI]":x.auto?"[EUI/CAL/PRE]":""}`.replace(/ $/,"")); }
+      L.push("  Joined group address(es):", ...[...new Set(groups)].map(x=>"    " + x), "  MTU is 1500 bytes", "  ICMP error messages limited to one every 100 milliseconds", "  ICMP redirects are enabled", "  ICMP unreachables are sent",
+        "  ND DAD is enabled, number of DAD attempts: 1", "  ND reachable time is 30000 milliseconds (using 30000)");
+      if (v6Routing()) L.push("  ND advertised reachable time is 0 (unspecified)", "  ND advertised retransmit interval is 0 (unspecified)", "  ND router advertisements are sent every 200 seconds", "  ND router advertisements live for 1800 seconds", "  ND advertised default router preference is Medium", "  Hosts use stateless autoconfig for addresses.");
+      else L.push("  ND NS retransmit interval is 1000 milliseconds");
+      return L.join("\n"); }).join("\n");
+  }
+  function ipv6Route(only){
+    const r = rib6(), keep = only==="static" ? (e=>e.code==="S") : only==="connected" ? (e=>e.code==="C"||e.code==="L") : (()=>true);
+    const rows = r.filter(keep).sort((a,b)=>{ const x = I6.parse(a.net), y = I6.parse(b.net); for (let k=0;k<8;k++) if (x[k]!==y[k]) return x[k]-y[k]; return a.len-b.len; });
+    const total = r.length + 1;
+    const L = [`IPv6 Routing Table - default - ${total} entries`, "Codes: C - Connected, L - Local, S - Static, U - Per-user Static route", "       B - BGP, R - RIP, H - NHRP, I1 - ISIS L1",
+      "       I2 - ISIS L2, IA - ISIS interarea, IS - ISIS summary, D - EIGRP", "       EX - EIGRP external, ND - ND Default, NDp - ND Prefix, DCE - Destination",
+      "       NDr - Redirect, O - OSPF Intra, OI - OSPF Inter, OE1 - OSPF ext 1", "       OE2 - OSPF ext 2, ON1 - OSPF NSSA ext 1, ON2 - OSPF NSSA ext 2", "       la - LISP alt, lr - LISP site-registrations, ld - LISP dyn-eid", "       a - Application"];
+    for (const e of rows){ L.push(`${pad(e.code, 4)}${U(e.net)}/${e.len} [${e.ad}/0]`);
+      for (const h of e.nhs) L.push(e.code==="C" ? `     via ${h.ios}, directly connected` : e.code==="L" ? `     via ${h.ios}, receive` : h.direct ? `     via ${h.ios}, directly connected` : `     via ${h.cfgNh && I6.isLL(h.cfgNh) ? h.ios + ", " + U(h.cfgNh) : (h.cfgNh ? U(h.cfgNh) : U(h.nh)) + (h.ios && h.cfgNh && I6.isLL(h.cfgNh) ? "" : "")}`); }
+    if (!only || only==="connected") L.push("L   FF00::/8 [0/0]", "     via Null0, receive");
+    return L.join("\n");
+  }
+  function ipv6Neighbors(){
+    const rows = (hooks.nd6 ? hooks.nd6() : []) || [];
+    return "IPv6 Address                              Age Link-layer Addr State Interface\n" + rows.map(x=>pad(U(x.addr), 42) + String(0).padStart(3) + " " + pad(x.mac, 15) + pad("REACH", 6) + short(x.ios)).join("\n");
+  }
+  function doPing6(ip, outIf){
+    const ask6 = run => I6.isLL(ip) && !outIf ? ask("Output Interface: ", l=>{ const n = parseIf(l.trim()); if (!n) return "% Invalid interface. Use full interface name without spaces (e.g. Serial0/1)"; return run(n); }) : run(outIf);
+    return ask6(o=>{ const r = (hooks.ping6 ? hooks.ping6(ip, o) : {ok:false}) || {};
+      const bar = r.ok ? "!!!!!" : r.kind==="unreach" ? "UUUUU" : r.kind==="ttlexpired" ? "&&&&&" : ".....";
+      const n = (bar.match(/!/g)||[]).length;
+      return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${U(I6.parse(ip))}, timeout is 2 seconds:\n${o && I6.isLL(ip) ? "Packet sent with a source address of " + U(llOf(o)) + "%" + o + "\n" : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 0/1/3 ms":""}`; });
+  }
+  function doTrace6(ip){ if (hooks.trace6) return hooks.trace6(ip); return `Type escape sequence to abort.\nTracing the route to ${U(I6.parse(ip))}\n\n  1  *  *  *`; }
   const hsrpVmac = (g, ver) => ver===2 ? `0000.0c9f.f${g.toString(16).padStart(3,"0")}` : `0000.0c07.ac${g.toString(16).padStart(2,"0")}`;
 
   function ribLine(e, noLen, top){   // noLen: under an "is subnetted" heading IOS prints the prefix without its length; top: a route with no heading above it uses a 6-wide code column
@@ -566,6 +644,8 @@ function ios2Env(opts){
     X("show ip ospf neighbor", ()=>ospfNeighbors()), X("show ip ospf interface brief", ()=>ospfIntBrief()), X("show ip ospf interface", ()=>ospfIntDetail(null)),
     X("show ip ospf interface A:IF", a=>{ const n = parseIf(a[0]); return n ? ospfIntDetail(n) : inv(); }), X("show ip ospf database", ()=>ospfDatabase()), X("show ip ospf", ()=>ospfProcess()),
     X("show ip protocols", ()=>ipProtocols()), X("show standby brief", ()=>standbyBrief()), X("show standby", ()=>standbyDetail()),
+    X("show ipv6 interface brief", ()=>ipv6IntBrief()), X("show ipv6 interface", ()=>ipv6IntDetail(null)), X("show ipv6 interface A:IF", a=>{ const n = parseIf(a[0]); return n ? ipv6IntDetail(n) : inv(); }),
+    X("show ipv6 route", ()=>ipv6Route()), X("show ipv6 route static", ()=>ipv6Route("static")), X("show ipv6 route connected", ()=>ipv6Route("connected")), X("show ipv6 neighbors", ()=>ipv6Neighbors()),
     X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show users", ()=>{ const ss = (hooks.sessions && hooks.sessions()) || [];
       let o = "    Line       User       Host(s)              Idle       Location\n" + `${ss.some(s=>s.me)?" ":"*"}  0 con 0                idle                 00:00:00`;
       ss.forEach((s,i)=>{ o += `\n${s.me?"*":" "}  ${String(i+1).padEnd(2)}vty ${i}     ${pad(s.user||"",11)}idle                 00:00:0${i}  ${s.from}`; });
@@ -574,7 +654,7 @@ function ios2Env(opts){
     X("show clock", ()=>"*10:14:07.312 WAT Sun Oct 11 2026"),
   ];
   const execCommon = [
-    X("ping A:WORD", a=>doPing(a[0])), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
+    X("ping A:WORD", a=>doPing(a[0])), X("ping ipv6 A:WORD", a=>I6.valid(a[0]) ? doPing6(a[0], null) : inv()), X("traceroute ipv6 A:WORD", a=>I6.valid(a[0]) ? doTrace6(a[0]) : inv()), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
     X("terminal length A:NUM", ()=>""), X("terminal no monitor", ()=>""),
   ];
   const T = {
@@ -651,6 +731,20 @@ function ios2Env(opts){
       X("spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = true; return ""; }), X("no spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = false; return ""; }),
       X("port-channel load-balance A:WORD", a=>{ if (kind!=="switch") return inv(); const m = ["src-mac","dst-mac","src-dst-mac","src-ip","dst-ip","src-dst-ip"].find(x=>x===a[0].toLowerCase()); if (!m) return inv(); st.lbMethod = m; return ""; }),
       X("no port-channel load-balance", ()=>{ st.lbMethod = null; return ""; }),
+      X("ipv6 unicast-routing", ()=>{ st.v6routing = true; return ""; }), X("no ipv6 unicast-routing", ()=>{ st.v6routing = false; return ""; }),
+      X("ipv6 route A:WORD A:LINE", a=>{ const p = I6.parsePrefix(a[0]); if (!p) return "% Invalid input detected at '^' marker.";
+        const net = I6.str(I6.mask(p.w, p.len)); if (!I6.eq(net, p.w)) return "% Invalid input detected at '^' marker.";   // IOS wants the prefix itself
+        const tk = tokens(a[1]); let ios = null, nh = null, ad = null, k = 0;
+        if (tk[k] && !I6.valid(tk[k]) && !/^\d+$/.test(tk[k])){ let n = parseIf(tk[k]); if (!n && tk[k+1]){ n = parseIf(tk[k]+tk[k+1]); if (n) k++; } if (!n) return "% Invalid input detected at '^' marker."; ios = n; k++; }
+        if (tk[k] && I6.valid(tk[k])){ nh = I6.str(I6.parse(tk[k])); k++; }
+        if (tk[k] && /^\d+$/.test(tk[k])){ ad = +tk[k]; if (!(ad>=1&&ad<=254)) return "% Invalid input detected at '^' marker."; k++; }
+        if (k < tk.length || (!ios && !nh)) return "% Incomplete command.";
+        if (nh && I6.isLL(nh) && !ios) return "% Interface has to be specified for a link-local nexthop";
+        st.routes6 = st.routes6 || []; const same = x => x.net===net && x.len===p.len && (x.ios||null)===(ios||null) && (x.nh||null)===(nh||null);
+        const ex = st.routes6.find(same); if (ex){ if (ad) ex.ad = ad; else delete ex.ad; return ""; }
+        const e = {net, len:p.len}; if (ios) e.ios = ios; if (nh) e.nh = nh; if (ad) e.ad = ad; st.routes6.push(e); return ""; }),
+      X("no ipv6 route A:WORD", a=>{ const p = I6.parsePrefix(a[0]); if (!p) return inv(); st.routes6 = (st.routes6||[]).filter(r=>!(I6.eq(r.net, I6.mask(p.w,p.len)) && r.len===p.len)); return ""; }),
+      X("no ipv6 route A:WORD A:LINE", a=>{ const p = I6.parsePrefix(a[0]); if (!p) return inv(); const tk = tokens(a[1]); st.routes6 = (st.routes6||[]).filter(r=>!(I6.eq(r.net, I6.mask(p.w,p.len)) && r.len===p.len && tk.every(x=> (r.nh && I6.valid(x) && I6.eq(r.nh, x)) || (r.ios && parseIf(x)===r.ios) || /^\d+$/.test(x)))); return ""; }),
       X("ip routing", ()=>{ if (kind==="switch") st.ipRouting = true; return ""; }), X("no ip routing", ()=>{ if (kind==="switch") st.ipRouting = false; return ""; }),
       X("vtp mode A:WORD", a=>{ const m = a[0].toLowerCase(); if (!/^(server|client|transparent|off)$/.test(m)) return inv(); st.vtpMode = m; return `Setting device to VTP ${m.toUpperCase()} mode for VLANS.`; }),
       X("vtp domain A:WORD", a=>{ st.vtpDomain = a[0]; return `Changing VTP domain name from ${st.vtpDomain||"NULL"} to ${a[0]}`; }),
@@ -724,6 +818,19 @@ function ios2Env(opts){
       X("no standby A:NUM priority", a=>{ const i = st.intfs[st.cur]; if (i.hsrp && i.hsrp[+a[0]]) delete i.hsrp[+a[0]].prio; return ""; }),
       X("no standby A:NUM preempt", a=>{ const i = st.intfs[st.cur]; if (i.hsrp && i.hsrp[+a[0]]) i.hsrp[+a[0]].preempt = false; return ""; }),
       X("no standby A:NUM", a=>{ const i = st.intfs[st.cur]; if (i.hsrp) delete i.hsrp[+a[0]]; return ""; }),
+      X("ipv6 address A:WORD", a=>{ const i = st.intfs[st.cur]; if (kind==="switch" && i.mode!=="routed" && i.mode!=="svi" && !i.loop) return inv(); const p = I6.parsePrefix(a[0]); if (!p) return "% Invalid input detected at '^' marker.";
+        const addr = I6.str(p.w), ty = I6.type(addr); if (ty==="multicast" || ty==="unspecified" || ty==="loopback") return `% ${U(p.w)}/${p.len} is not a valid unicast address`;
+        const net = I6.str(I6.mask(p.w, p.len)); if (p.len < 128 && I6.eq(net, p.w) && p.len!==127) { /* the subnet-router anycast address: IOS accepts it with a warning on some releases */ }
+        for (const [n,o] of Object.entries(st.intfs)) if (n!==st.cur) for (const x of (o.ip6||[])) if (!x.eui && I6.eq(I6.mask(I6.parse(x.addr), Math.min(x.len,p.len)), I6.mask(p.w, Math.min(x.len,p.len)))) return `% ${U(I6.mask(p.w, p.len))}/${p.len} is overlapping with ${U(I6.mask(I6.parse(x.addr), x.len))}/${x.len} on ${n}`;
+        i.ip6 = i.ip6 || []; if (!i.ip6.some(x=>!x.eui && I6.eq(x.addr, addr))) i.ip6.push({addr, len:p.len}); return ""; }),
+      X("ipv6 address A:WORD eui-64", a=>{ const i = st.intfs[st.cur]; const p = I6.parsePrefix(a[0]); if (!p || p.len > 64) return "% Invalid input detected at '^' marker."; i.ip6 = i.ip6 || [];
+        const net = I6.str(I6.mask(p.w, 64)); if (!i.ip6.some(x=>x.eui && I6.eq(x.addr, net))) i.ip6.push({addr:net, len:p.len, eui:true}); return ""; }),
+      X("ipv6 address A:WORD link-local", a=>{ if (!I6.valid(a[0]) || !I6.isLL(a[0])) return "% Invalid link-local address"; st.intfs[st.cur].ll = I6.str(I6.parse(a[0])); return ""; }),
+      X("ipv6 address autoconfig", ()=>{ st.intfs[st.cur].ip6auto = true; return ""; }), X("ipv6 address autoconfig default", ()=>{ st.intfs[st.cur].ip6auto = true; return ""; }),
+      X("no ipv6 address", ()=>{ forCur(i=>{ delete i.ip6; delete i.ll; delete i.ip6auto; }); return ""; }),
+      X("no ipv6 address A:WORD", a=>{ const p = I6.parsePrefix(a[0]); const i = st.intfs[st.cur]; if (p) i.ip6 = (i.ip6||[]).filter(x=>!I6.eq(x.addr, x.eui ? I6.mask(p.w,64) : p.w)); return ""; }),
+      X("no ipv6 address A:WORD link-local", ()=>{ delete st.intfs[st.cur].ll; return ""; }), X("no ipv6 address autoconfig", ()=>{ delete st.intfs[st.cur].ip6auto; return ""; }),
+      X("ipv6 enable", ()=>{ forCur(i=>i.ip6en = true); return ""; }), X("no ipv6 enable", ()=>{ forCur(i=>{ delete i.ip6en; }); return ""; }),
       X("standby version A:NUM", a=>{ if (!/^[12]$/.test(a[0])) return inv(); forCur(i=>i.hsrpVer = +a[0]); return ""; }),
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
     ],
@@ -796,6 +903,7 @@ function ios2Env(opts){
     st.noEcho=true; return ask("Password: ", tryPw);
   }
   function doPing(ip, srcArg){
+    if (I6.valid(ip)) return doPing6(ip, srcArg ? parseIf(srcArg) : null);
     if (!ipRe.test(ip)) return st.domainLookup ? `Translating "${ip}"...domain server (255.255.255.255)\n% Unrecognized host or address, or protocol not running.` : `% Unrecognized host or address, or protocol not running.`;
     let src = null;   // extended ping: ping <ip> source <interface|own address> — tests the return path to that address
     if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
@@ -806,6 +914,7 @@ function ios2Env(opts){
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
   function doTrace(ip, srcArg){
+    if (I6.valid(ip)) return doTrace6(ip);
     let src = null; if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
       if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
     if (hooks.trace) return hooks.trace(ip, src); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
