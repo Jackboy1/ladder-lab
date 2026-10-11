@@ -694,19 +694,27 @@ function trace(B, node, dstIp){
   B_ctx.B = B; B.step = 0; computeL3(B);
   if (isRouterDev(node.dev) && !node.ip && !node.svi){ const r = routeLookup(node.dev, dstIp); if (r) node = {dev:node.dev, ip:node.dev.env.intfs[r.ios].ip}; }
   const go = sendIp(B, node, dstIp, "Traceroute probe");
-  B.frames = go.frames; B.log = go.log;
-  return {hops: go.path || [], ok: go.ok, kind: go.kind, unreachFrom: go.unreachFrom};
+  const hops = go.path || [];
+  // each hop answers (ICMP time exceeded, or the final reply) only if IT can route back to the sender — a missing return route shows as * * *
+  const silent = new Set();
+  hops.forEach((ip, k) => { const o = ipOwner(B, ip); if (!o) return;
+    const from = o.ios && o.dev.env ? (isRouterDev(o.dev) ? {dev:o.dev} : (o.ios.startsWith("Vlan") ? sviNode(o.dev, o.ios) : {dev:o.dev})) : hostNode(o.dev);
+    const back = sendIp(B, from, node.ip, "ICMP reply to the traceroute");
+    if (!back.ok) silent.add(k); });
+  B.frames = go.frames; B.log = go.log.concat(silent.size ? [`Hop${silent.size>1?"s":""} ${[...silent].map(k=>k+1).join(", ")} received the probe but had no way back to ${node.ip} — their replies never arrive (* * *): check the return route`] : []);
+  const ok = go.ok && !silent.has(hops.length-1);
+  return {hops, silent, ok, kind: go.kind, unreachFrom: go.unreachFrom};
 }
 function iosTraceText(t, dst){
-  const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"];
-  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
-  if (!t.ok && t.kind!=="netunreach") for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
+  const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"], sil = t.silent || new Set();
+  t.hops.forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
+  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1))) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
   return L.join("\n");
 }
 function winTraceText(t, dst){
-  const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""];
-  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination host unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
-  if (!t.ok && t.kind!=="netunreach") for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
+  const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""], sil = t.silent || new Set();
+  t.hops.forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${String(k+1).padStart(2)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination host unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1))) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
   L.push("", "Trace complete."); return L.join("\n");
 }
 
@@ -723,8 +731,8 @@ function makeHooks(B, d){
     trace: ip => { const node = (d.kind==="router" || d.env.ipRouting) ? {dev:d} : (()=>{ const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut); return svi ? sviNode(d, svi) : null; })();
       if (!node) return iosTraceText({hops:[], ok:false, kind:"timeout"}, ip); const t = trace(B, node, ip); B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: t.ok}); return iosTraceText(t, ip); },
     linkUp: name => { if (name.startsWith("Port-channel")){ const S = l2State(B); const G = (S.bundles[d.id]||{})[+name.slice(12)]; return !!(G && G.up); } const ref = refOfIos(d, name); return !!(ref && linkUpAt(B, ref)); },
-    ping: ip => {
-      if (d.kind==="router" || d.env.ipRouting) return ping(B, {dev:d}, ip);
+    ping: (ip, src) => {
+      if (d.kind==="router" || d.env.ipRouting) return ping(B, src ? {dev:d, ip:src} : {dev:d}, ip);
       const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut);
       if (!svi) return {ok:false};
       return ping(B, sviNode(d, svi), ip);

@@ -153,6 +153,21 @@ const pair = (a, b) => Bench.create({ devices: [ R("x", "RX", ["int g0/0","ip ad
   const e2 = SIM.ios2Env({kind:"router"}); e2.importConfig(snap); e2.exec("en");
   ok(/router ospf 1\n network 1\.1\.1\.1 0\.0\.0\.0 area 0\n network 10\.0\.0\.0 0\.255\.255\.255 area 0|router ospf 1\n passive-interface GigabitEthernet0\/0\n network/.test(e2.exec("show running-config")), "OSPF config survives export/import", e2.exec("show running-config | section ospf"));
 }
+// ---------- 7b. the return path: extended ping with a source, traceroute hops that can't reply ----------
+{ const B = Bench.create({ devices: [
+    R("a", "RA", ["int g0/0","ip address 10.1.0.1 255.255.255.0","no shut","int g0/1","ip address 10.0.12.1 255.255.255.252","no shut","ip route 10.2.0.0 255.255.255.0 10.0.12.2"]),
+    R("b", "RB", ["int g0/0","ip address 10.2.0.1 255.255.255.0","no shut","int g0/1","ip address 10.0.12.2 255.255.255.252","no shut"]),
+    PC("p1", "10.1.0.10", "10.1.0.1"), PC("p2", "10.2.0.10", "10.2.0.1") ],
+  cables: [{type:"cat6",a:"a:g1",b:"b:g1"},{type:"cat6",a:"p1:eth",b:"a:g0"},{type:"cat6",a:"p2:eth",b:"b:g0"}] });
+  ok(/!!!!/.test(cli(B, "a", "ping 10.2.0.10")), "RA pings PC2 from its link address (RB has that subnet connected)");
+  const ps = cli(B, "a", "ping 10.2.0.10 source g0/0");
+  ok(/Packet sent with a source address of 10\.1\.0\.1/.test(ps) && /\.\.\.\.\./.test(ps) && /Success rate is 0 percent/.test(ps), "ping … source g0/0 fails: RB has no route back to 10.1.0.0/24", ps);
+  ok(/Invalid source address/.test(cli(B, "a", "ping 10.2.0.10 source 9.9.9.9")), "ping source with an address that isn't ours is refused");
+  const tr = pc(B, "p1", "tracert 10.2.0.10");
+  ok(/1\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.1\.0\.1/.test(tr) && /2\s+\*\s+\*\s+\*\s+Request timed out\./.test(tr), "tracert: the hop with no return route shows * * * (its time-exceeded can't get back)", tr);
+  cli(B, "b", "conf t"); cli(B, "b", "ip route 10.1.0.0 255.255.255.0 10.0.12.1"); cli(B, "b", "end");
+  ok(/!!!!!/.test(cli(B, "a", "ping 10.2.0.10 source g0/0")) && /2\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.0\.12\.2\n\s+3\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.2\.0\.10/.test(pc(B, "p1", "tracert 10.2.0.10")), "add the return route: sourced ping and tracert both complete");
+  ok(/BW 10000 Kbit/.test((cli(B, "a", "conf t"), cli(B, "a", "int g0/1"), cli(B, "a", "bandwidth 10000"), cli(B, "a", "end"), cli(B, "a", "show interfaces g0/1"))), "show interfaces reports the configured bandwidth"); }
 // ---------- 8. task helpers for lesson benches ----------
 { const B = tri(); pc(B, "pc1", "tracert 10.3.0.10"); cli(B, "r1", "traceroute 10.2.0.10");
   ok(Bench.ospfNbr(B, "r1", "2.2.2.2") && Bench.ospfNbr(B, "r1", "3.3.3.3", "FULL") && Bench.ospfNbrCount(B, "r1")===2, "helpers: ospfNbr / ospfNbrCount");

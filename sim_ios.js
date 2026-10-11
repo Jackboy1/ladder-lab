@@ -251,7 +251,7 @@ function ios2Env(opts){
       `  Hardware is ${hw}${i.mac?`, address is ${i.mac} (bia ${i.mac})`:""}`];
     if (i.desc) lines.push(`  Description: ${i.desc}`);
     if (i.ip) lines.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`);
-    lines.push(`  MTU 1500 bytes, BW ${link?(c.speed||1000)*1000:1000000} Kbit/sec, DLY 10 usec,`, "     reliability 255/255, txload 1/255, rxload 1/255", "  Encapsulation ARPA, loopback not set");
+    lines.push(`  MTU 1500 bytes, BW ${i.bw || (link?(c.speed||1000)*1000:1000000)} Kbit/sec, DLY 10 usec,`, "     reliability 255/255, txload 1/255, rxload 1/255", "  Encapsulation ARPA, loopback not set");
     if (i.sub){ const p = st.intfs[i.parent];
       return [`${n} is ${p.shut||i.shut ? "administratively down" : up(i.parent) ? "up" : "down"}, line protocol is ${!p.shut && !i.shut && up(i.parent) ? "up" : "down"}`,
         `  Hardware is ISR4331-3x1GE, address is ${p.mac} (bia ${p.mac})`, ...(i.desc?[`  Description: ${i.desc}`]:[]), ...(i.ip?[`  Internet address is ${i.ip}/${maskLen(i.mask)}`]:[]),
@@ -571,7 +571,7 @@ function ios2Env(opts){
     X("show clock", ()=>"*10:14:07.312 WAT Sun Oct 11 2026"),
   ];
   const execCommon = [
-    X("ping A:WORD", a=>doPing(a[0])), X("traceroute A:WORD", a=>doTrace(a[0])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
+    X("ping A:WORD", a=>doPing(a[0])), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("traceroute A:WORD", a=>doTrace(a[0])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
     X("terminal length A:NUM", ()=>""), X("terminal no monitor", ()=>""),
   ];
   const T = {
@@ -785,12 +785,15 @@ function ios2Env(opts){
     const tryPw = l => { if (l===(st.enableSecret||st.enablePassword)){ st.noEcho=false; st.mode="priv"; return ""; } if (++tries>=3){ st.noEcho=false; return "% Bad secrets"; } st.noEcho=true; return ask("Password: ", tryPw); };
     st.noEcho=true; return ask("Password: ", tryPw);
   }
-  function doPing(ip){
+  function doPing(ip, srcArg){
     if (!ipRe.test(ip)) return st.domainLookup ? `Translating "${ip}"...domain server (255.255.255.255)\n% Unrecognized host or address, or protocol not running.` : `% Unrecognized host or address, or protocol not running.`;
-    const r = hooks.ping(ip) || {};
+    let src = null;   // extended ping: ping <ip> source <interface|own address> — tests the return path to that address
+    if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
+      if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
+    const r = hooks.ping(ip, src) || {};
     const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : r.kind==="netunreach" ? "U.U.U" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
     const n = (bar.match(/!/g)||[]).length;
-    return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
+    return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
   function doTrace(ip){ if (hooks.trace) return hooks.trace(ip); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
 
