@@ -185,6 +185,17 @@ const pair = (a, b) => Bench.create({ devices: [ R("x", "RX", ["int g0/0","ip ad
 { const B = tri(); const t = cli(B, "r1", "traceroute 10.3.0.10 source g0/0");
   ok(/1 10\.0\.13\.2/.test(t) && /2 10\.3\.0\.10/.test(t), "traceroute … source g0/0 works", t);
   ok(/Attached via Interface Enable/.test((cli(B,"r1","conf t"), cli(B,"r1","int g0/0"), cli(B,"r1","ip ospf 1 area 0"), cli(B,"r1","end"), cli(B,"r1","show ip ospf interface g0/0"))), "interface method prints 'Attached via Interface Enable'"); }
+// ---------- 7d. a routing loop: TTL expired in transit; % Subnet not in table ----------
+{ const B = Bench.create({ devices: [
+    R("a", "RA", ["int g0/0","ip address 10.1.0.1 255.255.255.0","no shut","int g0/1","ip address 10.0.12.1 255.255.255.252","no shut","ip route 0.0.0.0 0.0.0.0 10.0.12.2"]),
+    R("b", "RB", ["int g0/1","ip address 10.0.12.2 255.255.255.252","no shut","ip route 0.0.0.0 0.0.0.0 10.0.12.1","ip route 10.1.0.0 255.255.255.0 10.0.12.1"]),
+    PC("p1", "10.1.0.10", "10.1.0.1") ], cables: [{type:"cat6",a:"a:g1",b:"b:g1"},{type:"cat6",a:"p1:eth",b:"a:g0"}] });
+  const t0 = Date.now(), pg = pc(B, "p1", "ping 8.8.8.8"), dt = Date.now() - t0;
+  ok(/Reply from 10\.0\.12\.\d: TTL expired in transit\./.test(pg) && dt < 3000, `routing loop: Windows ping says "TTL expired in transit" (${dt} ms)`, pg);
+  const tr = pc(B, "p1", "tracert 8.8.8.8");
+  ok(/2\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.0\.12\.2\n\s+3\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.0\.12\.1\n\s+4\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.0\.12\.2/.test(tr) && /30\s+<1 ms/.test(tr), "routing loop: tracert shows the two routers alternating for 30 hops", tr);
+  ok(/&&&&&/.test(cli(B, "a", "ping 8.8.8.8")), "routing loop: IOS ping prints &&&&& (time exceeded)", cli(B, "a", "ping 8.8.8.8"));
+  ok(/% Subnet not in table/.test(cli(B, "b", "show ip route 10.9.9.9")) && /% Network not in table/.test(cli(B, "a", "show ip route 172.20.1.1")), "show ip route: Subnet not in table when other 10.x subnets are known; Network not in table otherwise"); }
 // ---------- 8. task helpers for lesson benches ----------
 { const B = tri(); pc(B, "pc1", "tracert 10.3.0.10"); cli(B, "r1", "traceroute 10.2.0.10");
   ok(Bench.ospfNbr(B, "r1", "2.2.2.2") && Bench.ospfNbr(B, "r1", "3.3.3.3", "FULL") && Bench.ospfNbrCount(B, "r1")===2, "helpers: ospfNbr / ospfNbrCount");

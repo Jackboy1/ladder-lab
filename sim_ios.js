@@ -388,7 +388,8 @@ function ios2Env(opts){
       if (d.code[0]==="S") return `Routing entry for 0.0.0.0/0, supernet\n  Known via "static", distance ${d.ad}, metric 0, candidate default path\n  Routing Descriptor Blocks:\n` + blk;
       return `Routing entry for 0.0.0.0/0, supernet\n  Known via "ospf ${st.ospf?st.ospf.pid:1}", distance 110, metric ${d.metric}, candidate default path\n  Tag 1, type extern 2, forward metric ${d.fwd||1}\n  Last update from ${d.nhs[0].nh} on ${d.nhs[0].ios}, ${ageOf("0.0.0.0/0")} ago\n  Routing Descriptor Blocks:\n` + blk; }
     const e = bestMatch(ribAll().filter(x=>x.len>0), ip);   // like IOS: a host lookup that only the default matches is "not in table"
-    if (!e) return "% Network not in table";
+    if (!e){ const f = +ip.split(".")[0], p = f<128 ? 8 : f<192 ? 16 : 24, major = netOf(ip, [0,0,0,0].map((_,k)=>k<p/8?255:0).join("."));
+      return ribAll().some(x=>x.len>=p && netOf(x.net, [0,0,0,0].map((_,k)=>k<p/8?255:0).join("."))===major) ? "% Subnet not in table" : "% Network not in table"; }
     const pfx = `${e.net}/${e.len}`, tail = "\n      Route metric is ";
     if (e.code==="C"||e.code==="L") return `Routing entry for ${pfx}\n  Known via "connected", distance 0, metric 0 (connected, via interface)\n  Routing Descriptor Blocks:\n  * directly connected, via ${e.nhs[0].ios}${tail}0, traffic share count is 1`;
     if (e.code[0]==="S") return `Routing entry for ${pfx}\n  Known via "static", distance ${e.ad}, metric 0${e.nhs.some(h=>h.direct)?" (connected)":""}\n  Routing Descriptor Blocks:\n` +
@@ -800,7 +801,7 @@ function ios2Env(opts){
     if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
       if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
     const r = hooks.ping(ip, src) || {};
-    const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : r.kind==="netunreach" ? "U.U.U" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
+    const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : r.kind==="netunreach" ? "U.U.U" : r.kind==="ttlexpired" ? "&&&&&" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
     const n = (bar.match(/!/g)||[]).length;
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }

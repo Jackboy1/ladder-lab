@@ -469,7 +469,7 @@ function hop(B, node, nhIp, label, ttl){
 function sendIp(B, node, dstIp, label){
   const res = {frames:[], log:[], ok:false, kind:"timeout", path:[]};
   let cur = node, ttl = node.dev && node.dev.env ? 255 : 128;
-  for (let n=0; n<8; n++){
+  for (let n=0; n<300; n++){   // a loop ends when the TTL runs out (Time Exceeded), not after a fixed number of hops
     let nh;
     if (isRouterDev(cur.dev) && (cur.dev.kind==="router" || !cur.svi || cur.dev.env.ipRouting)){
       // a router: own address?
@@ -486,17 +486,17 @@ function sendIp(B, node, dstIp, label){
       else { res.kind = n===0 ? "general" : "timeout"; res.log.push(`${cur.dev.label} has no default gateway for ${dstIp}`); return res; }
     }
     const h = hop(B, cur, nh, label, ttl);
-    res.frames.push(...h.frames); res.log.push(...h.log);
+    if (n < 12){ res.frames.push(...h.frames); res.log.push(...h.log); } else if (n===12) res.log.push("&nbsp;&nbsp;· … the same hops repeat: the packet keeps circling between these routers, losing 1 TTL per router …");
     if (n===0) res.arpedFirst = h.arped;
     if (!h.ok){ res.kind = n===0 ? "unreach" : "timeout"; return res; }
     const to = h.to;
     if (to.svi){ if (to.dev.env.intfs[to.svi].ip===dstIp || hsrpOwnsIp(B, to.dev, to.svi, dstIp)){ res.ok=true; res.final={dev:to.dev, svi:to.svi, vlan:+to.svi.slice(4)}; res.path.push(dstIp); return res; }
-      if (isRouterDev(to.dev)){ cur = {dev:to.dev, inIp: to.dev.env.intfs[to.svi].ip}; res.path.push(to.dev.env.intfs[to.svi].ip); ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} (Layer 3 switch) received it on ${to.svi}, decrements TTL to ${ttl} and routes it between VLANs`); continue; }
+      if (isRouterDev(to.dev)){ cur = {dev:to.dev, inIp: to.dev.env.intfs[to.svi].ip}; res.path.push(to.dev.env.intfs[to.svi].ip); ttl--; res.routers = (res.routers||0)+1; if (ttl<=0){ res.kind = "ttlexpired"; res.unreachFrom = cur.inIp; res.log.push(`${to.dev.label} decremented the TTL to 0 — it drops the packet and sends ICMP <b>Time Exceeded</b> ("TTL expired in transit") back to the sender. A packet that circles like this is a <b>routing loop</b>.`); return res; } res.log.push(`${to.dev.label} (Layer 3 switch) received it on ${to.svi}, decrements TTL to ${ttl} and routes it between VLANs`); continue; }
       res.log.push(`${to.dev.label} isn't routing (no ip routing) — dropped`); return res; }
     if (to.ios && isRouterDev(to.dev)){
       const own = Object.entries(to.dev.env.intfs).find(([nm,i])=>(i.ip===dstIp || hsrpOwnsIp(B, to.dev, nm, dstIp)) && !i.shut);
       if (own){ res.ok = true; res.final = {dev:to.dev, ios:own[0]}; res.path.push(dstIp); res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)} — it's addressed to the router itself`); return res; }
-      cur = {dev:to.dev, inIp: to.dev.env.intfs[to.ios].ip}; res.path.push(to.dev.env.intfs[to.ios].ip); ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
+      cur = {dev:to.dev, inIp: to.dev.env.intfs[to.ios].ip}; res.path.push(to.dev.env.intfs[to.ios].ip); ttl--; res.routers = (res.routers||0)+1; if (ttl<=0){ res.kind = "ttlexpired"; res.unreachFrom = cur.inIp; res.log.push(`${to.dev.label} decremented the TTL to 0 — it drops the packet and sends ICMP <b>Time Exceeded</b> ("TTL expired in transit") back to the sender. A packet that circles like this is a <b>routing loop</b>.`); return res; } res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
     if (to.dev.ip===dstIp){ res.ok = true; res.final = hostNode(to.dev); res.path.push(dstIp); return res; }
     return res;
   }
@@ -707,7 +707,7 @@ function trace(B, node, dstIp){
   const hops = go.path || [];
   // each hop answers (ICMP time exceeded, or the final reply) only if IT can route back to the sender — a missing return route shows as * * *
   const silent = new Set();
-  hops.forEach((ip, k) => { const o = ipOwner(B, ip); if (!o) return;
+  hops.forEach((ip, k) => { if (k >= 30) return; const o = ipOwner(B, ip); if (!o) return;
     const from = o.ios && o.dev.env ? (isRouterDev(o.dev) ? {dev:o.dev} : (o.ios.startsWith("Vlan") ? sviNode(o.dev, o.ios) : {dev:o.dev})) : hostNode(o.dev);
     const back = sendIp(B, from, node.ip, "ICMP reply to the traceroute");
     if (!back.ok) silent.add(k); });
@@ -717,14 +717,14 @@ function trace(B, node, dstIp){
 }
 function iosTraceText(t, dst){
   const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"], sil = t.silent || new Set();
-  t.hops.forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
-  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1))) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
+  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
   return L.join("\n");
 }
 function winTraceText(t, dst){
   const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""], sil = t.silent || new Set();
-  t.hops.forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${String(k+1).padStart(2)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination host unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
-  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1))) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${String(k+1).padStart(2)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination host unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
   L.push("", "Trace complete."); return L.join("\n");
 }
 
@@ -838,6 +838,7 @@ function pcExec(B, d, line){
     const stat = n => `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = ${n}, Lost = ${4-n} (${(4-n)*25}% loss),`;
     const ttl = res.ttl || 128;
     if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${ip}: bytes=32 time<1ms TTL=${ttl}`).join("\n") + stat(4);
+    if (res.kind==="ttlexpired") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: TTL expired in transit.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="netunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination host unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="general" || res.kind==="noroute") return head + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") + stat(0);
     if (res.kind==="unreach") return head + [...Array(4)].map(()=>`Reply from ${d.ip}: Destination host unreachable.`).join("\n") + `\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
