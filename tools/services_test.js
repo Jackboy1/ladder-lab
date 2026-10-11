@@ -31,7 +31,7 @@ const mk = (r1x, r2x, extra) => Bench.create({ devices: [
   const bd = cli(B, "r1", "show ip dhcp binding");
   ok(/^Bindings from all pools not associated with VRF:\nIP address      Client-ID\/              Lease expiration        Type       State      Interface\n/.test(bd) && /192\.168\.10\.12\s+01[0-9a-f.]+\s+Oct 13 2026 08:30 AM\s+Automatic  Active     GigabitEthernet0\/0/.test(bd) && /192\.168\.20\.2\s+01[0-9a-f.]+\s+Oct 12 2026 04:30 PM\s+Automatic  Active     Unknown/.test(bd), "show ip dhcp binding: both leases (1 day and 8 hours), relayed one on 'Unknown'", bd);
   const all = pc(B, "p1", "ipconfig /all");
-  ok(/Host Name . . . . . . . . . . . . : PC1\n/.test(all) && /DNS Suffix Search List. . . . . . : lagos\.example\.com/.test(all) && /DHCP Enabled. . . . . . . . . . . : Yes\n   Autoconfiguration Enabled . . . . : Yes/.test(all) && /IPv4 Address. . . . . . . . . . . : 192\.168\.10\.12\(Preferred\)\n   Subnet Mask . . . . . . . . . . . : 255\.255\.255\.0\n   Lease Obtained. . . . . . . . . . : Monday, October 12, 2026 8:30:00 AM\n   Lease Expires . . . . . . . . . . : Tuesday, October 13, 2026 8:30:00 AM\n   Default Gateway . . . . . . . . . : 192\.168\.10\.1\n   DHCP Server . . . . . . . . . . . : 192\.168\.10\.1\n   DNS Servers . . . . . . . . . . . : 192\.168\.10\.53\n                                       8\.8\.8\.8\n   NetBIOS over Tcpip/.test(all), "ipconfig /all on a DHCP client", all);
+  ok(/Host Name . . . . . . . . . . . . : PC1\n/.test(all) && /DNS Suffix Search List. . . . . . : lagos\.example\.com/.test(all) && /DHCP Enabled. . . . . . . . . . . : Yes\n   Autoconfiguration Enabled . . . . : Yes/.test(all) && /IPv4 Address. . . . . . . . . . . : 192\.168\.10\.12\(Preferred\)\n   Subnet Mask . . . . . . . . . . . : 255\.255\.255\.0\n   Lease Obtained. . . . . . . . . . : Monday, October 12, 2026 8:30:00 AM\n   Lease Expires . . . . . . . . . . : Tuesday, October 13, 2026 8:30:00 AM\n   Default Gateway . . . . . . . . . : 192\.168\.10\.1\n   DHCP Server . . . . . . . . . . . : 192\.168\.10\.1\n   DHCPv6 IAID[^\n]*\n   DHCPv6 Client DUID[^\n]*\n   DNS Servers . . . . . . . . . . . : 192\.168\.10\.53\n                                       8\.8\.8\.8\n   NetBIOS over Tcpip/.test(all), "ipconfig /all on a DHCP client", all);
   ok(/DHCP Server . . . . . . . . . . . : 10\.0\.12\.1/.test(pc(B, "p2", "ipconfig /all")), "the relayed client's DHCP Server is R1's address facing the relay", pc(B, "p2", "ipconfig /all"));
   ok(/^\nWindows IP Configuration\n\nEthernet adapter Ethernet:\n\n   Connection-specific DNS Suffix  \. : lagos\.example\.com\n/.test(pc(B, "p1", "ipconfig")), "plain ipconfig starts with the DNS suffix line", pc(B, "p1", "ipconfig"));
   ok(/Reply from 192\.168\.20\.2: bytes=32/.test(pc(B, "p1", "ping 192.168.20.2")), "the two DHCP clients can ping each other");
@@ -94,6 +94,72 @@ const mk = (r1x, r2x, extra) => Bench.create({ devices: [
   ok(/% Invalid input/.test((e.exec("conf t"), e.exec("access-list 10 permit tcp any any"))), "extended syntax in a standard list is refused");
   e.exec("ip dhcp pool LAN"); ok(e.prompt()==="Router(dhcp-config)#", "ip dhcp pool → (dhcp-config)#"); e.exec("network 10.1.1.0 /24"); e.exec("end");
   ok(/ip dhcp pool LAN\n network 10\.1\.1\.0 255\.255\.255\.0/.test(e.exec("show running-config")), "network N /24 is stored with a mask"); }
+
+{ // DHCP review fixes: unicast renewal, distinct APIPA addresses, user-mode shows, re-plug after release
+  const B = mk();
+  pc(B, "p1", "ipconfig /renew");
+  ok(/DHCP Request[\s\S]*unicast renewal[\s\S]*DHCP Ack/.test(log(B)) && !/DHCP Discover/.test(log(B)), "ipconfig /renew with a lease: unicast Request + Ack only", log(B));
+  const B2 = mk(null, ["int g0/0", "no ip helper-address"], [{ id:"p4", kind:"pc", label:"PC4", x:400, y:350, dhcp:true }]);
+  Bench.act(B2, ["plug", "cat6", "p4:eth", "sw:g4"]);
+  const a1 = (pc(B2, "p2", "ipconfig").match(/169\.254\.\d+\.\d+/)||[])[0];
+  cfg(["no ip dhcp pool LAGOS"])(B2.devs.r1.env); Bench.act(B2, ["dhcp", "p4"]);
+  const a2 = (pc(B2, "p4", "ipconfig").match(/169\.254\.\d+\.\d+/)||[])[0];
+  ok(a1 && a2 && a1!==a2, "two APIPA PCs pick different 169.254 addresses", a1 + " / " + a2);
+  ok(/Bindings from all pools/.test((Bench.act(B, ["cli", "r1", "disable"]), cli(B, "r1", "show ip dhcp binding"))), "show ip dhcp binding works at the user-mode prompt");
+  pc(B, "p1", "ipconfig /release"); Bench.act(B, ["unplug", "p1:eth"]); Bench.act(B, ["plug", "cat6", "p1:eth", "sw:g2"]);
+  ok(B.devs.p1.ip==="192.168.10.12", "re-plugging the cable after /release: Windows asks again and gets its address back", B.devs.p1.ip); }
+
+// ---- Stage 2: NAT/PAT and the router as a DHCP client ----
+// LAN 192.168.10.0/24 — EDGE (G0/0 inside; G0/1 outside, ip address dhcp from the ISP) — ISP — web server 198.51.100.10
+const NATX = { pat: ["access-list 1 permit 192.168.10.0 0.0.0.255", "ip nat inside source list 1 interface g0/1 overload", "int g0/0", "ip nat inside", "int g0/1", "ip nat outside", "exit"] };
+const mkNat = (edgeX, extraPcs) => Bench.create({ devices: [
+    { id:"edge", kind:"router", label:"EDGE", x:0, y:0, config: cfg(["int g0/0","ip address 192.168.10.1 255.255.255.0","no shut","int g0/1","ip address dhcp","no shut","exit",
+      "ip dhcp excluded-address 192.168.10.1 192.168.10.9","ip dhcp pool LAN","network 192.168.10.0 255.255.255.0","default-router 192.168.10.1","exit", ...(edgeX||[])]) },
+    { id:"isp", kind:"router", label:"ISP", x:300, y:0, config: cfg(["int g0/1","ip address 203.0.113.1 255.255.255.248","no shut","int g0/0","ip address 198.51.100.1 255.255.255.0","no shut","exit",
+      "ip dhcp excluded-address 203.0.113.1","ip dhcp pool CUSTOMER","network 203.0.113.0 255.255.255.248","default-router 203.0.113.1","exit"]) },
+    { id:"sw", kind:"switch", label:"SW1", x:0, y:200 },
+    { id:"web", kind:"server", label:"WEB", x:300, y:200, ip:"198.51.100.10", mask:"255.255.255.0", gw:"198.51.100.1" },
+    { id:"p1", kind:"pc", label:"PC1", x:0, y:350, dhcp:true }, { id:"p2", kind:"pc", label:"PC2", x:100, y:350, dhcp:true }, ...(extraPcs||[]) ],
+  cables: [{type:"cat6",a:"edge:g0",b:"sw:g1"},{type:"cat6",a:"p1:eth",b:"sw:g2"},{type:"cat6",a:"p2:eth",b:"sw:g3"},{type:"cat6",a:"edge:g1",b:"isp:g1"},{type:"cat6",a:"web:eth",b:"isp:g0"},
+    ...(extraPcs||[]).map((x,k)=>({type:"cat6", a:x.id+":eth", b:"sw:g"+(4+k)}))] });
+
+{ const B = mkNat();
+  ok(Bench.ifLeased(B, "edge", "GigabitEthernet0/1")==="203.0.113.2", "EDGE G0/1 (ip address dhcp) leases 203.0.113.2 from the ISP", Bench.ifLeased(B, "edge", "GigabitEthernet0/1"));
+  ok(/GigabitEthernet0\/1\s+203\.0\.113\.2\s+YES DHCP   up\s+up/.test(cli(B, "edge", "show ip interface brief")), "show ip interface brief: Method DHCP", cli(B, "edge", "show ip interface brief"));
+  ok(/S\*\s+0\.0\.0\.0\/0 \[254\/0\] via 203\.0\.113\.1/.test(cli(B, "edge", "show ip route")), "the DHCP default router becomes S* 0.0.0.0/0 [254/0]", cli(B, "edge", "show ip route"));
+  ok(/%DHCP-6-ADDRESS_ASSIGN: Interface GigabitEthernet0\/1 assigned DHCP address 203\.0\.113\.2, mask 255\.255\.255\.248, hostname EDGE/.test(cli(B, "edge", "show logging")), "syslog %DHCP-6-ADDRESS_ASSIGN", cli(B, "edge", "show logging"));
+  ok(/ip address dhcp/.test(cli(B, "edge", "show running-config")) && !/ip address 203\.0\.113\.2/.test(cli(B, "edge", "show running-config")), "running-config keeps 'ip address dhcp', not the learned address");
+  const ib = cli(B, "isp", "show ip dhcp binding");
+  ok(/203\.0\.113\.2\s+0063\.6973\.636f\.2d[0-9a-f.]+\s+Oct 13 2026 08:30 AM\s+Automatic  Active     GigabitEthernet0\/1\n {16}[0-9a-f.]+/.test(ib), "the ISP's binding shows IOS's long 'cisco-…' client ID, wrapped", ib);
+  ok(B.devs.p1.ip==="192.168.10.10" && B.devs.p2.ip==="192.168.10.11", "the LAN PCs lease from EDGE", B.devs.p1.ip + " " + B.devs.p2.ip);
+  ok(/Request timed out\./.test(pc(B, "p1", "ping 198.51.100.10")) && /ISP has no route to 192\.168\.10\.10/.test(log(B)), "no NAT yet: the request reaches WEB but the ISP has no route back to a private address", log(B));
+  cfg(NATX.pat)(B.devs.edge.env);
+  const g = pc(B, "p1", "ping 198.51.100.10");
+  ok(/Reply from 198\.51\.100\.10: bytes=32 time<1ms TTL=126/.test(g) && /NAT on EDGE \(Gi0\/0 inside → Gi0\/1 outside\): source 192\.168\.10\.10:1 → 203\.0\.113\.2:1/.test(log(B)) && /NAT on EDGE \(arriving on outside Gi0\/1\): destination 203\.0\.113\.2:1 → 192\.168\.10\.10:1/.test(log(B)), "PAT: the ping works and the frame log shows both translations", g + "\n" + log(B));
+  pc(B, "p2", "ping 198.51.100.10");
+  const tr = cli(B, "edge", "show ip nat translations");
+  ok(/icmp 203\.0\.113\.2:1\s+192\.168\.10\.10:1\s+198\.51\.100\.10:1\s+198\.51\.100\.10:1\n/.test(tr) && /icmp 203\.0\.113\.2:1024\s+192\.168\.10\.11:1\s+198\.51\.100\.10:1\s+198\.51\.100\.10:1024\n/.test(tr) && /Total number of translations: 2$/.test(tr), "show ip nat translations: PC2's id 1 is taken, so it becomes 1024", tr);
+  const trc = pc(B, "p1", "tracert 198.51.100.10");
+  ok(/   1    <1 ms    <1 ms    <1 ms  192\.168\.10\.1\n   2    <1 ms    <1 ms    <1 ms  203\.0\.113\.1\n   3    <1 ms    <1 ms    <1 ms  198\.51\.100\.10\n/.test(trc), "tracert through PAT: every hop answers (its replies are translated back)", trc);
+  ok(/Outside interfaces:\n  GigabitEthernet0\/1\nInside interfaces: \n  GigabitEthernet0\/0\n/.test(cli(B, "edge", "show ip nat statistics")), "show ip nat statistics names the inside and outside interfaces", cli(B, "edge", "show ip nat statistics"));
+  cli(B, "edge", "clear ip nat translation *"); ok(/^Pro[^\n]*\nTotal number of translations: 0$/.test(cli(B, "edge", "show ip nat translations")), "clear ip nat translation *", cli(B, "edge", "show ip nat translations"));
+  ok(/ip nat inside source list 1 interface GigabitEthernet0\/1 overload/.test(cli(B, "edge", "show running-config")) && /interface GigabitEthernet0\/0\n ip address 192\.168\.10\.1 255\.255\.255\.0\n ip nat inside/.test(cli(B, "edge", "show running-config")), "running-config: interface name expanded, ip nat inside under the interface", cli(B, "edge", "show running-config"));
+  ok(Bench.natHas(B, "edge", /Total number/) , "task helper natHas"); }
+
+{ // the NAT access list doesn't cover the LAN → untranslated, and the log says why
+  const B = mkNat(["access-list 1 permit 192.168.20.0 0.0.0.255", "ip nat inside source list 1 interface g0/1 overload", "int g0/0", "ip nat inside", "int g0/1", "ip nat outside", "exit"]);
+  ok(/Request timed out/.test(pc(B, "p1", "ping 198.51.100.10")) && /isn't matched by any NAT rule's access list/.test(log(B)), "wrong NAT ACL: the packet leaves untranslated and the reply can't come back", log(B));
+  const B2 = mkNat(["access-list 1 permit 192.168.10.0 0.0.0.255", "ip nat inside source list 1 interface g0/1 overload", "int g0/0", "ip nat outside", "int g0/1", "ip nat inside", "exit"]);
+  ok(/Request timed out/.test(pc(B2, "p1", "ping 198.51.100.10")), "inside and outside swapped: no translation"); }
+
+{ // static NAT for a server inside, reached from the internet; dynamic pool without overload runs out
+  const srv = { id:"cam", kind:"server", label:"NVR", x:200, y:350, ip:"192.168.10.80", mask:"255.255.255.0", gw:"192.168.10.1" };
+  const B = mkNat(["ip nat inside source static 192.168.10.80 203.0.113.5", "access-list 1 permit 192.168.10.0 0.0.0.255", "ip nat pool PUB 203.0.113.3 203.0.113.4 netmask 255.255.255.248", "ip nat inside source list 1 pool PUB", "int g0/0", "ip nat inside", "int g0/1", "ip nat outside", "exit"],
+    [srv, { id:"p3", kind:"pc", label:"PC3", x:300, y:350, dhcp:true }]);
+  ok(/Reply from 203\.0\.113\.5: bytes=32/.test(pc(B, "web", "ping 203.0.113.5")), "static NAT: WEB on the internet reaches the inside NVR at 203.0.113.5 (EDGE answers ARP for it)", pc(B, "web", "ping 203.0.113.5"));
+  ok(/---  203\.0\.113\.5\s+192\.168\.10\.80\s+---\s+---/.test(cli(B, "edge", "show ip nat translations")), "the static entry is listed");
+  const r = ["p1","p2","p3"].map(id=>pc(B, id, "ping 198.51.100.10"));
+  ok(/Reply from/.test(r[0]) && /Reply from/.test(r[1]) && /Request timed out/.test(r[2]) && /%NAT-6-ADDR_ALLOC_FAILURE/.test(cli(B, "edge", "show logging")), "dynamic pool of 2 addresses: the third PC is dropped and EDGE logs ADDR_ALLOC_FAILURE", r.join("\n---\n") + cli(B, "edge", "show logging")); }
 
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

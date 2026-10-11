@@ -104,7 +104,7 @@ DHCP.offer = (st, q) => {
 };
 DHCP.bind = (st, q, o) => {
   st.bindings = st.bindings.filter(b=>b.mac!==q.mac || b.pool!==o.pool);
-  st.bindings.push({ ip: o.ip, mac: q.mac, cid: clientId(q.mac), pool: o.pool, iface: q.iface || "Unknown", expires: o.leaseMs==null ? null : (q.now||0) + o.leaseMs });
+  st.bindings.push({ ip: o.ip, mac: q.mac, cid: q.cid || clientId(q.mac), pool: o.pool, iface: q.iface || "Unknown", expires: o.leaseMs==null ? null : (q.now||0) + o.leaseMs });
 };
 DHCP.release = (st, mac) => { st.bindings = st.bindings.filter(b=>b.mac!==mac); };
 DHCP.clear = (st, what) => { if (what==="conflict") st.conflicts = []; else st.bindings = []; };
@@ -117,8 +117,12 @@ DHCP.showBinding = st => ["Bindings from all pools not associated with VRF:",
   "IP address      Client-ID/              Lease expiration        Type       State      Interface",
   "                Hardware address/",
   "                User name",
-  ...st.bindings.slice().sort((a,b)=>toInt(a.ip)-toInt(b.ip)).map(b=>
-    `${pad(b.ip,16)}${pad(b.cid,24)}${pad(b.expires==null ? "Infinite" : when(b.expires),24)}${pad("Automatic",11)}${pad("Active",11)}${b.iface}`)].join("\n");
+  ...st.bindings.slice().sort((a,b)=>toInt(a.ip)-toInt(b.ip)).map(b=>{
+    // a long client ID (an IOS client sends "cisco-<mac>-<interface>") wraps onto continuation lines, 20 characters at a time
+    const parts = b.cid.length > 23 ? b.cid.match(/.{1,20}/g) : [b.cid];
+    return [`${pad(b.ip,16)}${pad(parts[0],24)}${pad(b.expires==null ? "Infinite" : when(b.expires),24)}${pad("Automatic",11)}${pad("Active",11)}${b.iface}`, ...parts.slice(1).map(x=>" ".repeat(16) + x)].join("\n"); })].join("\n");
+// IOS's DHCP client identifier: "cisco-" + MAC + "-" + short interface name, as hex, dotted in groups of 4
+DHCP.ciscoCid = (mac, shortIf) => { const h = "00" + [..."cisco-" + mac + "-" + shortIf].map(c=>c.charCodeAt(0).toString(16).padStart(2,"0")).join(""); return h.match(/.{1,4}/g).join("."); };
 DHCP.showConflict = st => ["IP address        Detection method   Detection time          VRF",
   ...st.conflicts.map(c=>`${pad(c.ip,18)}${pad(c.method,19)}${when(c.at)}`)].join("\n");
 DHCP.showPool = (st, only) => Object.values(st.pools).filter(p=>!only || p.name===only).map(p=>{

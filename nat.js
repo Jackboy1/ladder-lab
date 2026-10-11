@@ -105,6 +105,8 @@ NAT.outbound = (st, pkt, ctx) => {
 // a packet arriving on an outside interface: rewrite the destination if it matches an inside global we own
 NAT.inbound = (st, pkt) => {
   const proto = pkt.proto;
+  // an ICMP error (Time Exceeded, Unreachable) from any router on the way: IOS finds the flow from the packet quoted inside it
+  if (pkt.err){ const f = st.table.find(e=>e.proto===proto && e.ig===pkt.dst && e.igp===pkt.dport); if (f){ st.hits++; return { pkt: {...pkt, dst: f.il, dport: f.ilp}, entry: f }; } }
   const f = L4(proto) && st.table.find(e=>e.proto===proto && e.ig===pkt.dst && e.igp===pkt.dport && e.og===pkt.src && e.ogp===pkt.sport);
   if (f){ st.hits++; return { pkt: {...pkt, dst: f.il, dport: f.ilp}, entry: f }; }
   const sp = st.statics.find(s=>s.proto && s.proto===proto && s.global===pkt.dst && s.gport===pkt.dport);
