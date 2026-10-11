@@ -332,7 +332,7 @@ Address Resolution Protocol (request)
 0000  ff ff ff ff ff ff 4c 11 ae 0d 2f 31 08 06 00 01
 0010  08 00 06 04 00 01 4c 11 ae 0d 2f 31 c0 a8 0a 4d
 0020  00 00 00 00 00 00 c0 a8 14 0f`)}
-<p>Destination all ones: broadcast. Type <code>08 06</code>: ARP, not IPv4. Sender <code>c0 a8 0a 4d</code> = 192.168.10.77 (0x4D = 4 × 16 + 13). Target <code>c0 a8 14 0f</code> = 192.168.<b>20</b>.15 (0x14 = 20). The clock is ARPing <i>directly</i> for the server, as if it were local, instead of ARPing for its gateway (<code>c0 a8 0a 01</code>). Nobody answers: the server is in another VLAN, and this site's gateway has proxy ARP disabled (IOS enables it by default; Module 2 lesson 5).</p>
+<p>Destination all ones: broadcast. Type <code>08 06</code>: ARP, not IPv4. Sender <code>c0 a8 0a 4d</code> = 192.168.10.77 (0x4D = 4 × 16 + 13). Target <code>c0 a8 14 0f</code> = 192.168.<b>20</b>.15 (0x14 = 20). The clock is sending ARP requests <i>directly</i> for the server, as if it were local, instead of for its gateway (<code>c0 a8 0a 01</code>). Nobody answers: the server is in another VLAN, and this site's gateway has proxy ARP disabled (IOS enables it by default; Module 2 lesson 5).</p>
 <p><b>Check 3 — why does it think the server is local?</b> The vendor's sheet:</p>
 ${K.out(`IP address : 11000000.10101000.00001010.01001101
 Subnet mask: 11111111.11111111.00000000.00000000
@@ -350,7 +350,7 @@ ${K.case("The register that took a branch offline",`
 
 <h2>Interview corner</h2>
 ${K.hint(`Say the place values first, then walk them out loud: &ldquo;does 128 fit?&rdquo;. Finish by checking the sum.`)}
-${K.reveal("“Convert 172 to binary, out loud.”",`<p>"Place values 128, 64, 32, 16, 8, 4, 2, 1. 128 fits into 172: 1, leaving 44. 64 doesn't fit: 0. 32 fits: 1, leaving 12. 16 doesn't: 0. 8 fits: 1, leaving 4. 4 fits: 1, leaving 0. 2 and 1 are 0. So 1010 1100. Check: 128 + 32 + 8 + 4 = 172. In hex that's AC."</p><p>They want to hear a <i>method</i> and a check, not a memorised answer.</p>`)}
+${K.reveal("“Convert 172 to binary, out loud.”",`<p>"Place values 128, 64, 32, 16, 8, 4, 2, 1. 128 fits into 172: 1, leaving 44. 64 doesn't fit: 0. 32 fits: 1, leaving 12. 16 doesn't: 0. 8 fits: 1, leaving 4. 4 fits: 1, leaving 0. 2 and 1 are 0. So 1010 1100. Check: 128 + 32 + 8 + 4 = 172. In hex that's 0xAC."</p><p>They want to hear a <i>method</i> and a check, not a memorised answer.</p>`)}
 ${K.hint(`Bits → number of patterns → why counting starts at zero.`)}
 ${K.reveal("“Why is the maximum value of an octet 255?”",`<p>"Eight bits, two states each, so 2 to the 8, 256 patterns. Counting starts at zero, all bits off, so the values run 0 to 255. 255 is all eight bits on: 128 + 64 + 32 + 16 + 8 + 4 + 2 + 1. That's why no IPv4 or mask octet can exceed 255."</p>`)}
 ${K.hint(`One hex digit is how many bits? Then readability, and where you see it.`)}
@@ -454,7 +454,7 @@ ${K.remember(`<b>The boundaries are 128, 192, 224, 240</b> — the same numbers 
 ${K.steps([
   ["172.20.14.9", `<p>172: 128 fits (44 left) → 1; 64 → 0; 32 fits (12 left) → 1; 16 → 0; 8 fits (4 left) → 1; 4 fits → 1; 2 → 0; 1 → 0. So 172 = <code>1010 1100</code>. Leading <code>10</code> → <b>Class B</b>, default /16: classful network <code>172.20</code>, host <code>14.9</code>.</p>`],
   ["223.1.1.1", `<p>223 = 128+64+16+8+4+2+1 = <code>1101 1111</code>. Leading <code>110</code> → <b>Class C</b> (the last one), default /24.</p>`],
-  ["224.0.0.10", `<p>224 = 128+64+32 = <code>1110 0000</code>. Leading <code>1110</code> → <b>Class D</b>, multicast — a group (EIGRP routers use this one), never a host's own address.</p>`],
+  ["224.0.0.10", `<p>224 = 128+64+32 = <code>1110 0000</code>. Leading <code>1110</code> → <b>Class D</b>, multicast — a group (${K.g("EIGRP","Enhanced Interior Gateway Routing Protocol: Cisco's routing protocol that lets routers share the networks they know about. Routing protocols come in later modules.")} routers use this one), never a host's own address.</p>`],
   ["127.0.0.1", `<p>127 = <code>0111 1111</code>. Leading <code>0</code>, so its bits say Class A — but the whole 127 block is reserved for <b>loopback</b>. That's why Class A is 1–126.</p>`],
 ])}
 <h3>Try it yourself: classes on paper</h3>
@@ -473,7 +473,7 @@ ${K.drill({title:"first-octet bits: decimal ↔ binary", types:["dec2bin","bin2d
 ${K.exam(`Expect &ldquo;Which class is 191.x?&rdquo;, &ldquo;Which first octets are valid Class C: 191, 192, 223, 224?&rdquo; (192 and 223) and &ldquo;Default mask of Class B?&rdquo; (255.255.0.0). Traps: <b>127</b> starts with a 0 bit but is loopback, not a Class A network; <b>224</b> is D, not C.`)}
 ${K.check({q:"A colleague calls 200.10.4.7 &ldquo;a Class B address&rdquo;. What do you tell them?", o:["Right — it is in 128–191","Wrong — 200 is in 192–223, so it is Class C, default /24","Wrong — it is Class A","Wrong — 200 is multicast"], a:1, why:"200 = 11001000, leading bits 110: Class C (192–223), default mask 255.255.255.0."})}
 
-<h2>From classes to CIDR: why classful addressing was abandoned</h2>
+<h2>From classes to CIDR (Classless Inter-Domain Routing): why classful addressing was abandoned</h2>
 <p><b>Waste.</b> There were three sizes only: 254, 65,534 or 16.7 million hosts. A university with 2,000 computers was too big for a Class C, so it got a Class B and left 63,500 addresses unused that nobody else could use. Early arrivals got whole Class As. By 1992 free Class B networks were running out.</p>
 ${K.dyk(`Some early holders still have entire former Class A blocks: Apple has <code>17.0.0.0/8</code> and Ford <code>19.0.0.0/8</code> — about 16.7 million addresses each. That early generosity is part of why IPv4 ran out.`)}
 <p><b>Routing tables exploding.</b> The stopgap — several Class Cs instead of one B — meant several entries per company in every core router. ${K.g("Routing tables","A router's list of known networks and where to send packets for each.")} grew faster than router memory.</p>
@@ -482,7 +482,7 @@ ${K.mistake(`Assuming an address uses its class's default mask. <code>172.20.14.
 ${K.check({q:"Which two problems did CIDR (1993) solve?", o:["Addresses too short, and DNS too slow","Waste from fixed class sizes, and internet routing tables growing too fast","Broadcast storms, and duplicate MACs","Address spoofing, and lack of encryption"], a:1, why:"Fixed sizes wasted addresses; handing out many Class Cs bloated routing tables. CIDR's any-length prefixes and aggregation fixed both."})}
 
 <h2>Private and public addresses</h2>
-<p>CIDR slowed the waste but couldn't change the arithmetic. What bought IPv4 decades more was <b>private addresses</b>, reusable inside any network, plus <b>NAT</b>, which lets many private devices share one public address.</p>
+<p>CIDR slowed the waste but couldn't change the arithmetic. What bought IPv4 decades more was <b>private addresses</b>, reusable inside any network, plus <b>${K.g("NAT","Network Address Translation: the edge router swaps a private source address for its public one, and back for replies. Module 7.")}</b>, which lets many private devices share one public address.</p>
 <h3>Public addresses and who hands them out</h3>
 <p>A ${K.g("public address","Globally unique and routable on the internet. Allocated via IANA, the RIRs and ISPs.")} is unique on the whole internet, so someone must hand them out:</p>
 ${K.svg("0 0 720 290",
@@ -506,7 +506,7 @@ ${K.dyk(`On 3 February 2011 IANA's last five /8 blocks went one to each RIR, und
 <div class="tablewrap"><table>
 <tr><th>Block</th><th>Range</th><th>Addresses</th><th>Typical use</th></tr>
 <tr><td><code>10.0.0.0/8</code></td><td>10.0.0.0 – 10.255.255.255</td><td>16,777,216</td><td>Enterprises, banks, multi-site and cloud networks</td></tr>
-<tr><td><code>172.16.0.0/12</code></td><td>172.16.0.0 – 172.31.255.255</td><td>1,048,576</td><td>Medium networks; cloud defaults (AWS's default VPC is 172.31.0.0/16)</td></tr>
+<tr><td><code>172.16.0.0/12</code></td><td>172.16.0.0 – 172.31.255.255</td><td>1,048,576</td><td>Medium networks; cloud defaults (AWS's default VPC — Virtual Private Cloud, a customer's private network inside Amazon's cloud — is 172.31.0.0/16)</td></tr>
 <tr><td><code>192.168.0.0/16</code></td><td>192.168.0.0 – 192.168.255.255</td><td>65,536</td><td>Homes, small offices, consumer router defaults</td></tr>
 </table></div>
 <p><code>192.168.1.10</code> is on a laptop in millions of buildings right now, and that's fine: the addresses never meet. That reuse is the power of ${K.g("private addresses","RFC 1918 addresses: free to use internally, not unique, never routed on the internet.")} — and, as the case study shows, the trouble when two private networks must be joined.</p>
@@ -522,7 +522,7 @@ ${K.dyk(`On 3 February 2011 IANA's last five /8 blocks went one to each RIR, und
 <p>Every second octet from 16 to 31 starts <code>0001</code>, so the block is <b>172.16 to 172.31</b> and <code>172.32.0.1</code> is public. The ${K.g("CGNAT","Carrier-grade NAT: an ISP shares one public address among many customers, using 100.64.0.0/10 towards their routers.")} block <code>100.64.0.0/10</code> works the same way with 10 bits: 100 = <code>01100100</code>, and the second octet's top 2 bits must be <code>01</code>: from <code>01 000000</code> = 64 to <code>01 111111</code> = 127. Range: <b>100.64.0.0 – 100.127.255.255</b>.</p>
 ${K.remember(`<b>&ldquo;Ten, sixteen-to-thirty-one, one-sixty-eight.&rdquo;</b> 10.anything · 172.16 to 172.31 · 192.168.anything. It is one of the most-asked facts in networking interviews.`)}
 <h3>NAT and CGNAT (preview)</h3>
-<p>If the internet drops private addresses, how does <code>192.168.10.11</code> load a website? The edge router performs ${K.g("NAT","Network Address Translation: the edge router swaps a private source address for its public one, and back for replies. Module 7.")}: it swaps the private source for its own public address and reverses it for the reply. One public address can serve hundreds of devices. You'll configure it in Module 7.</p>
+<p>If the internet drops private addresses, how does <code>192.168.10.11</code> load a website? The edge router performs NAT: it swaps the private source for its own public address and reverses it for the reply. One public address can serve hundreds of devices. You'll configure it in Module 7.</p>
 ${K.svg("0 0 760 290",
   `<rect x="10" y="44" width="330" height="236" rx="10" fill="none" stroke="var(--ok)" stroke-dasharray="6 4"/>`+
   `<rect x="470" y="44" width="280" height="236" rx="10" fill="none" stroke="var(--accent)" stroke-dasharray="6 4"/>`+
@@ -577,7 +577,7 @@ ${K.svg("0 0 760 290",
 <h3>The network address and the directed broadcast</h3>
 <p>Every network reserves two addresses. Host bits all <b>0</b> give the ${K.g("network address","All host bits 0: names the network (e.g. 192.168.10.0/24). Not usable by a host.")} — <code>192.168.10.0</code>, the network's name in routing tables. Host bits all <b>1</b> give the ${K.g("directed broadcast","All host bits 1 (e.g. 192.168.10.255): every host on that one network.")} — <code>192.168.10.255</code>, every host on that network. Cisco routers have refused to forward directed broadcasts from other networks by default since IOS 12.0 (<code>no ip directed-broadcast</code>), because attackers used them to make whole networks flood a victim. These two are the &ldquo;− 2&rdquo; in every host count.</p>
 ${K.mistake(`Thinking every address ending <code>.0</code> or <code>.255</code> is unusable. That holds only for a /24. In <code>172.16.0.0/16</code>, <code>172.16.1.0</code> has host bits <code>00000001 00000000</code> — not all zeros — so it is a valid host. The mask decides, as lesson 3 shows.`)}
-<h3>127.0.0.0/8 loopback and 169.254.0.0/16 APIPA</h3>
+<h3>127.0.0.0/8 loopback and 169.254.0.0/16 APIPA (Automatic Private IP Addressing)</h3>
 <p>Anything starting 127 is ${K.g("loopback","127.0.0.0/8: packets never leave the device. 127.0.0.1 = localhost.")}: the packet turns round inside the operating system and never touches the network card. <code>ping 127.0.0.1</code> (&ldquo;localhost&rdquo;) tests the PC's own TCP/IP software; the whole block is reserved, not only .1.</p>
 <p>When a device set for DHCP gets no answer, it gives itself a random <code>169.254.x.x</code> with mask <code>255.255.0.0</code> and no gateway — ${K.g("APIPA","Automatic Private IP Addressing: a host with no DHCP answer picks 169.254.x.x itself.")}, or in the standard's words a ${K.g("link-local","Usable only on the directly connected link; never routed.")} address. Routers never forward it, so the device can reach only other 169.254 devices on the same link. Windows keeps retrying DHCP in the background (about every five minutes).</p>
 ${K.out(`C:\\Users\\bisi>ipconfig /all
@@ -619,7 +619,7 @@ Interface: 192.168.10.11 --- 0x4
 <ul>
 <li><b>.1 and .20, dynamic</b> — <b>unicast</b>: the gateway and a server, real MACs learned by ARP.</li>
 <li><b>192.168.10.255</b> → <code>ff-ff…</code> — the <b>directed broadcast</b> of this /24 (a clue to the PC's mask).</li>
-<li><b>224.0.0.22, 224.0.0.251, 239.255.255.250</b> — <b>multicast</b> groups (IGMPv3, mDNS, SSDP). The MACs start <code>01-00-5e</code> and end with the group's low bits: 22 = 0x16.</li>
+<li><b>224.0.0.22, 224.0.0.251, 239.255.255.250</b> — <b>multicast</b> groups (IGMPv3, mDNS, ${K.g("SSDP","Simple Service Discovery Protocol: how devices such as smart TVs, printers and media servers announce themselves and find each other on a local network.")}). The MACs start <code>01-00-5e</code> and end with the group's low bits: 22 = 0x16.</li>
 <li><b>255.255.255.255</b> — the <b>limited broadcast</b>.</li>
 </ul>
 ${K.myth([
@@ -749,7 +749,7 @@ Trace complete.`, "The internet sees a different address from the router's, and 
 
 ${K.case("A Lagos fintech, four networks, all 192.168.1.0/24",`
 <p>A payments start-up grew from one office to four places that had to talk: head office in Victoria Island, a support office in Abuja, a data room in Ikeja, and the cloud. Different contractors had left the consumer default, <code>192.168.1.0/24</code>, everywhere — and developers' home routers used it too.</p>
-<p><b>What broke.</b> The Lagos–Abuja ${K.g("VPN","Virtual Private Network: an encrypted tunnel joining networks or remote users across the internet.")} came up but carried nothing. A Lagos PC sending to <code>192.168.1.40</code> in Abuja saw that address as <i>its own</i> network and ARPed locally instead of using the gateway. Identical network parts are, to every host, the same network. Remote staff on 192.168.1.0/24 at home hit the same wall. NAT tricks patched Abuja but made faults harder to trace.</p>
+<p><b>What broke.</b> The Lagos–Abuja ${K.g("VPN","Virtual Private Network: an encrypted tunnel joining networks or remote users across the internet.")} came up but carried nothing. A Lagos PC sending to <code>192.168.1.40</code> in Abuja saw that address as <i>its own</i> network and sent ARP requests for it locally instead of using the gateway. Identical network parts are, to every host, the same network. Remote staff on 192.168.1.0/24 at home hit the same wall. NAT tricks patched Abuja but made faults harder to trace.</p>
 <p><b>The redesign.</b> The network lead planned first and chose <b>10.0.0.0/8</b>, with one block per site by second octet: Victoria Island <code>10.10</code>, Abuja <code>10.20</code>, Ikeja <code>10.30</code>, cloud <code>10.100</code>, VPN users <code>10.200</code>. The plan avoided popular defaults (192.168.0.x and 1.x, 10.0.0.x, Docker's 172.17.0.0/16, the cloud's 172.31.0.0/16) and never used 100.64/10, which Ikeja's backup ISP used for CGNAT. Re-addressing took two weekends (lessons 6–7 show how). Afterwards the VPNs worked without NAT, firewall rules read clearly, and joining an acquired agency on 192.168.1.0/24 took one evening.</p>
 <p><b>Lesson recorded:</b> private addresses are free but not unique; the moment two private networks connect, overlap is your problem. Plan before the second site.</p>
 ${K.when([
@@ -814,7 +814,7 @@ cards:[
   {f:"Class leading bits", b:"A 0 · B 10 · C 110 · D 1110 · E 1111. Boundaries at 128, 192, 224, 240."},
   {f:"Why classful addressing was replaced", b:"Fixed sizes (/8, /16, /24) wasted addresses, and many small allocations bloated routing tables. CIDR (1993): any prefix length plus route aggregation."},
   {f:"RFC 1918 private ranges", b:"10.0.0.0/8 · 172.16.0.0/12 (172.16.0.0–172.31.255.255) · 192.168.0.0/16. Reusable anywhere, never routed on the internet."},
-  {f:"Who assigns public IPv4 addresses?", b:"IANA → the five RIRs (AFRINIC for Africa, ARIN, APNIC, LACNIC, RIPE NCC) → ISPs/LIRs → customers. IANA's free pool ran out in February 2011."},
+  {f:"Who assigns public IPv4 addresses?", b:"IANA → the five RIRs (AFRINIC for Africa, ARIN, APNIC, LACNIC, RIPE NCC) → ISPs and local registries → customers. IANA's free pool ran out in February 2011."},
   {f:"100.64.0.0/10", b:"RFC 6598 shared address space for ISP carrier-grade NAT: 100.64.0.0–100.127.255.255. On a router's WAN it means no public address of its own, so port forwarding fails."},
   {f:"169.254.0.0/16", b:"APIPA / link-local: a host that got no DHCP answer gives itself one, with mask 255.255.0.0 and no gateway. Not routed; only reaches other 169.254 hosts on the link."},
   {f:"0.0.0.0 and 255.255.255.255", b:"0.0.0.0 = this host (DHCP source before an address) or, as 0.0.0.0/0, the default route. 255.255.255.255 = limited broadcast to the local network; never routed."},
@@ -946,7 +946,7 @@ ${K.svg("0 0 720 250",
   K.txt(194,222,"mask 1 → bit passes through",{mid:true,c:"ok",f:"body"})+K.txt(368,222,"mask 0 → result forced to 0",{mid:true,c:"bad",f:"body"})+
   K.box(540,50,160,140,"","")+K.txt(620,74,"AND truth table",{mid:true,c:"fg",b:true,f:"display",s:12})+
   [["1 AND 1 = 1","ok"],["1 AND 0 = 0","muted"],["0 AND 1 = 0","muted"],["0 AND 0 = 0","muted"]].map(([t,c],i)=>K.txt(620,102+i*22,t,{mid:true,c,s:12.5})).join(""),
-  "The fourth octet of 192.168.10.77/26, ANDed bit by bit with the mask's 192. The two columns under mask 1s copy the address bits; the six columns under mask 0s become 0. 01000000 = 64.")}
+  "The fourth octet of 192.168.10.77/26, AND-ed bit by bit with the mask's 192. The two columns under mask 1s copy the address bits; the six columns under mask 0s become 0. 01000000 = 64.")}
 ${K.analogy(`<p>A stencil: card with holes cut where the mask's 1s are. Lay it over the address — through the holes the address shows; elsewhere you see blank (0). What's visible is the network address.</p>`)}
 <h3>Worked example 1: 192.168.10.77/26</h3>
 ${K.steps([
@@ -956,8 +956,8 @@ ${K.steps([
 Address       11000000 . 10101000 . 00001010 . 01001101    192.168.10.77
 Mask (/26)    11111111 . 11111111 . 11111111 . 11000000    255.255.255.192
               ------------------------------------------- AND
-Network       11000000 . 10101000 . 00001010 . 01000000    192.168.10.64`, "Every bit of the address is ANDed with the bit of the mask directly under it.")}`],
-  ["Convert back to decimal", `<p>Octets 1–3 are unchanged (ANDed with all 1s). Octet 4: <code>01000000</code> = 64. <b>Network address: 192.168.10.64</b>. Written with its prefix, the subnet is <b>192.168.10.64/26</b>.</p>`],
+Network       11000000 . 10101000 . 00001010 . 01000000    192.168.10.64`, "Every bit of the address is AND-ed with the bit of the mask directly under it.")}`],
+  ["Convert back to decimal", `<p>Octets 1–3 are unchanged (AND-ed with all 1s). Octet 4: <code>01000000</code> = 64. <b>Network address: 192.168.10.64</b>. Written with its prefix, the subnet is <b>192.168.10.64/26</b>.</p>`],
 ])}
 <h3>Worked example 2: 172.20.130.9/20</h3>
 ${K.steps([
@@ -972,7 +972,7 @@ Network       10101100 . 00010100 . 10000000 . 00000000    172.20.128.0`, "The l
 ])}
 <h3>Worked example 3: 10.4.5.6/8</h3>
 ${K.steps([
-  ["Mask on an octet boundary", `<p>/8 = 255.0.0.0. An octet ANDed with 255 is copied; ANDed with 0 it becomes 0.</p>`],
+  ["Mask on an octet boundary", `<p>/8 = 255.0.0.0. An octet AND-ed with 255 is copied; AND-ed with 0 it becomes 0.</p>`],
   ["AND", `${K.out(`              octet 1    octet 2    octet 3    octet 4
 Address       00001010 . 00000100 . 00000101 . 00000110    10.4.5.6
 Mask (/8)     11111111 . 00000000 . 00000000 . 00000000    255.0.0.0
@@ -1038,7 +1038,7 @@ ${K.when([
   ["/32","Loopbacks, host routes, a rule for one server","Names exactly one address","An interface that must reach neighbours"],
 ], "Choosing a prefix for the job")}
 ${K.exam(`Use <b>2<sup>h</sup> − 2</b> unless the question is clearly about a /31 link or a /32. Distractors are the answer +2 (no subtraction) or +1 (only the network subtracted): a /27 has <b>30</b> usable, not 32 or 31.`)}
-${K.mistake(`Giving a host the network or broadcast address because it &ldquo;looks normal&rdquo;. 172.16.5.99/30: 99 = <code>01100011</code>, ANDed with 252 gives 96, and both host bits are already 1 — it's the <b>broadcast</b> of 172.16.5.96/30. Check any address that sits right before a block boundary.`)}
+${K.mistake(`Giving a host the network or broadcast address because it &ldquo;looks normal&rdquo;. 172.16.5.99/30: 99 = <code>01100011</code>, AND-ed with 252 gives 96, and both host bits are already 1 — it's the <b>broadcast</b> of 172.16.5.96/30. Check any address that sits right before a block boundary.`)}
 <p>Now drill the AND, range and host count together.</p>
 ${K.drill({title:"same subnet? and find the network, broadcast and range", types:["samesub","subnet"], count:6})}
 ${K.q({type:"match", q:"Match each prefix with its number of usable host addresses.", pairs:[["/24","254"],["/25","126"],["/27","30"],["/29","6"],["/32","1 (a single address, e.g. a loopback)"]], why:"Host bits = 32 − prefix, usable = 2^h − 2: /24 → 256 − 2, /25 → 128 − 2, /27 → 32 − 2, /29 → 8 − 2. A /32 is the exception: no host bits, one address, used for loopbacks and host routes."})}
@@ -1088,7 +1088,7 @@ ${K.bench({id:"m3-mask-neighbours", points:60, from:"CCNA · Module 3 · lesson 
   solve:[["pc","fd","ipconfig"],["pc","ph","ipconfig"],["pc","fd","ping 192.168.1.70"],["pc","fd","arp -a"],["ip","fd","192.168.1.66","255.255.255.192",""],["pc","fd","ping 192.168.1.70"],["pc","ph","ping 192.168.1.66"]]})}
 ${K.hint(`Task 4 won't tick? The address must be 192.168.1.65–126 (not .70) with mask 255.255.255.192; then ping 192.168.1.70 again.`)}
 ${K.reveal("Experiment: what if you'd changed only FRONT-DESK's mask to /24?",`<p><b>Reset bench</b>, set FRONT-DESK to <code>192.168.1.60</code> / <code>255.255.255.0</code> and ping .70. ARP succeeds and the request <i>arrives</i>, yet you get <b>Request timed out</b>: PHARMACY-PC, still /26, sees .60 as remote and has no gateway for the reply. One-way failure.</p>`)}
-<h3>A mask that's too wide: ARPing for a host behind the router</h3>
+<h3>A mask that's too wide: sending ARP requests for a host behind the router</h3>
 <p>The opposite fault: a mask with too few 1s, so the host thinks a huge range is local and ARPs directly for hosts behind the router. In Module 2 lesson 4 proxy ARP covered for this; this branch router is hardened with <code>no ip proxy-arp</code>, so the fault shows.</p>
 <p>Back to Wuse. The teller LAN is <b>172.20.128.0/20</b> (gateway .128.1) — worked example 2; the core banking server is <b>172.20.160.10</b> behind the router. Do each teller's AND first.</p>
 ${K.bench({id:"m3-mask-gateway", points:80, from:"CCNA · Module 3 · lesson 3", title:"the teller who ARPs for the server", viewBox:"0 0 760 410", openLog:true,
@@ -1105,7 +1105,7 @@ ${K.bench({id:"m3-mask-gateway", points:80, from:"CCNA · Module 3 · lesson 3",
   cables:[ {type:"cat6", a:"t1:eth", b:"sw1:g1"}, {type:"cat6", a:"t2:eth", b:"sw1:g2"}, {type:"cat6", a:"r1:g0", b:"sw1:g8"}, {type:"cat6", a:"r1:g1", b:"srv:eth"}, {type:"console", a:"lap:usb", b:"r1:con"} ],
   tray:["cat6","console"],
   tasks:[
-    {text:"From TELLER-1 (mask /20), <code>ping 172.20.160.10</code>. It works — in the log, TELLER-1 ARPs for the <b>gateway</b> 172.20.128.1, because 172.20.160.10 ANDed with 255.255.240.0 is 172.20.160.0, not 172.20.128.0", done:B=>Bench.pinged(B,"t1","172.20.160.10") && Bench.arpHas(B,"t1","172.20.128.1")},
+    {text:"From TELLER-1 (mask /20), <code>ping 172.20.160.10</code>. It works — in the log, TELLER-1 ARPs for the <b>gateway</b> 172.20.128.1, because 172.20.160.10 AND-ed with 255.255.240.0 is 172.20.160.0, not 172.20.128.0", done:B=>Bench.pinged(B,"t1","172.20.160.10") && Bench.arpHas(B,"t1","172.20.128.1")},
     {text:"On TELLER-2, run <code>ipconfig</code>, then <code>ping 172.20.160.10</code>. <i>Destination host unreachable</i>: the log shows TELLER-2 asking &ldquo;Who has 172.20.160.10?&rdquo; — and nobody answering", done:B=>Bench.tried(B,"t2",/^\s*ipconfig/i) && Bench.tried(B,"t2",/^\s*ping\s+172\.20\.160\.10\s*$/i)},
     {text:"From TELLER-2, <code>ping 172.20.130.9</code> (TELLER-1). It works — which is why &ldquo;the network is fine, it's the app&rdquo; is so tempting", done:B=>Bench.pinged(B,"t2","172.20.130.9")},
     {text:"Run <code>arp -a</code> on TELLER-2: TELLER-1 is there, the gateway isn't, and the broadcast row is <code>172.20.255.255</code> — a /16's broadcast", done:B=>Bench.tried(B,"t2",/^\s*arp\s+-a\s*$/i)},
@@ -1205,7 +1205,7 @@ ${K.check({q:"A printer at 10.50.6.31 has mask 255.255.255.0 on a LAN that is re
 
 <h2>Interview corner</h2>
 ${K.hint(`Say what the mask is, then what a device does with it — and why that matters.`)}
-${K.reveal("&ldquo;What does the subnet mask do?&rdquo;",`<p>&ldquo;It tells a device which bits of an address are network and which are host: 32 bits, a contiguous run of 1s for the network part, then 0s — written 255.255.255.192 or /26. ANDing an address with the mask gives the network address. Its key use is the local-or-remote decision: a host ANDs its own address and the destination with its own mask. Same result, it ARPs for the destination; different, it sends to its default gateway. A wrong mask breaks that decision, and it's a classic cause of &lsquo;works for some people, not others&rsquo;.&rdquo;</p>`)}
+${K.reveal("&ldquo;What does the subnet mask do?&rdquo;",`<p>&ldquo;It tells a device which bits of an address are network and which are host: 32 bits, a contiguous run of 1s for the network part, then 0s — written 255.255.255.192 or /26. AND-ing an address with the mask gives the network address. Its key use is the local-or-remote decision: a host ANDs its own address and the destination with its own mask. Same result, it ARPs for the destination; different, it sends to its default gateway. A wrong mask breaks that decision, and it's a classic cause of &lsquo;works for some people, not others&rsquo;.&rdquo;</p>`)}
 ${K.hint(`Show the working: host bits, 2 to the power, minus 2 — then say what the two are.`)}
 ${K.reveal("&ldquo;How many usable hosts are in a /27, and why?&rdquo;",`<p>&ldquo;Thirty. 32 − 27 = 5 host bits, 2<sup>5</sup> = 32 addresses. All host bits 0 is the network address and all 1s is the broadcast, so neither can be assigned: 32 − 2 = 30. For example 192.168.50.128/27 runs .128 to .159, hosts .129 to .158. The exceptions are /31 point-to-point links, where RFC 3021 makes both addresses usable, and /32 for loopbacks and host routes.&rdquo;</p>`)}
 ${K.hint(`Scope it, prove it with commands and the AND, then fix to the design.`)}
@@ -1228,10 +1228,10 @@ quiz:[
   {type:"fill", q:"Write the prefix /27 as a dotted-decimal subnet mask.", fields:[{label:"Mask", a:["255.255.255.224"]}], why:"27 = 8 + 8 + 8 + 3. Three octets of 255, then three ones (11100000) = 128 + 64 + 32 = 224.", lvl:1},
   {type:"fill", q:"What prefix length is the mask 255.255.248.0?", fields:[{label:"Prefix", a:["/21","21"]}], why:"255 = 8 ones, 255 = 8, 248 = 11111000 = 5, 0 = 0. 8 + 8 + 5 = 21.", lvl:2},
   {type:"multi", q:"Which two of these are valid subnet masks? (Choose two.)", o:["255.255.255.224","255.255.0.255","255.255.255.250","255.254.0.0","255.0.255.0"], a:[0,3], why:"224 (11100000) after three full octets and 254 (11111110) followed by zeros are both contiguous runs of 1s. 255.255.0.255 and 255.0.255.0 restart their 1s after a 0 octet, and 250 (11111010) is not one of the nine valid octet values.", lvl:2},
-  {q:"What is the network address of the host 172.20.130.9/20?", o:["172.20.130.0","172.20.128.0","172.20.0.0","172.20.143.0"], a:1, why:"/20 = 255.255.240.0, so octet 3 is the interesting octet: 130 = 10000010 AND 240 = 11110000 = 10000000 = 128. Octet 4 ANDed with 0 is 0. Network 172.20.128.0. 172.20.143.255 is the broadcast of the same subnet.", lvl:2},
+  {q:"What is the network address of the host 172.20.130.9/20?", o:["172.20.130.0","172.20.128.0","172.20.0.0","172.20.143.0"], a:1, why:"/20 = 255.255.240.0, so octet 3 is the interesting octet: 130 = 10000010 AND 240 = 11110000 = 10000000 = 128. Octet 4 AND-ed with 0 is 0. Network 172.20.128.0. 172.20.143.255 is the broadcast of the same subnet.", lvl:2},
   {type:"fill", q:"For the host 192.168.50.140/27, give the network and broadcast addresses.", fields:[{label:"Network address", a:["192.168.50.128","192.168.50.128/27"]},{label:"Broadcast address", a:["192.168.50.159"]}], why:"/27 = 255.255.255.224. 140 = 10001100 AND 11100000 = 10000000 = 128, so the network is 192.168.50.128. Setting the five host bits to 1 gives 10011111 = 159, the broadcast. Usable hosts are .129 to .158.", lvl:2},
   {q:"How many usable host addresses does a /27 subnet provide on an ordinary LAN?", o:["32","31","30","27"], a:2, why:"32 − 27 = 5 host bits; 2^5 = 32 addresses. The all-zeros host part is the network address and the all-ones host part is the broadcast, so 32 − 2 = 30 are usable.", lvl:2},
-  {q:"A technician configures a server with 172.16.5.99 and mask 255.255.255.252. Users can't reach it. What is wrong?", o:["Nothing; 172.16.5.99/30 is a normal usable host address","172.16.5.99 is the broadcast address of the subnet 172.16.5.96/30","172.16.5.99 is the network address of 172.16.5.99/30","A /30 mask can't be used on a server"], a:1, why:"99 = 01100011. ANDed with 252 (11111100) it gives 01100000 = 96, so the subnet is 172.16.5.96/30. Its two host bits are both 1 in 99, which makes 172.16.5.99 the broadcast address. The usable hosts are .97 and .98.", lvl:3},
+  {q:"A technician configures a server with 172.16.5.99 and mask 255.255.255.252. Users can't reach it. What is wrong?", o:["Nothing; 172.16.5.99/30 is a normal usable host address","172.16.5.99 is the broadcast address of the subnet 172.16.5.96/30","172.16.5.99 is the network address of 172.16.5.99/30","A /30 mask can't be used on a server"], a:1, why:"99 = 01100011. AND-ed with 252 (11111100) it gives 01100000 = 96, so the subnet is 172.16.5.96/30. Its two host bits are both 1 in 99, which makes 172.16.5.99 the broadcast address. The usable hosts are .97 and .98.", lvl:3},
   {type:"order", q:"Put the steps for finding a subnet's network and broadcast addresses by hand in order.", items:["Convert the prefix length to a dotted-decimal mask","Write the address and the mask in binary, aligned octet under octet","AND each address bit with the mask bit beneath it","Convert the result back to decimal: this is the network address","Set every host bit of the network address to 1 to get the broadcast address"], why:"You need the mask before you can align it; the AND gives the network address once converted back to decimal; the broadcast comes from the network address by turning every host bit on.", lvl:1},
   {type:"match", q:"Match each prefix length with its subnet mask.", pairs:[["/8","255.0.0.0"],["/16","255.255.0.0"],["/20","255.255.240.0"],["/26","255.255.255.192"],["/30","255.255.255.252"]], why:"Each full 8 bits is an octet of 255. /20 has 4 leftover bits (240), /26 has 2 (192) and /30 has 6 (252).", lvl:1},
   {type:"multi", q:"Two PCs on the same switch and VLAN, with no router, can't ping each other. You must keep the /26 mask on both. Which two changes would let them communicate? (Choose two.)", ex:"PC-A> ipconfig\n   IPv4 Address. . . . . . . . . . . : 192.168.1.60\n   Subnet Mask . . . . . . . . . . . : 255.255.255.192\n\nPC-B> ipconfig\n   IPv4 Address. . . . . . . . . . . : 192.168.1.70\n   Subnet Mask . . . . . . . . . . . : 255.255.255.192", o:["Change PC-B to 192.168.1.62","Change PC-A to 192.168.1.66","Change PC-A to 192.168.1.64","Change PC-B to 192.168.1.63","Change PC-A to 192.168.1.127"], a:[0,1], why:"With /26, PC-A (.60) is in 192.168.1.0/26 (hosts .1 to .62) and PC-B (.70) is in 192.168.1.64/26 (hosts .65 to .126). Moving PC-B to .62 or PC-A to .66 puts both in one subnet. .64 is the network address of the second subnet, .63 the broadcast of the first and .127 the broadcast of the second, so none of those can be assigned to a host.", lvl:3},
@@ -1269,11 +1269,11 @@ ${K.goals([
   "Pick the right prefix from a requirement (&ldquo;6 subnets&rdquo;, &ldquo;50 hosts&rdquo;, or both), and spot when it can't be met.",
   "Subnet a /16 into /24s and /20s, find the Nth subnet, and configure a subnetted plan on a router and PCs.",
 ])}
-${K.pre(["Lesson 1 (binary place values 128 64 32 16 8 4 2 1), lesson 2 (network and broadcast addresses, private ranges) and lesson 3 (masks, prefix length, ANDing). Module 2 for broadcast domains, ARP and default gateways."])}
+${K.pre(["Lesson 1 (binary place values 128 64 32 16 8 4 2 1), lesson 2 (network and broadcast addresses, private ranges) and lesson 3 (masks, prefix length, AND-ing). Module 2 for broadcast domains, ARP and default gateways."])}
 
 <h2>Why this matters at work</h2>
 <p>A pharmacy chain's Ikeja branch runs everything — 38 PCs, 30 IP phones, six printers and the switch management — on one flat network, <code>10.20.30.0/24</code>. An audit lands: <i>&ldquo;Printers and network-device management are reachable from every staff PC. Separate them.&rdquo;</i> The IT manager forwards it to the MSP: <i>&ldquo;Can you split our range up? We can't get more addresses.&rdquo;</i></p>
-<p>That request is <b>subnetting</b>: cutting one block of addresses into smaller blocks, each its own network behind a router. You'll do it on paper, in binary first so you see why it works, then on a router and PCs. VLANs, routing, access lists and VLSM all assume you can do this without a calculator — and interviewers ask it first.</p>
+<p>That request is <b>subnetting</b>: cutting one block of addresses into smaller blocks, each its own network behind a router. You'll do it on paper, in binary first so you see why it works, then on a router and PCs. VLANs, routing, access lists and ${K.g("VLSM","Variable-Length Subnet Masking: using different-sized subnets (different prefix lengths) inside one block, each sized to its own need. You'll design with it in lesson 6.")} all assume you can do this without a calculator — and interviewers ask it first.</p>
 
 <h2>Why subnet at all?</h2>
 <p>In lesson 3 you split an address into a ${K.g("network portion","The leading bits, covered by the 1s in the mask. Same for every device in the network.")} and a ${K.g("host portion","The trailing bits, covered by the 0s in the mask. They identify one device.")}. <code>192.168.1.0/24</code> has 8 host bits: 256 addresses, 254 usable.</p>
@@ -1640,7 +1640,7 @@ ${K.bench({id:"m3-subnet-lan", points:80, from:"CCNA · Module 3 · lesson 4", t
     ["ip","pc1","192.168.50.10","255.255.255.192","192.168.50.1"],["ip","pc2","192.168.50.11","255.255.255.192","192.168.50.1"],["ip","pc3","192.168.50.70","255.255.255.192","192.168.50.65"],
     ["pc","pc1","ping 192.168.50.70"],["pc","pc3","ping 192.168.50.11"],["term","show ip route"]]})}
 ${K.hint(`Ping fails? <i>General failure</i> usually means the PC's gateway isn't in its own subnet. <i>Request timed out</i> means no reply came back — check <code>no shutdown</code> on the router and the far PC's gateway. Use <code>ipconfig</code> on PCs and <code>show ip interface brief</code> on the router.`)}
-<p>In the log, PC1 ARPed for <b>192.168.50.1</b>: PC3's address ANDed with /26 gives <code>.64</code>, not PC1's <code>.0</code>, so PC1 used its gateway. The broadcast never reached SW-B — the router stopped it.</p>
+<p>In the log, PC1 sent an ARP request for <b>192.168.50.1</b>: PC3's address AND-ed with /26 gives <code>.64</code>, not PC1's <code>.0</code>, so PC1 used its gateway. The broadcast never reached SW-B — the router stopped it.</p>
 <p><b>Experiment:</b> set PC1's mask to <code>255.255.255.0</code> and ping PC3 again. It still works: PC1 ARPs for PC3 directly and the router answers with its own MAC — <b>proxy ARP</b> from Module 2, on by default — hiding the wrong mask until someone configures <code>no ip proxy-arp</code>. Put the mask back afterwards.</p>
 ${K.mistake(`Leaving every PC's gateway as <code>.1</code> after subnetting. Hosts in subnet 2 need the router address <b>in subnet 2</b> (<code>.65</code>); a gateway outside the host's subnet is unreachable.`)}
 ${K.check({q:"PC3 has 192.168.50.70/26 and gateway 192.168.50.1. Router G0/0 is 192.168.50.1/26, G0/1 is 192.168.50.65/26, and PC3 is on G0/1's switch. Why can't PC3 reach other subnets?", o:["192.168.50.70 is a broadcast address","Its gateway is in 192.168.50.0/26, not PC3's subnet, so PC3 can't reach it","The router needs a static route to 192.168.50.64/26","The mask should be 255.255.255.224"], a:1, why:"PC3 is in 192.168.50.64/26 (.65–.126). A gateway must be in the host's own subnet so the host can ARP for it: set 192.168.50.65."})}
@@ -1719,7 +1719,7 @@ ${K.pre(["Module 3 lessons 1–4: binary place values, IPv4 address structure an
 <p>The CCNA exam is the same pressure, measured. Subnetting hides inside questions about something else: which host can't reach its gateway, which route matches, which ACL line covers an interface. You get roughly a minute per question, no calculator, and the CCNA exam doesn't let you go back to an earlier question. Lessons 3 and 4 taught you to do it properly, in binary. This lesson teaches the professionals' shortcut, the <b>magic-number method</b>, until it is fast and still right.</p>
 
 <h2>The magic-number method, step by step</h2>
-<p>In lesson 3 you ANDed all 32 bits of address and mask. That always works, but most of those bits don't need writing. Look at the AND octet by octet:</p>
+<p>In lesson 3 you AND-ed all 32 bits of address and mask. That always works, but most of those bits don't need writing. Look at the AND octet by octet:</p>
 <ul>
 <li>Where the mask octet is <b>255</b> (all ones), the address octet passes through unchanged. Copy it.</li>
 <li>Where the mask octet is <b>0</b> (all zeros), the result is 0. Write 0.</li>
@@ -1922,7 +1922,7 @@ ${K.when([
   ["Magic number","Exam questions, meetings, change windows","One octet of arithmetic, done in your head","You're unsure which octet is interesting — use binary for that one"],
   ["Binary AND (lesson 3)","Proving or explaining an answer","Shows exactly why","Under time pressure: 32 bits is slow"],
   ["Listing the subnets (lesson 4)","Allocating many subnets, finding the Nth or the next free one","Shows the layout and the gaps","You need one answer for one address"],
-  ["Calculator or IPAM tool","Documenting real plans with hundreds of subnets","No slips at scale","The exam (not allowed), or input you haven't checked"],
+  [`Calculator or ${K.g("IPAM","IP address management: a tool or disciplined register that records which blocks are allocated, not only which addresses are in use.")} tool`,"Documenting real plans with hundreds of subnets","No slips at scale","The exam (not allowed), or input you haven't checked"],
 ], "Which subnetting method, and when")}
 <h3>Timed set: six questions, three minutes</h3>
 <p>Write the cheat sheet (time that too), then start a timer. Write answers before opening the hint.</p>
@@ -1967,7 +1967,7 @@ L        10.20.37.1/32 is directly connected, GigabitEthernet0/0
 C        172.16.200.160/30 is directly connected, GigabitEthernet0/1
 L        172.16.200.162/32 is directly connected, GigabitEthernet0/1`, "show ip route on the same router. Each working interface adds a C line (its subnet) and an L line (its own address as a /32).")}
 <ul>
-<li><b>C</b> lines are ${K.g("connected routes","Subnets the router has an interface in. IOS adds them automatically when an interface with an IP address is up/up.")}: each interface address ANDed with its mask. <code>10.20.32.0/21</code> is what the magic number gives for 10.20.37.1/21: block 8, 37 falls in 32–39.</li>
+<li><b>C</b> lines are ${K.g("connected routes","Subnets the router has an interface in. IOS adds them automatically when an interface with an IP address is up/up.")}: each interface address AND-ed with its mask. <code>10.20.32.0/21</code> is what the magic number gives for 10.20.37.1/21: block 8, 37 falls in 32–39.</li>
 <li><b>L</b> lines are the router's own addresses as /32 host routes.</li>
 <li>The indented headers group routes by classful network: 10.0.0.0/8 holds a /21 and a /32.</li>
 </ul>
@@ -2011,7 +2011,7 @@ Gi0/1   WAN to DR site   172.16.200.164/30  local .164   DR .165
 Lo0     Management       10.255.0.7/32`, "The plan as written. Four lines, about two minutes of mental checking.")}
 <p><b>The questions you ask, line by line.</b> Is the subnet on its block boundary? Is the interface address usable (not the network, not the broadcast)? Does it overlap another line, or anything already on the router?</p>
 <ul>
-<li><b>POS, 10.44.16.0/23.</b> Block 2 in octet 3; 16 is even, so it's a boundary. Range 10.44.16.0–10.44.17.255; gateway 10.44.17.254 is the last usable. ✓</li>
+<li><b>${K.g("POS terminals","Point of sale: the card terminals and tills where customers pay.")}, 10.44.16.0/23.</b> Block 2 in octet 3; 16 is even, so it's a boundary. Range 10.44.16.0–10.44.17.255; gateway 10.44.17.254 is the last usable. ✓</li>
 <li><b>CCTV, 10.44.18.0/22.</b> Block 4 in octet 3; 18 ÷ 4 = 4.5: not a boundary. The real subnet is 10.44.16.0/22 (16–19), which contains the POS /23. IOS would refuse it as an overlap, mid-window. ✗</li>
 <li><b>WAN, 172.16.200.164/30.</b> Block 4; 164 ÷ 4 = 41, so .164 is the <b>network</b> address of 164–167. IOS would answer <code>% Bad mask /30 for address 172.16.200.164</code>. Usable: .165 and .166. ✗</li>
 <li><b>Lo0, 10.255.0.7/32.</b> One address, nowhere near 10.44.x. ✓</li>
@@ -2022,19 +2022,19 @@ S        10.44.20.0/22 [1/0] via 10.44.0.6
 C        10.44.0.4/30 is directly connected, GigabitEthernet0/3
 L        10.44.0.5/32 is directly connected, GigabitEthernet0/3`, "10.44.20.0/22 is already routed elsewhere (the ATM network), so &ldquo;move CCTV up one block&rdquo; would overlap too.")}
 <p>The obvious CCTV fix, 10.44.20.0/22, is taken. And picking a new subnet isn't a 2 a.m. decision: firewall rules and the CCTV recorder are built around it.</p>
-<p><b>The fix.</b> You call the on-call change manager onto the bridge. The DR engineer hasn't configured their side yet, so you agree .165 (yours) and .166 (DR), a correction within the approved intent, recorded on the change. CCTV is <b>deferred</b> for design to pick a free /22. You implement POS, WAN and Lo0, then verify: <code>show ip interface brief</code> (up/up), <code>show ip route</code> (C lines for 10.44.16.0/23 and 172.16.200.164/30) and <code>ping 172.16.200.166</code>.</p>
+<p><b>The fix.</b> You call the on-call change manager onto the bridge. The ${K.g("DR","Disaster recovery: the bank's standby data centre, ready to take over if this one fails. The new WAN link connects the two.")} engineer hasn't configured their side yet, so you agree .165 (yours) and .166 (DR), a correction within the approved intent, recorded on the change. CCTV is <b>deferred</b> for design to pick a free /22. You implement POS, WAN and Lo0, then verify: <code>show ip interface brief</code> (up/up), <code>show ip route</code> (C lines for 10.44.16.0/23 and 172.16.200.164/30) and <code>ping 172.16.200.166</code>.</p>
 <p><b>What you say on the bridge.</b> &ldquo;Two lines won't work as written. CCTV's 10.44.18.0/22 isn't a /22 boundary; it's really 10.44.16.0/22 and would swallow POS. The WAN .164 is the /30's network address; the usable pair is .165 and .166. I propose .165 here, .166 at DR, and we defer CCTV: 10.44.20.0/22 is already routed, so it isn't a one-line fix.&rdquo;</p>
 <p><b>Ticket note.</b> <i>&ldquo;CHG-4471 partial. Pre-check: (1) CCTV 10.44.18.0/22 not a /22 boundary (= 10.44.16.0/22, overlaps POS /23); 10.44.20.0/22 in use. CCTV deferred to design. (2) WAN .164 = network addr of the /30; now local .165 / DR .166, agreed on bridge 02:25. Implemented Gi0/0 10.44.17.254/23, Gi0/1 .165/30, Lo0 10.255.0.7/32. Verified up/up, C routes, ping DR 100%. Saved.&rdquo;</i></p>`)}
 
 ${K.case("The branch that borrowed half of Port Harcourt",`
-<p>A logistics company gave its large Port Harcourt site <code>10.30.16.0/20</code> (10.30.16.0–10.30.31.255) to allow for growth. For two years it used only 10.30.16.x to 10.30.19.x. When a Kano branch opened, a busy engineer saw &ldquo;PH: 10.30.16–19 in use&rdquo; in the spreadsheet and gave Kano <code>10.30.24.0/22</code>. Nothing broke, so nobody noticed.</p>
+<p>A logistics company gave its large Port Harcourt site <code>10.30.16.0/20</code> (10.30.16.0–10.30.31.255) to allow for growth. For two years it used only 10.30.16.x to 10.30.19.x. When a Kano branch opened, a busy engineer saw &ldquo;${K.g("PH","Port Harcourt: the spreadsheet's short name for that site.")}: 10.30.16–19 in use&rdquo; in the spreadsheet and gave Kano <code>10.30.24.0/22</code>. Nothing broke, so nobody noticed.</p>
 <p>A year later Port Harcourt opened a warehouse floor and extended its DHCP range into 10.30.25.x, inside its own /20. The new floor's scanners could print locally but couldn't reach the warehouse system at head office.</p>
 <p>On the head-office router, <code>show ip route</code> had <code>10.30.16.0/20</code> towards Port Harcourt and <code>10.30.24.0/22</code> towards Kano. A reply to 10.30.25.40 matches both, and a router uses the more specific route, the longer prefix (you'll study that rule in the routing module). So replies went to Kano and vanished. The magic number shows the overlap in seconds: block 16 in octet 3, so the /20 runs 16 to 31, and 24 is inside it.</p>
-<p>Kano, the smaller site, was renumbered to <code>10.30.32.0/22</code> (32 ÷ 4 = 8, outside the /20) in one evening, and the spreadsheet became an ${K.g("IPAM","IP address management: a tool or disciplined register that records which blocks are allocated, not only which addresses are in use.")} register. The write-up: <b>allocate and record whole blocks, not &ldquo;what's in use&rdquo;</b>; <b>check every new subnet against every existing block</b>; <b>an overlap that works today fails the day someone uses the rest of their block</b>.</p>`)}
+<p>Kano, the smaller site, was renumbered to <code>10.30.32.0/22</code> (32 ÷ 4 = 8, outside the /20) in one evening, and the spreadsheet became an IPAM register. The write-up: <b>allocate and record whole blocks, not &ldquo;what's in use&rdquo;</b>; <b>check every new subnet against every existing block</b>; <b>an overlap that works today fails the day someone uses the rest of their block</b>.</p>`)}
 
 <h2>Interview corner</h2>
 ${K.hint(`Say each step out loud: interesting octet, mask value, block size, multiple, next block minus one, then range and hosts. Interviewers want to hear the method, not only the answer.`)}
-${K.reveal("“What's the network and broadcast for 172.16.45.200/20? Talk me through it.”",`<p>"A /20 ends four bits into the third octet, so the mask is 255.255.240.0 and the block size is 256 minus 240, 16. The address has 45 in octet three; multiples of 16 go 0, 16, 32, 48, so 45 is in the block starting at 32. Network 172.16.32.0. The next block starts at 48, so the broadcast is 172.16.47.255, octet four all ones. Usable: 172.16.32.1 to 172.16.47.254, 2 to the 12 minus 2, 4,094 hosts. In binary, 45 is 0010 1101; ANDed with 1111 0000 that's 0010 0000, 32."</p>`)}
+${K.reveal("“What's the network and broadcast for 172.16.45.200/20? Talk me through it.”",`<p>"A /20 ends four bits into the third octet, so the mask is 255.255.240.0 and the block size is 256 minus 240, 16. The address has 45 in octet three; multiples of 16 go 0, 16, 32, 48, so 45 is in the block starting at 32. Network 172.16.32.0. The next block starts at 48, so the broadcast is 172.16.47.255, octet four all ones. Usable: 172.16.32.1 to 172.16.47.254, 2 to the 12 minus 2, 4,094 hosts. In binary, 45 is 0010 1101; AND-ed with 1111 0000 that's 0010 0000, 32."</p>`)}
 ${K.hint(`Don't answer from the .255. Work out the subnet first, then say where the address sits in it.`)}
 ${K.reveal("“Is 10.10.101.255/22 a valid host address?”",`<p>"Yes. A /22 has block 4 in the third octet, and 101 is in the block 100 to 103, so the subnet is 10.10.100.0/22 with broadcast 10.10.103.255. 10.10.101.255 sits in the middle: its host bits include the last two bits of octet three, which are 01, so they aren't all ones. A .255 only means broadcast when the boundary is in the fourth octet, a /24 or longer."</p>`)}
 ${K.hint(`Test the boundary: the network octet must divide exactly by the block size.`)}
@@ -2050,7 +2050,7 @@ ${K.recap([
   "/31 gives two usable addresses on point-to-point links (RFC 3021); /32 is a single address for loopbacks and host routes.",
   "show ip interface brief has no mask: get it from the running-config or show interfaces, then check against the C lines in show ip route.",
 ])}
-${K.next(`<b>Lesson 6 — VLSM: designing a real addressing plan.</b> You can now carve and check any subnet in seconds. Next you'll use different prefix sizes inside one network: big blocks for big LANs, /30s and /31s for links. You'll allocate them in an order that leaves no overlaps and no wasted gaps, and get a first look at summarising them into one route.`)}
+${K.next(`<b>Lesson 6 — ${K.g("VLSM","Variable-Length Subnet Masking: different prefix lengths for different subnets inside one block, so each is sized to its need.")}: designing a real addressing plan.</b> You can now carve and check any subnet in seconds. Next you'll use different prefix sizes inside one network: big blocks for big LANs, /30s and /31s for links. You'll allocate them in an order that leaves no overlaps and no wasted gaps, and get a first look at summarising them into one route.`)}
 `,
 quiz:[
   {lvl:1, q:"For a /27 prefix, what is the block size (magic number) in the interesting octet?", o:["16","32","27","224"], a:1, why:"/27 ends 3 bits into octet 4, so the mask value there is 224. Block size = 256 − 224 = 32: subnets start at 0, 32, 64, 96 and so on."},
@@ -2102,7 +2102,7 @@ ${K.pre(["Module 3 lessons 1–5: binary place values, prefix length and masks, 
 
 <h2>Why this matters at work</h2>
 <p>An MSP in Ikeja, Lagos, wins a contract: a logistics company is moving into a new head office and opening a branch in Apapa. The group's IT department hands over one block, <code>10.20.0.0/22</code>, and a list: 300 HQ users, 120 branch users, 50 servers, 60 IP phones, 14 management addresses for switches and access points, and three point-to-point WAN links. &ldquo;Everything must fit in that block. We're tight on space.&rdquo;</p>
-<p>A junior engineer drafts one <code>/24</code> per network, as home routers taught everyone: eight /24s, 2,048 addresses, in a block of 1,024. A senior redraws it in twenty minutes — every requirement met, a fifth of the block free in one piece, the whole company reachable as one route. The difference is <b>VLSM</b>: the design skill employers pay for.</p>
+<p>A junior engineer drafts one <code>/24</code> per network, as home routers taught everyone: eight /24s, 2,048 addresses, in a block of 1,024. A senior redraws it in twenty minutes — every requirement met, a fifth of the block free in one piece, the whole company reachable as one route. The difference is <b>${K.g("VLSM","Variable-Length Subnet Masking: using different prefix lengths for different subnets carved from the same block, so each subnet is sized to its own requirement.")}</b>: the design skill employers pay for.</p>
 
 <h2>The problem with one size for everything</h2>
 <p>In lesson 4 you split a network into <b>equal</b> pieces: every subnet got the same mask and size. That is ${K.g("FLSM","Fixed-Length Subnet Masking: every subnet carved from a block uses the same mask, so every subnet is the same size.")} — fixed-length subnet masking. Real networks are not equal: a user VLAN may need 300 addresses, a link between two routers exactly <b>two</b>. One mask cannot suit both.</p>
@@ -2128,7 +2128,7 @@ ${K.svg("0 0 720 190",
 ${K.check({q:"A /24 is divided with FLSM into /27s, and one /27 is used for a link between two routers. How many usable addresses on that subnet are wasted?", o:["2","28","30","32"], a:1, why:"A /27 has 2^5 − 2 = 30 usable addresses. The two routers use 2, so 28 usable addresses are wasted. A /30 would have used exactly the 2 it needs."})}
 
 <h2>VLSM: the method</h2>
-<p>${K.g("VLSM","Variable-Length Subnet Masking: using different prefix lengths for different subnets carved from the same block, so each subnet is sized to its own requirement.")} — variable-length subnet masking — means using <b>different prefix lengths inside one block</b>: a /23 for HQ users, a /26 for servers, a /28 for management, a /30 per WAN link, packed so none overlap. The arithmetic for each subnet is lessons 4 and 5. What VLSM adds is a <b>discipline</b> for fitting different sizes together without overlaps or holes.</p>
+<p>VLSM — variable-length subnet masking — means using <b>different prefix lengths inside one block</b>: a /23 for HQ users, a /26 for servers, a /28 for management, a /30 per WAN link, packed so none overlap. The arithmetic for each subnet is lessons 4 and 5. What VLSM adds is a <b>discipline</b> for fitting different sizes together without overlaps or holes.</p>
 ${K.analogy(`<p>Packing a car boot. Suitcases first, then bags, then shoes and snacks into the gaps, and everything fits. Scatter the snacks first and the suitcases no longer go in, though the total volume is the same. VLSM packs the big subnets first.</p>`)}
 <h3>The four steps</h3>
 ${K.steps([
@@ -2179,7 +2179,7 @@ ${K.svg("0 0 720 320",
 <tr><td>BR-USERS</td><td>120</td><td>7: 126</td><td>/25</td><td>128</td></tr>
 <tr><td>VOICE</td><td>60</td><td>6: 62</td><td>/26</td><td>64</td></tr>
 <tr><td>SERVERS</td><td>50</td><td>6: 62</td><td>/26</td><td>64</td></tr>
-<tr><td>MGMT</td><td>14</td><td>4: 14 (full)</td><td>/28</td><td>16</td></tr>
+<tr><td>${K.g("MGMT","Management: the subnet holding the switches' and access points' own addresses, which the network team uses to log in to and monitor them.")}</td><td>14</td><td>4: 14 (full)</td><td>/28</td><td>16</td></tr>
 <tr><td>WAN ×3</td><td>2 each</td><td>2: 2</td><td>/30</td><td>4 each</td></tr>
 </table></div>
 <p>The list is already in largest-first order. Total taken: 512 + 128 + 64 + 64 + 16 + 3 × 4 = <b>796 addresses</b> of 1,024. It fits — now place each block.</p>
@@ -2286,7 +2286,7 @@ ${K.dyk(`IOS notices VLSM: after you configure a plan, the routing table lists t
 <tr><td>HQ</td><td>10</td><td>HQ-USERS</td><td>10.20.0.0/23</td><td>10.20.0.1</td><td>10.20.0.50 – 10.20.1.250</td><td>.2–.49 printers, APs</td><td>IT desk · 300 now, 450 by 2028</td></tr>
 <tr><td>HQ</td><td>30</td><td>SERVERS</td><td>10.20.2.192/26</td><td>10.20.2.193</td><td>none (static only)</td><td>.194–.254</td><td>Infrastructure</td></tr>
 <tr><td>Both</td><td>99</td><td>MGMT</td><td>10.20.3.0/28</td><td>10.20.3.1</td><td>none</td><td>switches .2–.9, APs .10–.14</td><td>Network team · full — enlarge</td></tr>
-<tr><td>HQ↔Apapa</td><td>—</td><td>WAN-HQ-BR1</td><td>10.20.3.16/30</td><td>HQ .17 · BR .18</td><td>—</td><td>—</td><td>Fibre circuit ref on the contract</td></tr>
+<tr><td>HQ↔Apapa</td><td>—</td><td>WAN-HQ-BR1</td><td>10.20.3.16/30</td><td>HQ .17 · Apapa .18</td><td>—</td><td>—</td><td>Fibre circuit ref on the contract</td></tr>
 <tr><td>—</td><td>—</td><td><b>FREE</b></td><td>10.20.3.28 – 10.20.3.255</td><td colspan="4">Next free: 10.20.3.28 · largest free aligned block: 10.20.3.128/25</td></tr>
 </table></div>
 <p>Apply one ${K.g("naming convention","An agreed pattern for names (site-function, for example) so every subnet, VLAN and interface description can be understood without asking anyone.")} everywhere — IPAM row, VLAN name and interface <code>description</code> all say <code>HQ-USERS</code>; links are <i>WAN-SITEA-SITEB</i>. When an alert says &ldquo;GigabitEthernet0/2 down&rdquo;, the description tells you it's the Apapa fibre.</p>
@@ -2338,7 +2338,7 @@ C        10.20.3.16/30 is directly connected, GigabitEthernet0/2
 L        10.20.3.17/32 is directly connected, GigabitEthernet0/2`, "HQ-R1's routing table after the three interfaces come up. (Trimmed codes legend.)")}
 <ul>
 <li><b>variably subnetted, 6 subnets, 4 masks</b> — six entries using four prefix lengths: /23, /26, /30, /32.</li>
-<li><b>C</b> — <i>connected</i>: the subnet of an up interface, which IOS found by ANDing address and mask (lesson 3).</li>
+<li><b>C</b> — <i>connected</i>: the subnet of an up interface, which IOS found by AND-ing address and mask (lesson 3).</li>
 <li><b>L</b> — <i>local</i>: the router's own address on that interface, as a /32.</li>
 <li><b>Gateway of last resort is not set</b> — no default route: it knows only connected networks. Routing to others is Module 5.</li>
 </ul>
@@ -2374,7 +2374,7 @@ ${K.bench({id:"m3-vlsm-two-routers", points:90, from:"CCNA · Module 3 · lesson
     {text:"Give <b>SRV1</b> (IP settings) any usable SERVERS address except the gateway, the /26 mask, and the gateway 10.20.2.193", done:B=>{ const s = B.devs.srv1, n = s.ip && s.ip.split(".").map(Number); return !!n && n[0]===10 && n[1]===20 && n[2]===2 && n[3]>=194 && n[3]<=254 && s.mask==="255.255.255.192" && s.gw==="10.20.2.193"; }},
     {text:"From PC-HQ's Command Prompt, ping SRV1 — two networks connected to the same router, so HQ-R1 routes between them with no routes configured", done:B=>!!B.devs.srv1.ip && Bench.pinged(B,"pchq",B.devs.srv1.ip)},
     {text:"From PC-BR, ping its gateway <code>10.20.2.1</code> and BR-R1's WAN address <code>10.20.3.18</code>", done:B=>Bench.pinged(B,"pcbr","10.20.2.1") && Bench.pinged(B,"pcbr","10.20.3.18")},
-    {text:"On HQ-R1 (LAP-HQ), <code>ping 10.20.3.18</code> across the /30. The first <code>.</code> is the router ARPing for its neighbour", done:B=>B.devs.r1.env.pings.some(p=>p.ip==="10.20.3.18" && p.rate>0)},
+    {text:"On HQ-R1 (LAP-HQ), <code>ping 10.20.3.18</code> across the /30. The first <code>.</code> is the router sending an ARP request for its neighbour", done:B=>B.devs.r1.env.pings.some(p=>p.ip==="10.20.3.18" && p.rate>0)},
     {text:"Predict, then test: from PC-HQ, <code>ping 10.20.3.18</code>. It times out. Read the log — the request arrives, but BR-R1 has no route back to 10.20.0.0/23 (that is Module 5)", done:B=>Bench.tried(B,"pchq",/^\s*ping\s+10\.20\.3\.18\s*$/i)},
   ],
   win:"Five interfaces, four prefix lengths, one block — configured from a plan, with no overlaps. You proved a router forwards between its own connected networks, that a /30 joins two routers with no address to spare, and saw exactly where connected-only routing stops.",
@@ -2669,7 +2669,7 @@ interface GigabitEthernet0/0
 interface GigabitEthernet0/1
  ip address 192.168.20.1 255.255.255.192
 interface GigabitEthernet0/2
- ip address 192.168.30.1 255.255.255.240`, "Only lines matching interface OR ip address: each interface followed by its dotted mask.")}
+ ip address 192.168.30.1 255.255.255.240`, "Only lines matching either interface or ip address: each interface followed by its dotted mask.")}
 <p>Every mask on one screen, as typed. It shows <b>intent</b>, not state: a shut interface still shows its address. Pair it with the next command, which shows what the router actually does.</p>
 <h3>show ip route connected — what the router computed</h3>
 ${K.out(`BR-R1#show ip route connected
@@ -2685,7 +2685,7 @@ L        192.168.10.1/32 is directly connected, GigabitEthernet0/0
 C        192.168.20.0/26 is directly connected, GigabitEthernet0/1
 L        192.168.20.1/32 is directly connected, GigabitEthernet0/1`, "Connected and local routes. Gi0/2's subnet is missing because Gi0/2 is down.")}
 <ul>
-<li><b>C — connected</b>: the router ANDed the interface address with its mask and installed the result. <code>C 192.168.20.0/26</code> means &ldquo;192.168.20.0–.63 is out of Gi0/1&rdquo;. If it said <code>192.168.20.64/26</code>, the router's address would be in the wrong block, whatever the hosts think.</li>
+<li><b>C — connected</b>: the router AND-ed the interface address with its mask and installed the result. <code>C 192.168.20.0/26</code> means &ldquo;192.168.20.0–.63 is out of Gi0/1&rdquo;. If it said <code>192.168.20.64/26</code>, the router's address would be in the wrong block, whatever the hosts think.</li>
 <li><b>L — local</b>: a /32 for the interface's own address, so the router knows those packets are for itself.</li>
 <li><b>Absent lines</b>: a connected route exists only while its interface is <b>up/up</b>. No <code>C 192.168.30.0/28</code> means the router drops traffic for the servers.</li>
 </ul>
@@ -2778,7 +2778,7 @@ Type escape sequence to abort.
 Sending 5, 100-byte ICMP Echos to 192.168.30.10, timeout is 2 seconds:
 .!!!!
 Success rate is 80 percent (4/5), round-trip min/avg/max = 1/1/2 ms`, "IOS ping: ! = reply, . = timeout. A U would mean an ICMP unreachable came back from a router.")}
-<p>The first <code>.</code> is the router ARPing for the server; <code>U.U.U</code> would be an upstream router answering &ldquo;unreachable&rdquo;. A router ping proves the router's side, not the user's PC.</p>
+<p>The first <code>.</code> is the router sending an ARP request for the server; <code>U.U.U</code> would be an upstream router answering &ldquo;unreachable&rdquo;. A router ping proves the router's side, not the user's PC.</p>
 ${K.q({type:"match", q:"A PC (192.168.10.30) pings a server on another subnet. Match each result with what it tells you.", pairs:[["PING: transmit failed. General failure.","The PC could not send at all"],["Reply from 192.168.10.30: Destination host unreachable.","The PC's own ARP for the next hop got no answer"],["Reply from 192.168.10.1: Destination net unreachable.","The gateway router has no route to the server's network"],["Request timed out.","The request left but no reply came back"],["Reply from 192.168.30.10: bytes=32 time<1ms TTL=127","It worked, through one router"]], why:"Ask who produced each message. The PC itself produces General failure (couldn't send) and 'unreachable' from its own IP (its ARP failed). 'Net unreachable' from the gateway means a router took the packet but had no route. A timeout means nobody answered — often the far end can't route its reply. TTL 127 from a Windows server (which starts at 128) means one hop."})}
 <h3>Hands-on: build a branch and meet every failure on the way</h3>
 <p>A new router, a PC and a server with incomplete settings. Work in task order, ping after each step and read the frame log: three different failures before it works.</p>
@@ -2849,7 +2849,7 @@ ${K.dyk(`When two devices claim one address, a Cisco router logs it: <code>%IP-4
 ${K.case("The re-plan that broke a head office on a Tuesday",`
 <p>A logistics company in Apapa ran its head office on one flat 10.20.0.0/22. Over a weekend the team moved to a VLSM plan (lesson 6) — separate /24s for staff, warehouse, CCTV and servers — re-addressing the router and the DHCP scopes. Monday was fine.</p>
 <p>Tuesday, a security baseline added <code>no ip proxy-arp</code> on every router interface. By 09:30 the warehouse scanners, half the cameras, two label printers and the building management system had dropped off.</p>
-<p>The baseline wasn't the cause. Forty <b>static</b> devices still had the old /22 mask and ARPed directly for anything in 10.20.0.0–10.20.3.255; since Saturday the router had been answering with proxy ARP. The baseline removed the crutch and exposed them all at once.</p>
+<p>The baseline wasn't the cause. Forty <b>static</b> devices still had the old /22 mask and sent ARP requests directly for anything in 10.20.0.0–10.20.3.255; since Saturday the router had been answering with proxy ARP. The baseline removed the crutch and exposed them all at once.</p>
 <p>New change rules: <b>an addressing change includes every static host</b>; inventory them first (<code>show ip arp</code> and the MAC tables help); and disable proxy ARP <i>before</i> a re-plan, so hidden mask faults surface while the team is on site.</p>`)}
 
 <h2>The Module 3 challenge</h2>
@@ -2974,7 +2974,7 @@ cards:[
   {f:"C and L routes", b:"C = the subnet the router computed (address AND mask) for an up/up interface. L = /32 for the router's own address. A down interface has neither."},
   {f:"'Broadcast address is 255.255.255.255' in show ip interface", b:"The address the router uses for broadcasts it originates, not the subnet's broadcast. Not a fault."},
   {f:"Host addressing rules", b:"Usable host address from the LAN's subnet; the same mask as the router; gateway = the router's interface address on that LAN, inside the host's subnet."},
-  {f:"Windows and Linux static addressing", b:"Windows: ncpa.cpl > IPv4 Properties, or netsh interface ip set address name=\"Ethernet\" static IP MASK GW. Linux: ip addr add IP/prefix dev eth0 and ip route add default via GW."},
+  {f:"Windows and Linux static addressing", b:"Windows: ncpa.cpl > IPv4 Properties, or netsh interface ip set address name=\"Ethernet\" static IP MASK GATEWAY. Linux: ip addr add IP/prefix dev eth0 and ip route add default via GATEWAY."},
   {f:"Addressing troubleshooting method", b:"Scope; read the host (ipconfig /all); do the arithmetic; read the router (brief, connected routes); ping inside out; check the VLAN; fix one thing; record."},
   {f:"Windows ping messages", b:"General failure = couldn't send (no link, IP or gateway). Unreachable from own IP = own ARP failed. Net unreachable from a router = no route there. Timed out = no reply came back."},
   {f:"Mask too wide vs too narrow", b:"Too wide (/16 on a /24): remote hosts look local, the PC ARPs for them; proxy ARP hides it. Too narrow (/25 on a /24): local hosts or the gateway look remote."},

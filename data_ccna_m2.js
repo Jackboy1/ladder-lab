@@ -90,7 +90,7 @@ ${K.svg("0 0 740 330",
 <div class="tablewrap"><table>
 <tr><th>OUI</th><th>Registered to</th><th>What it usually means on your network</th></tr>
 <tr><td><code>00-00-0C</code></td><td>Cisco</td><td>Cisco's original OUI: a switch, router or phone (Cisco owns many more)</td></tr>
-<tr><td><code>00-50-56</code></td><td>VMware</td><td>A virtual machine, not a physical box</td></tr>
+<tr><td><code>00-50-56</code></td><td>VMware</td><td>A virtual machine (VM), not a physical box</td></tr>
 <tr><td><code>08-00-27</code></td><td>PCS Systemtechnik (VirtualBox's default range)</td><td>A VirtualBox VM, often a lab on a work laptop</td></tr>
 <tr><td><code>00-15-5D</code></td><td>Microsoft</td><td>A Hyper-V VM</td></tr>
 <tr><td><code>B8-27-EB</code>, <code>DC-A6-32</code></td><td>Raspberry Pi</td><td>A sensor or display — or a rogue device</td></tr>
@@ -113,7 +113,7 @@ ${K.remember(`<p><b>"Odd is a crowd; 2-6-A-E is made by me."</b> Second hex digi
 ${K.when([
   ["Random MAC on (default)", "Guest, hotel, airport or public Wi-Fi", "Stops tracking between networks and visits", "The network relies on knowing the device (DHCP reservation, MAC allow-list)"],
   ["Fixed private address per network", "Staff devices on a Wi-Fi that identifies devices by MAC", "Stable on this network, private elsewhere", "The device must be recognised on several networks"],
-  ["Random MAC off (factory MAC)", "Corporate laptops with DHCP reservations or asset records by MAC", "Matches the label and the asset register", "Personal devices — identify users with 802.1X logins instead"],
+  ["Random MAC off (factory MAC)", "Corporate laptops with DHCP reservations or asset records by MAC", "Matches the label and the asset register", "Personal devices — identify users with "+K.g("802.1X","An IEEE standard for port-based login: a device must prove who its user is (username and password, or a certificate) before the switch or Wi-Fi lets it on. You'll meet it in the security module.")+" logins instead"],
 ], "Randomised MACs: on, per-network, or off?")}
 ${K.dyk(`Ethernet sends each byte <b>lowest bit first</b>, so the first address bit on the wire is the destination's I/G bit. A card knows "unicast or group?" after a single bit.`)}
 ${K.check({q:"A user's phone shows up on the Wi-Fi controller as 7A-1F-C3-90-24-5D, and the OUI lookup finds no manufacturer. What is the most likely explanation?", o:["The phone has a counterfeit network card","It is a multicast address","It is a locally administered (randomised) address — the second digit A means the U/L bit is set","The OUI database is out of date; nothing can be concluded"], a:2, why:"7A is 0111 1010: bit 0 (I/G) is 0, so unicast; bit 1 (U/L) is 1, so locally administered — a phone's private address, which no OUI lookup can find."})}
@@ -152,7 +152,7 @@ ${K.steps([
   ["Write the result", `<p><code>01-00-5E-02-0A-05</code> — <code>0100.5e02.0a05</code> on a Cisco switch.</p>`],
   ["Notice the overlap", `<p><code>239.2.10.5</code> gives the same MAC, because the differing bits were thrown away. 32 IPv4 groups share each multicast MAC; IP filters out the extras.</p>`],
 ])}
-${K.exam(`<code>01-00-5E</code> = IPv4 multicast, <code>33-33</code> = IPv6 multicast, all F = broadcast. Default switch behaviour: known unicast → one port; broadcast and multicast → flooded within the VLAN (unless a feature such as IGMP snooping limits multicast).`)}
+${K.exam(`<code>01-00-5E</code> = IPv4 multicast, <code>33-33</code> = IPv6 multicast, all F = broadcast. Default switch behaviour: known unicast → one port; broadcast and multicast → flooded within the VLAN (unless a feature such as ${K.g("IGMP snooping","IGMP is the Internet Group Management Protocol, which hosts use to join a multicast group. A switch that snoops (listens to) those joins sends each group's frames only to the ports that asked for it. More in lesson 2.")} limits multicast).`)}
 ${K.q({type:"match", q:"Match each destination MAC address with what kind of address it is.", pairs:[
   ["3C-52-82-1A-7F-09","Universally administered unicast (a factory address)"],
   ["DA-4F-3B-10-77-E2","Locally administered unicast (for example a randomised Wi-Fi address)"],
@@ -164,7 +164,7 @@ ${K.check({q:"A PC sends a frame to ffff.ffff.ffff. What does a switch do with i
 
 <h2>Burned-in or configured — and how a NIC decides to keep a frame</h2>
 <h3>The burned-in address</h3>
-<p>Every card has a factory address in its chip: the ${K.g("burned-in address","BIA: the MAC the manufacturer stored in the card's hardware, with a real OUI.")} (<b>BIA</b>). Software can tell the card to use a different address instead; the BIA stays in the chip and returns when the override is removed. Configured addresses are normal: <b>VMs</b> get one from the hypervisor; <b>privacy</b> features use random ones; a <b>replacement router</b> may copy the old one's MAC because the ISP's modem only talks to it; <b>redundant gateways</b> share a virtual MAC (FHRP, later).</p>
+<p>Every card has a factory address in its chip: the ${K.g("burned-in address","BIA: the MAC the manufacturer stored in the card's hardware, with a real OUI.")} (<b>BIA</b>). Software can tell the card to use a different address instead; the BIA stays in the chip and returns when the override is removed. Configured addresses are normal: <b>VMs</b> get one from the hypervisor; <b>privacy</b> features use random ones; a <b>replacement router</b> may copy the old one's MAC because the ISP's modem only talks to it; <b>redundant gateways</b> share a virtual MAC (${K.g("FHRP","First Hop Redundancy Protocol: lets two or more routers share one virtual gateway IP and MAC, so PCs keep working if one router fails. HSRP is Cisco's version; you'll meet it in a later module.")}, later).</p>
 <p>Cisco shows both: in <code>show interfaces</code>, "address is" is the MAC in use and "bia" the factory one.</p>
 ${K.out(`R1#show interfaces GigabitEthernet0/0/1
 GigabitEthernet0/0/1 is up, line protocol is up
@@ -212,7 +212,7 @@ ${K.out(`Ethernet II, Src: VMware_a3:1b:2c (00:50:56:a3:1b:2c), Dst: Broadcast (
     Type: ARP (0x0806)`, "Wireshark decoding one frame: an ARP request from a VMware virtual machine.")}
 <ul>
 <li><b>Src: VMware_a3:1b:2c</b> — OUI <code>00:50:56</code> resolved to the vendor: the sender is a VM.</li>
-<li><b>Dst: Broadcast</b> — all ones, so the "LG" (Wireshark's U/L) and IG bits both read as set.</li>
+<li><b>Dst: Broadcast</b> — all ones, so the ${K.g("LG bit","Wireshark's label for the U/L bit (Local/Global). 1 = locally administered address.")} and ${K.g("IG bit","Wireshark's label for the I/G bit (Individual/Group). 1 = group (multicast or broadcast) address.")} both read as set.</li>
 <li><b>Source IG 0, LG 0</b> — unicast, universal: VMware picks VM addresses from its own registered OUI.</li>
 <li><b>Type: ARP (0x0806)</b> — which protocol gets the payload.</li>
 </ul>
@@ -262,7 +262,7 @@ Connection Name Network Adapter Physical Address    Transport Name
 Ethernet        Intel(R) Ethern 3C-52-82-1A-7F-09   \\Device\\Tcpip_{8C2E1F4A-6B3D-4E7A-9F21-0D5C3B7A1E64}
 Wi-Fi           Intel(R) Wi-Fi  DA-4F-3B-10-77-E2   Media disconnected`, "getmac /v on a Windows laptop with two adapters.")}
 <ul>
-<li><b>Two adapters, two MACs</b>: <b>3C-52-82-…</b> (second digit C) is the Ethernet card's factory address; <b>DA-4F-3B-…</b> (A) is a random address Windows chose for Wi-Fi, currently disconnected.</li>
+<li><b>Two adapters, two MACs</b>: <code>3C-52-82-…</code> (second digit C) is the Ethernet card's factory address; <code>DA-4F-3B-…</code> (A) is a random address Windows chose for Wi-Fi, currently disconnected.</li>
 </ul>
 ${K.out(`$ ip link show eth0
 2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000
@@ -448,7 +448,7 @@ ${K.goals([
 ${K.pre(["Module 1 (frames, MAC addresses, switches vs routers, your first IOS session over the console) and Module 2 lesson 1 (MAC address format, unicast/broadcast/multicast addresses, the Ethernet frame fields)."])}
 
 <h2>Why this matters at work</h2>
-<p>An MSP in Victoria Island, Lagos, gets a ticket: <i>&ldquo;Second-floor printer not working since Friday.&rdquo;</i> The printer answers ping, but nobody knows which wall socket it is in, and the cabling sheet is two office moves out of date. A junior engineer starts walking the floor with a torch. A senior engineer types one command on the switch, reads one line, and says &ldquo;port 17, desk 2-31 — someone moved it to the window.&rdquo;</p>
+<p>An ${K.g("MSP","Managed Service Provider: a company that runs other organisations' IT and networks for a fee.")} in Victoria Island, Lagos, gets a ticket: <i>&ldquo;Second-floor printer not working since Friday.&rdquo;</i> The printer answers ping, but nobody knows which wall socket it is in, and the cabling sheet is two office moves out of date. A junior engineer starts walking the floor with a torch. A senior engineer types one command on the switch, reads one line, and says &ldquo;port 17, desk 2-31 — someone moved it to the window.&rdquo;</p>
 <p>That command reads the switch's <b>MAC address table</b>: its memory of which device lives behind which port. Every decision a switch makes — send this frame out one port, send it everywhere, or throw it away — comes from that table. Understand how it fills, ages and empties, and you can find any device, explain &ldquo;slow network&rdquo; complaints, spot a rogue switch under a desk, and answer the most common CCNA switching questions without guessing.</p>
 
 <h2>The MAC address table: what the switch remembers</h2>
@@ -767,7 +767,7 @@ Vlan    Mac Address       Type        Ports
   10    1c69.7a0e.33b2    DYNAMIC     Gi1/0/14
   10    58ef.68c4.0a19    DYNAMIC     Gi1/0/14
 Total Mac Addresses for this criterion: 7`, "Seven MACs learned on one desk port: there is a switch (or hub) behind it.")}
-<p>Seven MACs on a desk port: three laptops, a personal printer, a desktop PC, a scanner and a small NAS drive. <code>show interfaces status</code> shows the port at <code>a-full a-100</code> while its neighbours run <code>a-1000</code> — from Module 1, that means the far end can only do 100 Mb/s. The box is an old 10/100 unmanaged switch, and seven devices share one 100 Mb/s link. That is the slowness.</p>
+<p>Seven MACs on a desk port: three laptops, a personal printer, a desktop PC, a scanner and a small ${K.g("NAS","Network Attached Storage: a small box of hard drives that plugs into the network so everyone can share files on it.")} drive. <code>show interfaces status</code> shows the port at <code>a-full a-100</code> while its neighbours run <code>a-1000</code> — from Module 1, that means the far end can only do 100 Mb/s. The box is an old 10/100 unmanaged switch, and seven devices share one 100 Mb/s link. That is the slowness.</p>
 <p><b>The fix.</b> Policy says no unmanaged switches on desks: they bypass port security, and one looped cable can take down the floor. The desk has a second unused outlet (2-15) and there is a spare at 2-17. You patch them to spare ports <code>Gi1/0/21</code> and <code>Gi1/0/22</code>, set a <code>description</code>, <code>no shutdown</code> and save, then plug Ngozi straight into 2-14. The little switch goes back to the HR manager with a note. <code>show mac address-table interface Gi1/0/14</code> now shows one MAC, at <code>a-1000</code>.</p>
 <p><b>What you say.</b> &ldquo;A small extra switch under the desk was sharing one slow connection between seven devices. You each have your own full-speed connection now. If you need more sockets, raise a ticket and we'll patch them properly.&rdquo;</p>
 <p><b>Ticket note.</b> <i>&ldquo;HR 2-14 slow. sh mac address-table int Gi1/0/14 = 7 MACs; port a-100. Cause: unmanaged 10/100 switch under desk, 3 laptops + printer + PC + scanner + NAS on one 100 Mb link. Removed (returned to HR manager, policy reminder sent). Patched 2-15 → Gi1/0/21, 2-17 → Gi1/0/22, descriptions set, saved. Verified 1 MAC per port, a-full a-1000, files open normally. Cabling sheet updated. 40 min.&rdquo;</i></p>`)}
@@ -1279,7 +1279,7 @@ ${K.analogy(`<p>You bring a parcel for "Desk 12" into an open-plan office. You k
 <ul>
 <li><b>ARP works only inside one local network.</b> Routers stop broadcasts (lesson 3), so a host can only ARP within its own ${K.g("broadcast domain","One VLAN/subnet, up to the router (lesson 3).")}.</li>
 <li><b>ARP is not IP.</b> It rides directly in Ethernet with ${K.g("EtherType","What the frame carries: 0x0800 IPv4, 0x0806 ARP, 0x86DD IPv6.")} <code>0x0806</code> — no IP header, no TTL, so it can't be routed.</li>
-<li><b>ARP is IPv4 only.</b> IPv6 uses Neighbor Discovery (NDP) instead — see the IPv6 module.</li>
+<li><b>ARP is IPv4 only.</b> IPv6 uses Neighbor Discovery Protocol (NDP) instead — see the IPv6 module.</li>
 </ul>
 ${K.check({q:"PC1 knows the IP address of a printer on its own subnet but has never talked to it. What is missing before PC1 can send it a frame?", o:["The printer's IP address","PC1's own MAC address","The printer's MAC address","The switch port the printer is on"], a:2, why:"PC1 has both IPs and its own MAC. The destination MAC is the blank. PC1 never needs the switch port — that's the switch's job, using its MAC table."})}
 
@@ -1432,7 +1432,7 @@ Internet  192.168.10.12    0          0050.9b50.5662  ARPA   GigabitEthernet0/0`
 <ul>
 <li><b>Age (min)</b> — minutes since the entry was learned or refreshed. <b>A dash means the router's own interface address</b>: listed, not learned, never ages. Two dash rows here confirm both interfaces have IPs and are up.</li>
 <li><b>Hardware Addr</b> — the MAC. <code>Incomplete</code> means the router asked and nobody answered: the device is off, unplugged, in the wrong VLAN, or doesn't exist.</li>
-<li><b>Type ARPA</b> — ordinary Ethernet II ARP (a name from ARPANET days).</li>
+<li><b>Type ${K.g("ARPA","Cisco's label for ordinary Ethernet II framing. The name comes from ARPA (the US Advanced Research Projects Agency), which funded ARPANET, the internet's forerunner.")}</b> — ordinary Ethernet II ARP (a name from ARPANET days).</li>
 <li><b>Interface</b> — which side of the router the host is on.</li>
 </ul>
 ${K.when([
@@ -1588,8 +1588,8 @@ Internet  192.168.10.45           0   b8ae.ed4c.21d0  ARPA   GigabitEthernet0/0`
 <p><b>Ticket note.</b> <i>"Intermittent loss on 2 PCs. Cause: duplicate IP 192.168.10.45 — static on Bayo's PC (rebuilt at weekend) clashed with Ngozi's DHCP lease. Proof: show ip arp 192.168.10.45 flipped between 3c52.821a.7f09 (Gi1/0/14) and b8ae.ed4c.21d0 (Gi1/0/22). Fix: Bayo's PC to DHCP (now .61), ARP caches cleared, stable 10 min, users confirmed. Follow-up: build checklist — no static IPs on staff PCs; fixed addresses via DHCP reservation or outside the pool."</i></p>`)}
 
 ${K.case("The firewall failover that took four hours to finish",`
-<p>A fintech start-up in Lekki ran two firewalls as a high-availability pair sharing one public IP towards the ISP's router. One night the active firewall's power supply died. The standby took over the IP in under a second and sent gratuitous ARPs. Inside the office nothing changed; from outside, the staff VPN and the partners' payment API calls all timed out.</p>
-<p>The ISP's router was hardened to ignore unsolicited ARP, so it kept its old entry — <i>our public IP → the dead firewall's MAC</i> — with a 4-hour timeout. The on-call engineer spent an hour checking healthy firewalls before calling the ISP, whose NOC cleared that one entry. Traffic flowed instantly.</p>
+<p>A fintech start-up in Lekki ran two firewalls as a high-availability pair sharing one public IP towards the ISP's router. One night the active firewall's power supply died. The standby took over the IP in under a second and sent gratuitous ARPs. Inside the office nothing changed; from outside, the staff VPN and the partners' payment API (application programming interface) calls all timed out.</p>
+<p>The ISP's router was hardened to ignore unsolicited ARP, so it kept its old entry — <i>our public IP → the dead firewall's MAC</i> — with a 4-hour timeout. The on-call engineer spent an hour checking healthy firewalls before calling the ISP, whose ${K.g("NOC","Network Operations Centre: the team (and room) that watches networks around the clock and handles faults.")} cleared that one entry. Traffic flowed instantly.</p>
 <p>The lasting fix was a shared <b>virtual MAC</b> that moves with the active firewall, so the ISP's entry stays right — the idea HSRP uses on a LAN. Lessons: failover depends on <i>other people's</i> ARP caches; know your upstream's ARP timeout; test failover with the ISP watching.</p>`)}
 
 ${K.dodont([
@@ -1624,7 +1624,7 @@ ${K.recap([
   "Gratuitous ARP (sender IP = target IP) announces or checks an address; a duplicate IP shows as one IP flipping between two MACs.",
   "Proxy ARP lets a router answer for remote IPs (on by default in IOS); ARP spoofing poisons caches for a man-in-the-middle, and DAI is the defence.",
 ])}
-${K.next(`<b>Lesson 5 — Setting a switch up for management.</b> Your switch has forwarded frames without an IP of its own. Next you'll give it one on an SVI, point it at a default gateway (which it ARPs for exactly like a PC), and secure it with passwords, a banner and tidy, documented ports.`)}
+${K.next(`<b>Lesson 5 — Setting a switch up for management.</b> Your switch has forwarded frames without an IP of its own. Next you'll give it one on an ${K.g("SVI","Switch Virtual Interface: a virtual interface for a VLAN (such as interface vlan 1) that holds the switch's own management IP. You'll configure it next lesson.")}, point it at a default gateway (which it ARPs for exactly like a PC), and secure it with passwords, a banner and tidy, documented ports.`)}
 `,
 quiz:[
   {q:"What does ARP do?", o:["Translates host names into IP addresses","Finds the MAC address that belongs to a known IPv4 address on the local network","Assigns IP addresses to hosts automatically","Finds the switch port a MAC address is connected to"], a:1, lvl:1, why:"ARP maps a known IPv4 address to a MAC address on the same local network. DNS translates names, DHCP assigns addresses, and the switch's MAC address table maps MACs to ports."},
@@ -1968,7 +1968,7 @@ Gi0/7                        disabled     1            auto   auto 10/100/1000Ba
 <li><b>Gi0/6 notconnect, no description</b> — an unused port someone forgot to shut.</li>
 </ul>
 ${K.mistake(`Shutting a range that includes the port you're managing the switch through. Over SSH, <code>interface range g0/1 - 10</code> then <code>shutdown</code> cuts the uplink — and your session — and someone drives to site with a console cable. Check <code>show interfaces status</code> first and leave the uplink out.`)}
-${K.check({q:"In show interfaces status, a port shows Status 'connected' with an empty Name column. What should you do?", o:["Shut it immediately — undocumented ports are always attacks","Nothing; descriptions are optional","Find out what is connected (MAC table, cable trace, ask the client), then describe it or shut it","Change it to a different VLAN"], a:2, why:"A blank description on a live port is an unknown device. Identify it first — it might be the MD's laptop — then label it or, if it shouldn't be there, shut it."})}
+${K.check({q:"In show interfaces status, a port shows Status 'connected' with an empty Name column. What should you do?", o:["Shut it immediately — undocumented ports are always attacks","Nothing; descriptions are optional","Find out what is connected (MAC table, cable trace, ask the client), then describe it or shut it","Change it to a different VLAN"], a:2, why:"A blank description on a live port is an unknown device. Identify it first — it might be the managing director's laptop — then label it or, if it shouldn't be there, shut it."})}
 
 <h2>Read it back, save it: the day-one checklist</h2>
 <p>Never trust your memory of what you typed. Read the running-config back, top to bottom, as an auditor will.</p>
@@ -2282,9 +2282,9 @@ ${K.svg("0 0 740 300",
   K.txt(370,290,"Every box must be in place. Miss one and the PC sees a different error.",{mid:true}),
   "The SSH dependency chain: the name and domain form the key's name, the key turns the SSH server on, the user and VTY settings decide who gets in, and the management IP makes it reachable.")}
 ${K.steps([
-  ["Give the switch a real hostname", `<p><code>hostname BR-SW1</code>. <b>Why:</b> the RSA key is named after the switch, so IOS refuses while it is still called <code>Switch</code>: <i>% Please define a hostname other than Switch.</i></p>`],
+  ["Give the switch a real hostname", `<p><code>hostname BR-SW1</code>. <b>Why:</b> the ${K.g("RSA key","RSA (named after its inventors Rivest, Shamir and Adleman) is a public-key method. The switch makes a matching public and private key pair; SSH uses it to agree session keys and to prove the switch is who it claims to be.")} is named after the switch, so IOS refuses while it is still called <code>Switch</code>: <i>% Please define a hostname other than Switch.</i></p>`],
   ["Set a domain name", `<p><code>ip domain-name ladderlab.local</code>. <b>Why:</b> the key's full name is <i>hostname.domain</i>, here <code>BR-SW1.ladderlab.local</code>. Without it: <i>% Please define a domain-name first.</i> The domain only has to be set, not exist on the internet. Newer IOS XE shows it as <code>ip domain name</code>; both forms are accepted.</p>`],
-  ["Generate the RSA key pair", `<p><code>crypto key generate rsa modulus 2048</code>. <b>Why:</b> SSH uses the ${K.g("RSA key pair","A matching public and private key. The switch keeps the private key secret; SSH uses the pair to agree session keys and to prove the switch is who it claims to be.")} to set up encryption and to prove the switch's identity. The ${K.g("modulus","The size of the RSA key in bits. SSHv2 needs at least 768; use 2048 or more today.")} is the key size: SSHv2 needs <b>at least 768 bits</b>; 2048 is today's sensible minimum. Without <code>modulus</code>, IOS asks <i>How many bits in the modulus [2048]:</i>. Once the key exists, the switch logs <i>SSH 1.99 has been enabled</i>.</p>`],
+  ["Generate the RSA key pair", `<p><code>crypto key generate rsa modulus 2048</code>. <b>Why:</b> SSH uses the RSA key pair (one public key, one private key the switch keeps secret) to set up encryption and to prove the switch's identity. The ${K.g("modulus","The size of the RSA key in bits. SSHv2 needs at least 768; use 2048 or more today.")} is the key size: SSHv2 needs <b>at least 768 bits</b>; 2048 is today's sensible minimum. Without <code>modulus</code>, IOS asks <i>How many bits in the modulus [2048]:</i>. Once the key exists, the switch logs <i>SSH 1.99 has been enabled</i>.</p>`],
   ["Force SSH version 2", `<p><code>ip ssh version 2</code>. <b>Why:</b> 1.99 still accepts the broken version 1. This only works <i>after</i> the key exists; before that IOS replies <i>Please create RSA keys to enable SSH…</i></p>`],
   ["Create a local user", `<p><code>username netadmin secret Br4nch!SSH</code>. <b>Why:</b> SSH logs you in with a <b>username and password</b>, and the switch checks them against its ${K.g("local user database","Usernames and secrets stored in the switch's own configuration with the username command. Checked when a line uses 'login local'.")}. Use <code>secret</code> (a one-way hash: type 9 on current IOS XE, type 5 on older images), never <code>password</code> (clear text or weak type 7).</p>`],
   ["VTY lines: login local", `<p><code>line vty 0 15</code>, then <code>login local</code>. <b>Why:</b> the lines now check usernames against the local database. Plain <code>login</code> checks only a line password, and SSH logins fail. Create the user <i>first</i>: with an empty database, nobody gets in remotely.</p>`],
@@ -2325,7 +2325,7 @@ Building configuration...
 <li><b>SSH 1.99 has been enabled</b> — the SSH server starts by itself once a key exists, in &ldquo;v1 or v2&rdquo; mode until you fix it.</li>
 </ul>
 ${K.when([
-  ["<code>login local</code>", "Any switch you reach over SSH without a central login server", "Each admin has their own name and secret; logs show who did what", "A working AAA server (RADIUS/TACACS+) exists — use it, with local users as fallback"],
+  ["<code>login local</code>", "Any switch you reach over SSH without a central login server", "Each admin has their own name and secret; logs show who did what", "A working "+K.g("AAA","Authentication, Authorisation and Accounting: a central login service that checks who you are, decides what you may do and logs what you did. RADIUS and TACACS+ are the protocols it uses.")+" server (RADIUS/TACACS+) exists — use it, with local users as fallback"],
   ["<code>login</code> + line <code>password</code>", "A lab, or a console in a locked cabinet", "Quick; no user database", "Anything reachable over the network: one shared password, no names, and SSH fails"],
   ["<code>no login</code>", "Never on VTY lines", "—", "Always: anyone who reaches the IP gets a prompt"],
 ], "How should the VTY lines check who you are?")}
@@ -2550,7 +2550,7 @@ ${K.case("A Lagos MSP and the password everyone knew",`
 <p>One Saturday night, three access ports on a client's switch were moved into the wrong VLAN and the CCTV recorder went offline. The logs showed a VTY login from inside the client's office — but with a shared password and no usernames, nothing about <i>who</i>. It later emerged that a contractor had captured traffic on a mirrored port months earlier; the Telnet password was sitting in the capture file.</p>
 <p>The fix took three weeks: SSH version 2 only, <code>transport input ssh</code> on every VTY line, a named account per engineer, <code>exec-timeout</code>, and an access list allowing only the MSP's management subnet. When an engineer later left, one account was removed in minutes instead of changing a shared password on 40 networks.</p>
 <p><b>The lesson:</b> encryption stops the password being stolen; named users tell you who did what. SSH with <code>login local</code> gives you both.</p>`)}
-${K.dyk(`SSH carries more than command lines: SCP and SFTP copy files over the same encrypted protocol, which is how many teams move IOS images and config backups securely.`)}
+${K.dyk(`SSH carries more than command lines: ${K.g("SCP","Secure Copy Protocol: copies files over an SSH session, encrypted end to end.")} and ${K.g("SFTP","SSH File Transfer Protocol: copies and manages files over an encrypted SSH session. Not the same as FTP, which sends everything in clear text.")} copy files over the same encrypted protocol, which is how many teams move IOS images and config backups securely.`)}
 ${K.exam(`Scenario questions pair a config with a symptom: map <b>timed out</b> → IP path, <b>refused</b> → key or <code>transport input</code>, <b>denied</b> → credentials or <code>login local</code>. And a switch config showing only <code>line vty 0 4</code> is usually a question about lines 5 to 15.`)}
 ${K.check({q:"You are connected to a remote switch by Telnet. You have generated keys and set <code>transport input ssh</code> on all VTY lines. What should you do next?", o:["Log out of Telnet and then try SSH","Open a new SSH session from another window, confirm you can log in and enable, and only then close the Telnet session","Reload the switch so the change takes effect","Remove the local user to force SSH"], a:1, why:"Your Telnet session survives the change, but once you log out you can't get back in by Telnet. Prove the replacement works with a fresh SSH session first. Keep the console available as well."})}
 
@@ -2677,7 +2677,7 @@ ${K.exam(`<code>a-full</code> / <code>a-1000</code> = negotiated; <code>full</co
 <h3>err-disabled: the switch turned the port off</h3>
 <p>${K.g("err-disabled","Error-disabled: the switch itself shut the port after detecting a violation, such as port security or BPDU guard. Traffic stops completely.")} is a protective state: the switch saw something it was told never to allow and shut the port. It stays down until someone intervenes. The log names the cause:</p>
 ${K.out(`%PM-4-ERR_DISABLE: psecure-violation error detected on Gi1/0/5, putting Gi1/0/5 in err-disable state`, "The log message when port security err-disables a port.")}
-<p>Typical causes (later modules): a <b>port-security violation</b> (an unknown MAC on a locked port), <b>BPDU guard</b> (a switch plugged into a PC-only port) and <b>link flapping</b>. The recovery:</p>
+<p>Typical causes (later modules): a <b>port-security violation</b> (an unknown MAC on a locked port), <b>${K.g("BPDU guard","BPDUs (Bridge Protocol Data Units) are the messages switches send each other for spanning tree. BPDU guard shuts a PC-only port the moment it hears one, because that means a switch was plugged in. You'll configure it in the spanning-tree module.")}</b> (a switch plugged into a PC-only port) and <b>link flapping</b>. The recovery:</p>
 ${K.steps([
   ["Find out why", `<p>Read the log, or <code>show interfaces status err-disabled</code> on a real switch. Ask: &ldquo;Did anyone plug anything new in?&rdquo;</p>`],
   ["Remove the cause", `<p>Unplug the extra switch or looped cable, or the port err-disables again within seconds.</p>`],
@@ -2785,7 +2785,7 @@ Total entries displayed: 1`, "show lldp neighbors. A switch shows as B (bridge);
 <p>Both ends must run it: <code>% LLDP is not enabled</code> means this switch is off; an empty table means the far end isn't sending.</p>
 ${K.when([
   ["CDP","Every device on the link is Cisco","On by default; rich detail (IP, version, native VLAN, duplex)","Ports facing the internet, an ISP or kit you don't control"],
-  ["LLDP","Mixed vendors: phones, APs, servers","Open IEEE 802.1AB standard","Untrusted ports — it leaks the same information"],
+  ["LLDP","Mixed vendors: phones, APs, servers","Open IEEE "+K.g("802.1AB","The IEEE standard number that defines LLDP.")+" standard","Untrusted ports — it leaks the same information"],
   ["Neither","Ports facing the ISP, guests or the public","Discovery hands attackers your models, versions and IPs","Uplinks and phone ports you rely on"],
 ], "CDP or LLDP — and where to turn them off")}
 ${K.exam(`Know the defaults: <b>CDP</b> — Cisco proprietary, enabled by default, advertisements every <b>60 s</b>, holdtime <b>180 s</b>. <b>LLDP</b> — IEEE 802.1AB, disabled by default on Catalyst, every <b>30 s</b>, holdtime <b>120 s</b>. Global on/off: <code>cdp run</code> / <code>no cdp run</code>, <code>lldp run</code> / <code>no lldp run</code>. Per interface: <code>no cdp enable</code>; <code>no lldp transmit</code> and <code>no lldp receive</code>.`)}
