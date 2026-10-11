@@ -245,7 +245,7 @@ function ios2Env(opts){
     if (st.logTrap!==6) L.push(`logging trap ${SEV[st.logTrap]}`); for (const h of st.logHosts) L.push(`logging host ${h}`);
     for (const [c, v] of Object.entries(st.snmp.communities)) L.push(`snmp-server community ${c} ${v.mode.toUpperCase()}${v.acl ? " " + v.acl : ""}`);
     if (st.snmp.location) L.push(`snmp-server location ${st.snmp.location}`); if (st.snmp.contact) L.push(`snmp-server contact ${st.snmp.contact}`);
-    if (st.snmp.traps) L.push("snmp-server enable traps");
+    if (st.snmp.traps) L.push("snmp-server enable traps snmp authentication linkdown linkup coldstart warmstart", "snmp-server enable traps config");   // IOS expands the bare command
     for (const h of st.snmp.hosts) L.push(`snmp-server host ${h.ip}${h.ver!=="1" ? " version " + h.ver : ""} ${h.community}`);
     L.push("!");
     if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
@@ -709,8 +709,10 @@ function ios2Env(opts){
     X("show clock", ()=>clockText()), X("show clock detail", ()=>clockText(true)),
     X("show ntp status", ()=>ntpStatus()), X("show ntp associations", ()=>ntpAssoc()),
     X("show hosts", ()=>{ const H = Object.entries(st.iosHosts);
-      return `Name lookup view: Global\nDefault domain is ${st.domain||"not set"}\nName/address lookup uses ${st.domainLookup ? "domain service" : "static mappings"}\nName servers are ${st.nameServers.length ? st.nameServers.join(", ") : "255.255.255.255"}\n\nCodes: UN - unknown, EX - expired, OK - OK, ?? - revalidate\n       temp - temporary, perm - permanent\n       NA - Not Applicable None - Not defined\n\nHost                      Port  Flags      Age Type   Address(es)\n` + H.map(([n,ip])=>`${pad(n,26)}None  (perm, OK)  0   IP     ${ip}`).join("\n"); }),
+      return `Name lookup view: Global\nDefault domain is ${st.domain||"not set"}\nName/address lookup uses ${st.domainLookup ? "domain service" : "static mappings"}\nName servers are ${st.nameServers.length ? st.nameServers.join(", ") : "255.255.255.255"}\n\nCodes: UN - unknown, EX - expired, OK - OK, ?? - revalidate\n       temp - temporary, perm - permanent\n       NA - Not Applicable None - Not defined\n\nHost                      Port  Flags      Age Type   Address(es)\n` + H.map(([n,ip])=>`${pad(n,26)}None  (perm, OK)  0   IP     ${ip}`).concat(Object.entries(st.dnsCache||{}).map(([n,ip])=>`${pad(n,26)}None  (temp, OK)  0   IP     ${ip}`)).join("\n"); }),
     X("show snmp community", ()=>Object.entries(st.snmp.communities).map(([c,v])=>`\nCommunity name: ${c}\nCommunity Index: ${c}\nCommunity SecurityName: ${c}\nstorage-type: nonvolatile\t active ${v.acl ? "access-list: " + v.acl : ""}`.trimEnd()).join("\n")),
+    X("show snmp", ()=>{ if (!Object.keys(st.snmp.communities).length) return "%SNMP agent not enabled"; const c = st.snmpStats || {};
+      return `Chassis: FGL2331A0BC\n${st.snmp.contact ? "Contact: " + st.snmp.contact + "\n" : ""}${st.snmp.location ? "Location: " + st.snmp.location + "\n" : ""}${c.inp||0} SNMP packets input\n    0 Bad SNMP version errors\n    ${c.badComm||0} Unknown community name\n    ${c.illegal||0} Illegal operation for community name supplied\n    0 Encoding errors\n    ${c.vars||0} Number of requested variables\n    ${c.altered||0} Number of altered variables\n    ${c.get||0} Get-request PDUs\n    ${c.next||0} Get-next PDUs\n    ${c.set||0} Set-request PDUs\n    0 Input queue packet drops (Maximum queue size 1000)\n${c.out||0} SNMP packets output\n    0 Too big errors (Maximum packet size 1500)\n    0 No such name errors\n    0 Bad values errors\n    0 General errors\n    ${c.resp||0} Response PDUs\n    0 Trap PDUs\nSNMP global trap: ${st.snmp.traps ? "enabled" : "disabled"}`; }),
     X("show snmp location", ()=>st.snmp.location || ""), X("show snmp contact", ()=>st.snmp.contact || ""),
   ];
   const execCommon = [
@@ -825,7 +827,7 @@ function ios2Env(opts){
       // ---- NTP and the clock ----
       X("ntp server A:IP", a=>{ if (!st.ntpServers.includes(a[0])) st.ntpServers.push(a[0]); return ""; }), X("ntp server A:IP prefer", a=>{ if (!st.ntpServers.includes(a[0])) st.ntpServers.unshift(a[0]); return ""; }),
       X("no ntp server A:IP", a=>{ st.ntpServers = st.ntpServers.filter(h=>h!==a[0]); return ""; }),
-      X("ntp master", ()=>{ st.ntpMaster = 8; return ""; }), X("ntp master A:NUM", a=>{ const n = +a[0]; if (!(n>=1 && n<=15)) return inv(); st.ntpMaster = n; return ""; }), X("no ntp master", ()=>{ st.ntpMaster = null; return ""; }),
+      X("ntp master", ()=>{ st.ntpMaster = 8; return ""; }), X("ntp master A:NUM", a=>{ const n = +a[0]; if (!(n>=1 && n<=15)) return inv(); st.ntpMaster = n; return ""; }), X("no ntp master", ()=>{ st.ntpMaster = null; return ""; }), X("no ntp master A:NUM", ()=>{ st.ntpMaster = null; return ""; }),
       X("ntp update-calendar", ()=>""),
       X("clock timezone A:WORD A:LINE", a=>{ const t = a[1].trim().split(/\s+/); const h = +t[0], m = +(t[1]||0); if (!Number.isInteger(h) || h<-23 || h>23 || !(m>=0 && m<60) || t.length>2) return inv(); st.tz = {name:a[0], h, m}; return ""; }),
       X("no clock timezone", ()=>{ st.tz = null; return ""; }),
@@ -1004,14 +1006,17 @@ function ios2Env(opts){
   const MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"], DAY3 = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   // the router's clock: the lab's time (or what "clock set" said), shifted by "clock timezone"; "*" = not authoritative (no NTP sync)
   const clockMs = () => (st.clockSetAt!=null ? st.clockSetAt : hooks.now()) + (st.tz ? (st.tz.h*60 + Math.sign(st.tz.h||1)*st.tz.m)*60000 : 0);
-  const ntpState = () => (hooks.ntp && hooks.ntp(st)) || {synced: st.ntpMaster!=null, stratum: st.ntpMaster!=null ? st.ntpMaster : 16, ref: st.ntpMaster!=null ? "127.127.1.1" : null, peers: []};
+  const ntpOn = () => st.ntpMaster!=null || st.ntpServers.length > 0;
+  const ntpState = () => { const n = ntpRaw(); if (n.synced) st.ntpWas = true; return n; };
+  const ntpRaw = () => (hooks.ntp && hooks.ntp(st)) || {synced: st.ntpMaster!=null, stratum: st.ntpMaster!=null ? st.ntpMaster : 16, ref: st.ntpMaster!=null ? "127.127.1.1" : null, peers: []};
   function clockText(detail){ const t = new Date(clockMs()), n = ntpState(), two = x=>String(x).padStart(2,"0");
-    const line = `${n.synced?"":"*"}${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())}.${String(t.getUTCMilliseconds()).padStart(3,"0")} ${st.tz?st.tz.name:"UTC"} ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`;
-    return detail ? line + "\nTime source is " + (n.synced ? "NTP" : st.clockSetAt!=null ? "user configuration" : "hardware calendar") : line; }
-  function ntpStatus(){ const n = ntpState();
+    const line = `${n.synced?"":st.ntpWas?".":"*"}${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())}.${String(t.getUTCMilliseconds()).padStart(3,"0")} ${st.tz?st.tz.name:"UTC"} ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`;
+    return detail ? line + "\nTime source is " + (n.synced || st.ntpWas ? "NTP" : st.clockSetAt!=null ? "user configuration" : "hardware calendar") : line; }
+  const ntpHex = () => (Math.floor(clockMs()/1000) + 2208988800).toString(16).toUpperCase().padStart(8, "0") + ".3F5C28F6";   // NTP time = seconds since 1900
+  function ntpStatus(){ if (!ntpOn()) return "%NTP is not enabled."; const n = ntpState();
     if (!n.synced) return "Clock is unsynchronized, stratum 16, no reference clock\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 0 (1/100 of seconds), resolution is 4000\nreference time is 00000000.00000000 (00:00:00.000 UTC Mon Jan 1 1900)\nclock offset is 0.0000 msec, root delay is 0.00 msec\nroot dispersion is 0.00 msec, peer dispersion is 0.00 msec\nloopfilter state is 'FSET' (Drift set from file), drift is 0.000000000 s/s\nsystem poll interval is 8, never updated.";
-    return `Clock is synchronized, stratum ${n.stratum}, reference is ${n.ref}\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 1500 (1/100 of seconds), resolution is 4000\nreference time is E6B2C1A4.3F5C28F6 (${clockText().replace(/^\*/,"")})\nclock offset is 0.0000 msec, root delay is 1.00 msec\nroot dispersion is 7.55 msec, peer dispersion is 0.12 msec\nloopfilter state is 'CTRL' (Normal Controlled Loop), drift is 0.000000000 s/s\nsystem poll interval is 64, last update was 10 sec ago.`; }
-  function ntpAssoc(){ const n = ntpState(), rows = [];
+    return `Clock is synchronized, stratum ${n.stratum}, reference is ${n.ref}\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 1500 (1/100 of seconds), resolution is 4000\nreference time is ${ntpHex()} (${clockText().replace(/^[*.]/,"")})\nclock offset is 0.0000 msec, root delay is ${n.ref==="127.127.1.1" ? "0.00" : "1.00"} msec\nroot dispersion is 7.55 msec, peer dispersion is 0.12 msec\nloopfilter state is 'CTRL' (Normal Controlled Loop), drift is 0.000000000 s/s\nsystem poll interval is 64, last update was 10 sec ago.`; }
+  function ntpAssoc(){ if (!ntpOn()) return "%NTP is not enabled."; const n = ntpState(), rows = [];
     if (st.ntpMaster!=null) rows.push({mark: n.ref==="127.127.1.1" ? "*" : " ", addr:"127.127.1.1", ref:".LOCL.", st: st.ntpMaster - 1, reach: 377, delay:"0.000"});
     for (const pe of (n.peers||[])) rows.push({mark: pe.sys ? "*" : pe.reach ? "+" : " ", addr: pe.ip, ref: pe.ref || ".INIT.", st: pe.reach ? pe.stratum : 16, reach: pe.reach ? 377 : 0, delay: pe.reach ? "1.000" : "0.000"});
     return "  address         ref clock       st   when   poll reach  delay  offset   disp\n" + rows.map(r=>`${r.mark}~${pad(r.addr,16)}${pad(r.ref,16)}${String(r.st).padStart(2)}  ${String(r.reach ? 14 : "-").padStart(5)}  ${String(64).padStart(5)}  ${String(r.reach).padStart(4)}  ${r.delay.padStart(5)}   0.000  ${r.reach ? "0.123" : "15937."}`).join("\n") + (rows.length ? "\n" : "") + " * sys.peer, # selected, + candidate, - outlyer, x falseticker, ~ configured"; }
@@ -1021,6 +1026,7 @@ function ios2Env(opts){
     if (!st.domainLookup) return {ip:null, how:"nolookup"};
     if (!st.nameServers.length) return {ip:null, how:"broadcast", tried: fq};
     const r = hooks.dns ? hooks.dns(fq, st.nameServers) : null;
+    if (r && r.ip){ st.dnsCache = st.dnsCache || {}; st.dnsCache[fq] = r.ip; }
     return r && r.ip ? {ip:r.ip, how:"dns", server:r.server, tried:fq} : {ip:null, how:"dns", server: (r && r.server) || st.nameServers[0], tried:fq}; }
   function aclMode(){ const run = (pre, a) => { const r = window.ACL.namedCmd(st.acl, st.curAcl, pre + a.join(" ")); return r.err || ""; };
     return [ ...["permit","deny","remark"].flatMap(k=>[ X(k + " A:LINE", a=>run(k + " ", a)), X("A:NUM " + k + " A:LINE", a=>run(a[0] + " " + k + " ", [a[1]])) ]),
@@ -1097,6 +1103,11 @@ function ios2Env(opts){
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
   function doTrace(ip, srcArg){
+    if (!ipRe.test(ip) && !I6.valid(ip) && /^[a-z0-9][a-z0-9.-]*$/i.test(ip) && /[a-z]/i.test(ip)){ const r = resolveName(ip);
+      if (!r.ip) return r.how==="dns" ? `Translating "${ip}"...domain server (${r.server})\n% Unrecognized host or address, or protocol not running.` : "% Unrecognized host or address, or protocol not running.";
+      const res = doTrace(r.ip, srcArg); if (typeof res!=="string") return res;
+      const nm = r.how==="dns" ? r.tried : ip.toLowerCase();
+      return (r.how==="dns" ? `Translating "${ip}"...domain server (${r.server}) [OK]\n` : "") + res.replace(`Tracing the route to ${r.ip}`, `Tracing the route to ${nm} (${r.ip})`); }
     if (I6.valid(ip)) return doTrace6(ip);
     let src = null; if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
       if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
@@ -1253,8 +1264,10 @@ function ios2Env(opts){
   };
   st.log = [];          // [{cmd, out, mode}] — what the learner typed and saw (text output only), newest last
   st.exec = function(line){
-    const before = st.mode, r = execInner(line);
-    { const txt = typeof r==="string" ? r : (r && r.text) || ""; for (const l of txt.split("\n")) if (/^%[A-Z0-9_]+-[0-7]-[A-Z0-9_]+:/.test(l.trim())) hooks.emit(l.trim()); }
+    const before = st.mode; let r = execInner(line);
+    // console messages are logged; on the console they carry the same timestamp as in the log buffer ("*" = clock not synchronised)
+    const stamp = txt => txt.split("\n").map(l=>{ if (!/^%[A-Z0-9_]+-[0-7]-[A-Z0-9_]+:/.test(l.trim())) return l; const e = hooks.emit(l.trim()); return e && e.t ? (ntpRaw().synced ? "" : "*") + e.t + ": " + l.trim() : l; }).join("\n");
+    if (typeof r==="string") r = stamp(r); else if (r && r.text) r.text = stamp(r.text);
     if (typeof r==="string" || (r && r.text)) { st.log.push({cmd:line, out: typeof r==="string" ? r : r.text, mode:before}); if (st.log.length>200) st.log.shift(); }
     return r;
   };

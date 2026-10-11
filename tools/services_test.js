@@ -182,16 +182,19 @@ const mkSvc = (r1x, r2x) => Bench.create({ devices: [
 { // NTP and the clock
   const B = mkSvc();
   ok(cli(B, "r2", "show clock")==="*08:30:00.000 UTC Mon Oct 12 2026", "show clock before NTP: '*' = not authoritative", cli(B, "r2", "show clock"));
-  ok(/^Clock is unsynchronized, stratum 16, no reference clock/.test(cli(B, "r2", "show ntp status")), "no NTP: unsynchronized, stratum 16");
+  ok(cli(B, "r2", "show ntp status")==="%NTP is not enabled." && cli(B, "r2", "show ntp associations")==="%NTP is not enabled.", "no NTP configured: %NTP is not enabled.");
   cfg(["ntp master 3"])(B.devs.r1.env); cfg(["ntp server 10.0.12.1", "clock timezone WAT 1"])(B.devs.r2.env);
   ok(/^Clock is synchronized, stratum 3, reference is 127\.127\.1\.1/.test(cli(B, "r1", "show ntp status")), "R1 ntp master 3: synchronized to its own clock, stratum 3", cli(B, "r1", "show ntp status"));
+  ok(/reference time is EE771908\.3F5C28F6 /.test(cli(B, "r1", "show ntp status")) && /root delay is 0\.00 msec/.test(cli(B, "r1", "show ntp status")), "reference time is the real NTP timestamp (seconds since 1900, hex); a master has 0 root delay", cli(B, "r1", "show ntp status"));
   ok(/^Clock is synchronized, stratum 4, reference is 10\.0\.12\.1/.test(cli(B, "r2", "show ntp status")), "R2 ntp server 10.0.12.1: stratum 4 (one more than its server)", cli(B, "r2", "show ntp status"));
   ok(/\*~10\.0\.12\.1\s+127\.127\.1\.1\s+3 /.test(cli(B, "r2", "show ntp associations")) && / \* sys\.peer, # selected, \+ candidate, - outlyer, x falseticker, ~ configured$/.test(cli(B, "r2", "show ntp associations")), "show ntp associations: *~ = configured and the sys.peer", cli(B, "r2", "show ntp associations"));
   ok(cli(B, "r2", "show clock")==="09:30:00.000 WAT Mon Oct 12 2026", "synchronized: no '*', and clock timezone WAT 1 shifts the display", cli(B, "r2", "show clock"));
   ok(/clock timezone WAT 1 0/.test(cli(B, "r2", "show running-config")) && /ntp server 10\.0\.12\.1\n!\nend$/.test(cli(B, "r2", "show running-config")), "running-config: clock timezone near the top, ntp server at the end", cli(B, "r2", "show running-config"));
   ok(Bench.ntpSynced(B, "r2"), "task helper ntpSynced");
   cfg(["no ntp server 10.0.12.1", "ntp server 10.0.99.9"])(B.devs.r2.env);
-  ok(/^Clock is unsynchronized/.test(cli(B, "r2", "show ntp status")) && /^ ~10\.0\.99\.9\s+\.INIT\.\s+16 /m.test(cli(B, "r2", "show ntp associations")), "an unreachable NTP server: unsynchronized, the peer stays .INIT. at stratum 16", cli(B, "r2", "show ntp associations")); }
+  ok(/^Clock is unsynchronized/.test(cli(B, "r2", "show ntp status")) && /^ ~10\.0\.99\.9\s+\.INIT\.\s+16 /m.test(cli(B, "r2", "show ntp associations")), "an unreachable NTP server: unsynchronized, the peer stays .INIT. at stratum 16", cli(B, "r2", "show ntp associations"));
+  ok(cli(B, "r2", "show clock").startsWith(".09:30") && /Time source is NTP/.test(cli(B, "r2", "show clock detail")), "sync lost after it had been synchronised: '.' prefix, time source still NTP", cli(B, "r2", "show clock"));
+  cfg(["ntp master 3", "no ntp master 3"])(B.devs.r1.env); ok(!/ntp master/.test(cli(B, "r1", "show running-config")), "no ntp master 3 removes it"); }
 
 { // syslog: the router's console messages are logged; a syslog server receives those at or below the trap level
   const B = mkSvc(null, ["logging host 192.168.50.10", "logging trap warnings"]);
@@ -210,7 +213,9 @@ const mkSvc = (r1x, r2x) => Bench.create({ devices: [
   ok(ns==="Server:  srv.hq.example.com\nAddress:  192.168.50.10\n\nName:    portal.hq.example.com\nAddress:  192.168.50.20\n", "nslookup adds the DNS suffix; the authoritative server answers", ns);
   ok(/^\nPinging portal\.hq\.example\.com \[192\.168\.50\.20\] with 32 bytes of data:\nReply from 192\.168\.50\.20: bytes=32/.test(pc(B, "p1", "ping portal")), "ping by name", pc(B, "p1", "ping portal"));
   ok(/^\nTracing route to portal\.hq\.example\.com \[192\.168\.50\.20\]\nover a maximum of 30 hops:\n/.test(pc(B, "p1", "tracert portal")), "tracert by name: the two-line header", pc(B, "p1", "tracert portal"));
-  ok(/\*\*\* srv\.hq\.example\.com can't find nothere\.hq\.example\.com: Non-existent domain/.test(pc(B, "p1", "nslookup nothere")), "unknown name: Non-existent domain");
+  ok(/\*\*\* srv\.hq\.example\.com can't find nothere: Non-existent domain/.test(pc(B, "p1", "nslookup nothere")), "unknown name: Non-existent domain (named as typed)", pc(B, "p1", "nslookup nothere"));
+  ok((pc(B, "p1", "nslookup portal 10.9.9.9").match(/DNS request timed out\./g)||[]).length===5 && /\*\*\* Request to UnKnown timed-out$/.test(pc(B, "p1", "nslookup portal 10.9.9.9")), "a dead server: one timeout before the Server block and four after (A and AAAA lookups)", pc(B, "p1", "nslookup portal 10.9.9.9"));
+  ok(/^Default Server:  srv\.hq\.example\.com\nAddress:  192\.168\.50\.10/.test(pc(B, "p1", "nslookup")), "interactive nslookup names the default server");
   ok(/^Ping request could not find host nothere\. Please check the name and try again\.$/.test(pc(B, "p1", "ping nothere")), "ping an unknown name");
   ok(/DNS request timed out\.\n    timeout was 2 seconds\./.test(pc(B, "p1", "nslookup portal 10.9.9.9")), "nslookup to a server that doesn't answer: timed out");
   // PC2 uses its branch router R2 as DNS server — R2 has no "ip dns server", so nothing answers
@@ -223,6 +228,8 @@ const mkSvc = (r1x, r2x) => Bench.create({ devices: [
   ok(/^Translating "portal"\.\.\.domain server \(192\.168\.50\.10\) \[OK\]\n\nType escape sequence to abort\.\nSending 5, 100-byte ICMP Echos to 192\.168\.50\.20/.test(cli(B, "r1", "ping portal")), "IOS ping by name: Translating … [OK], then the ping", cli(B, "r1", "ping portal"));
   ok(/Host                      Port  Flags      Age Type   Address\(es\)\nfiles\s+None  \(perm, OK\)  0   IP     192\.168\.50\.20\nprinter\s+None  \(perm, OK\)  0   IP     192\.168\.20\.30/.test(cli(B, "r1", "show hosts")) && /Name servers are 192\.168\.50\.10/.test(cli(B, "r1", "show hosts")), "show hosts: the static host table", cli(B, "r1", "show hosts"));
   ok(/^Translating "nothere"\.\.\.domain server \(192\.168\.50\.10\)\n% Unrecognized host or address, or protocol not running\.$/.test(cli(B, "r1", "ping nothere")), "IOS: an unknown name", cli(B, "r1", "ping nothere"));
+  ok(/^Translating "portal"\.\.\.domain server \(192\.168\.50\.10\) \[OK\]\nType escape sequence to abort\.\nTracing the route to portal\.hq\.example\.com \(192\.168\.50\.20\)/.test(cli(B, "r1", "traceroute portal")), "IOS traceroute by name", cli(B, "r1", "traceroute portal"));
+  ok(/portal\.hq\.example\.com\s+None  \(temp, OK\)  0   IP     192\.168\.50\.20/.test(cli(B, "r1", "show hosts")), "a name learned from DNS is cached in show hosts as temp", cli(B, "r1", "show hosts"));
   ok(/ip host files 192\.168\.50\.20\nip host printer 192\.168\.20\.30\nip name-server 192\.168\.50\.10/.test(cli(B, "r1", "show running-config")) && /ip dns server/.test(cli(B, "r1", "show running-config")), "running-config: ip host, ip name-server, ip dns server");
   ok(Bench.resolved(B, "p1", "portal"), "task helper resolved"); }
 
@@ -253,9 +260,12 @@ const mkSvc = (r1x, r2x) => Bench.create({ devices: [
   ok(/^Error in packet\.\nReason: noAccess/.test(pc(B, "srv", 'snmpset -v2c -c LabRO 10.0.12.2 sysLocation.0 s "Kano rack 3"')), "snmpset with a read-only community: noAccess");
   ok(/sysLocation\.0 = STRING: Kano rack 3/.test(pc(B, "srv", 'snmpset -v2c -c LabRW 10.0.12.2 sysLocation.0 s "Kano rack 3"')) && /snmp-server location Kano rack 3/.test(cli(B, "r2", "show running-config")), "snmpset with RW changes the router's location");
   ok(/not recognized as an internal or external command/.test(pc(B, "p1", "snmpget -v2c -c LabRO 10.0.12.2 sysName.0")), "an ordinary PC has no SNMP tools");
+  ok(pc(B, "srv", "snmpwalk -v2c -c wrong 10.0.12.2 ifDescr")==="Timeout: No Response from 10.0.12.2", "snmpwalk timeout has no full stop (Net-SNMP)");
+  ok(/IF-MIB::ifDescr\.\d+ = STRING: Null0$/.test(pc(B, "srv", "snmpwalk -v2c -c LabRO 10.0.12.2 ifDescr")), "the ifTable ends with Null0");
+  ok(/^Chassis: \S+\nContact: noc@example\.com\nLocation: Kano rack 3\n\d+ SNMP packets input\n    0 Bad SNMP version errors\n    \d+ Unknown community name/.test(cli(B, "r2", "show snmp")) && cli(B, "r1", "show snmp")==="%SNMP agent not enabled", "show snmp (counters) / %SNMP agent not enabled", cli(B, "r2", "show snmp"));
   cfg(["int g0/0", "shutdown"])(B.devs.r2.env);
   ok(Bench.trapGot(B, "srv", /GigabitEthernet0\/0, changed state to down/) || Bench.trapGot(B, "srv", /administratively down/) || Bench.trapGot(B, "srv", /LINEPROTO.*down/), "traps: the interface going down reaches the manager", JSON.stringify(B.syslog.r2.map(x=>x.msg)));
-  ok(/snmp-server community LabRO RO\nsnmp-server community LabRW RW\nsnmp-server community Locked RO 5\nsnmp-server location Kano rack 3\nsnmp-server contact noc@example\.com\nsnmp-server enable traps\nsnmp-server host 192\.168\.50\.10 version 2c LabRO/.test(cli(B, "r2", "show running-config")), "running-config: snmp-server lines", cli(B, "r2", "show running-config")); }
+  ok(/snmp-server community LabRO RO\nsnmp-server community LabRW RW\nsnmp-server community Locked RO 5\nsnmp-server location Kano rack 3\nsnmp-server contact noc@example\.com\nsnmp-server enable traps snmp authentication linkdown linkup coldstart warmstart\nsnmp-server enable traps config\nsnmp-server host 192\.168\.50\.10 version 2c LabRO/.test(cli(B, "r2", "show running-config")), "running-config: snmp-server lines", cli(B, "r2", "show running-config")); }
 
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

@@ -161,7 +161,7 @@ function syslog(B, d, msg, force){ const L = B.syslog[d.id] = B.syslog[d.id] || 
   const sv = (msg.match(/^%[A-Z0-9_]+-([0-7])-/)||[])[1], sev = sv==null ? 6 : +sv, E = d.env;
   const to = E && E.logHosts && sev <= (E.logTrap==null ? 6 : E.logTrap) ? E.logHosts.slice() : [];
   const trap = E && E.snmp && E.snmp.traps && /%LINK-3-UPDOWN|%LINEPROTO-5-UPDOWN/.test(msg) ? E.snmp.hosts.map(h=>h.ip) : [];
-  L.push({t, msg, sev, to, trap}); if (L.length>60) L.shift(); }
+  const e = {t, msg, sev, to, trap}; L.push(e); if (L.length>60) L.shift(); return e; }
 const portNum = (d, pid) => d.ports.findIndex(p=>p.id===pid) + 1;
 // physical link usable for frames: cable present and link up (speed/optics/admin/err-disabled)
 const physUp = (B, ref) => linkUpAt(B, ref);
@@ -1058,8 +1058,9 @@ function nslookupText(B, d, name, server){
   const fq = !name.includes(".") && d.domain ? (name + "." + d.domain).toLowerCase() : name.toLowerCase();
   const r = d.ip ? dnsAsk(B, hostNode(d), srv, fq, 0) : {reach:false};
   const head = `Server:  ${r.srvName || "UnKnown"}\nAddress:  ${srv}\n\n`;
-  if (!r.reach) return "DNS request timed out.\n    timeout was 2 seconds.\nServer:  UnKnown\nAddress:  " + srv + "\n\nDNS request timed out.\n    timeout was 2 seconds.\nDNS request timed out.\n    timeout was 2 seconds.\n*** Request to UnKnown timed-out";
-  if (!r.ip) return head + `*** ${r.srvName || "UnKnown"} can't find ${fq}: Non-existent domain`;
+  const to = "DNS request timed out.\n    timeout was 2 seconds.\n";
+  if (!r.reach) return to + "Server:  UnKnown\nAddress:  " + srv + "\n\n" + to.repeat(4) + "*** Request to UnKnown timed-out";
+  if (!r.ip) return head + `*** ${r.srvName || "UnKnown"} can't find ${name}: Non-existent domain`;
   return head + (r.auth ? "" : "Non-authoritative answer:\n") + `Name:    ${fq}\nAddress:  ${r.ip}\n`;
 }
 // TFTP: the router copies to/from a server running a TFTP service, if both directions route
@@ -1086,18 +1087,22 @@ function snmpTool(B, d, raw){
   const agent = rest[0], objs = rest.slice(1);
   if (!agent || !comm) return `USAGE: ${cmd} [OPTIONS] AGENT OID [OID]...\n  -v 1|2c|3\t\tspecifies SNMP version to use\n  -c COMMUNITY\t\tset the community string`;
   if (ver!=="2c" && ver!=="1") return "snmp: this lab supports -v2c (and -v1)";
-  const timeout = `Timeout: No Response from ${agent}.`;
+  const timeout = `Timeout: No Response from ${agent}${cmd==="snmpget" ? "." : ""}`;
   const o = ipOwner(B, agent); if (!o || !o.dev.env || !d.ip) return timeout;
   const R = o.dev, E = R.env, c = E.snmp && E.snmp.communities[comm];
-  if (!c || !udpTwoWay(B, hostNode(d), agent).ok) return timeout;
+  if (!udpTwoWay(B, hostNode(d), agent).ok || !Object.keys(E.snmp.communities).length) return timeout;
+  const S = E.snmpStats = E.snmpStats || {}; S.inp = (S.inp||0) + 1;
+  if (!c){ S.badComm = (S.badComm||0) + 1; return timeout; }
   if (c.acl && window.ACL && E.acl.lists[c.acl] && !window.ACL.check(E.acl, c.acl, {src:d.ip}, false).permit) return timeout;
-  const ifs = Object.keys(E.intfs).filter(n=>!n.startsWith("Port-channel")), val = (base, idx) => {
+  S.out = (S.out||0) + 1; S.resp = (S.resp||0) + 1; if (cmd==="snmpget") S.get = (S.get||0) + 1; else if (cmd==="snmpwalk") S.next = (S.next||0) + 1; else S.set = (S.set||0) + 1;
+  const ifs = Object.keys(E.intfs).filter(n=>!n.startsWith("Port-channel")).concat(["Null0"]), val = (base, idx) => {
     if (base==="sysDescr") return "STRING: Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.4a, RELEASE SOFTWARE (fc3)";
     if (base==="sysUpTime") return "Timeticks: (1234567) 3:25:45.67";
     if (base==="sysContact") return "STRING: " + (E.snmp.contact||""); if (base==="sysLocation") return "STRING: " + (E.snmp.location||"");
     if (base==="sysName") return "STRING: " + E.host + (E.domain ? "." + E.domain : "");
     const n = ifs[idx-1]; if (!n) return null;
     if (base==="ifDescr") return "STRING: " + n;
+    if (n==="Null0") return base==="ifDescr" ? "STRING: Null0" : "INTEGER: up(1)";
     if (base==="ifAdminStatus") return E.intfs[n].shut ? "INTEGER: down(2)" : "INTEGER: up(1)";
     if (base==="ifOperStatus") return E.isUp(n) ? "INTEGER: up(1)" : "INTEGER: down(2)"; return null; };
   const parse = s => { const m = String(s).replace(/^[A-Za-z0-9-]+::/, "").match(/^(\w+)(?:\.(\d+))?$/); return m && SNMPOBJ[m[1]] ? {base:m[1], idx: m[2]==null ? null : +m[2]} : null; };
@@ -1108,7 +1113,7 @@ function snmpTool(B, d, raw){
   if (cmd==="snmpget"){ if (!objs.length) return "snmpget: Missing object name"; return objs.map(x=>{ const q = parse(x); if (!q) return `${x}: Unknown Object Identifier`; return line(q.base, q.idx==null ? 0 : q.idx); }).join("\n"); }
   if (cmd==="snmpset"){ const q = parse(objs[0]||""), ty = objs[1], v = objs.slice(2).join(" ").replace(/^"|"$/g, "");
     if (!q || ty!=="s" || !v) return "snmpset: usage: snmpset ... AGENT OID TYPE VALUE   (e.g. sysLocation.0 s \"Lagos HQ, rack 2\")";
-    if (c.mode!=="rw") return `Error in packet.\nReason: noAccess\nFailed object: ${SNMPOBJ[q.base]}.${q.idx||0}`;
+    if (c.mode!=="rw"){ S.illegal = (S.illegal||0) + 1; } if (c.mode!=="rw") return `Error in packet.\nReason: noAccess\nFailed object: ${SNMPOBJ[q.base]}.${q.idx||0}`;
     if (q.base==="sysLocation") E.snmp.location = v; else if (q.base==="sysContact") E.snmp.contact = v; else if (q.base==="sysName") E.host = v.split(".")[0];
     else return `Error in packet.\nReason: notWritable (That object does not support modification)\nFailed object: ${SNMPOBJ[q.base]}.${q.idx||0}`;
     return `${SNMPOBJ[q.base]}.${q.idx||0} = STRING: ${v}`; }
@@ -1244,7 +1249,8 @@ function pcExec(B, d, line){
   }
   if (/^arp\s+-d/.test(l)){ B.arp[d.id] = {}; return ""; }
   const RTT = "\nApproximate round trip times in milli-seconds:\n    Minimum = 0ms, Maximum = 0ms, Average = 0ms";
-  if (t[0].toLowerCase()==="nslookup"){ if (!t[1]) return "Default Server:  UnKnown\nAddress:  " + ((d.dns||[])[0]||"::1") + "\n\n> (interactive mode isn't available in this lab — use nslookup <name> [server])";
+  if (t[0].toLowerCase()==="nslookup"){ if (!t[1]){ const s0 = (d.dns||[])[0], o0 = s0 && ipOwner(B, s0), nm0 = o0 && o0.dev.services && o0.dev.services.dns && o0.dev.services.dns.name;
+      return "Default Server:  " + (nm0 || "UnKnown") + "\nAddress:  " + (s0||"::1") + "\n\n> (interactive mode isn't available in this lab — use nslookup <name> [server])"; }
     const r = nslookupText(B, d, t[1], t[2]); return r; }
   if (l==="ipconfig /flushdns") return "\nWindows IP Configuration\n\nSuccessfully flushed the DNS Resolver Cache.";
   if (/^snmp(get|walk|set)$/i.test(t[0])){ if (!(d.services && d.services.nms)) return `'${t[0]}' is not recognized as an internal or external command,\noperable program or batch file.`; return snmpTool(B, d, raw); }
