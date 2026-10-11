@@ -40,6 +40,7 @@ function ios2Env(opts){
     linkUp: name => !st.intfs[name].shut,                 // no bench: pretend every port is cabled
     ping: ip => ({ ok: defaultReach(ip), firstMiss:false }),
     mac: () => [], clearMac: () => {}, arp: () => [], cdp: () => [], lldp: () => [], counters: () => ({}),
+    now: () => Date.UTC(2026, 9, 12, 8, 30, 0), emit: () => {}, ntp: () => null, dns: () => null, tftpPut: () => ({ok:false}), tftpGet: () => ({ok:false}),
   }, opts.hooks||{});
   const physical = opts.ports || (kind==="router" ? ["GigabitEthernet0/0","GigabitEthernet0/1","GigabitEthernet0/2"]
                                                   : [...Array(8)].map((_,i)=>"GigabitEthernet0/"+(i+1)).concat(["GigabitEthernet0/9","GigabitEthernet0/10"]));
@@ -53,6 +54,8 @@ function ios2Env(opts){
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
       stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[], serviceDhcp:true,
+      logHosts:[], logTrap:6, logBuffered:null, logConsole:null, ntpServers:[], ntpMaster:null, tz:null, iosHosts:{}, nameServers:[], dnsServer:false,
+      snmp:{communities:{}, location:null, contact:null, hosts:[], traps:false},
       acl: window.ACL ? window.ACL.store() : {lists:{}}, dhcp: window.DHCP ? window.DHCP.store() : {excluded:[], pools:{}, bindings:[], conflicts:[]}, nat: window.NAT ? window.NAT.store() : {pools:{}, statics:[], rules:[], table:[], hits:0, misses:0, expired:0},
       vlans: kind==="switch" ? {1:"default", 1002:"fddi-default", 1003:"token-ring-default", 1004:"fddinet-default", 1005:"trnet-default"} : {}, intfs };
   };
@@ -67,6 +70,10 @@ function ios2Env(opts){
     if (o.acl) for (const l of Object.values(o.acl.lists||{})) for (const e of l.entries) if (e.hits) e.hits = 0;
     for (const i of Object.values(o.intfs||{})) if (i.dhcpClient){ i.ip = null; i.mask = null; delete i.dhcpGw; delete i.dhcpLease; }
     return o; };
+  st.resolveName = n => resolveName(n); st.sevOf = w => sevOf(w); st.clockText = () => clockText();
+  // IOS DHCP client identifier "cisco-<mac>-<short interface>"; show dhcp lease dumps it as upper-case hex, 16 bytes a line
+  const cidText = n => "cisco-" + st.intfs[n].mac + "-" + short(n);
+  const cidHex = n => [...cidText(n)].map(c=>c.charCodeAt(0).toString(16).toUpperCase().padStart(2,"0")).join("").match(/.{1,32}/g).join("\n" + " ".repeat(23));
   st.liveSig = () => JSON.stringify(Object.entries(st.intfs).filter(([,i])=>i.dhcpClient).map(([n,i])=>[n, i.ip, i.mask, i.dhcpGw||null]));
   st.natIfs = () => ({ ins: ifNames().filter(n=>st.intfs[n].natIn), outs: ifNames().filter(n=>st.intfs[n].natOut) });
   const snapshot = () => stripLive(JSON.parse(JSON.stringify(cfgKeys.reduce((o,k)=>(o[k]=st[k],o),{}))));
@@ -168,8 +175,11 @@ function ios2Env(opts){
     if (st.enablePassword) L.push(`enable password ${pw(st.enablePassword)}`);
     if (st.enableSecret || st.enablePassword) L.push("!");
     for (const [u,v] of Object.entries(st.users)) L.push(`username ${u} ${v.secret?`secret 9 ${fakeHash(v.secret)}`:`password ${pw(v.password)}`}`);
+    if (st.tz) L.push(`clock timezone ${st.tz.name} ${st.tz.h} ${st.tz.m}`);
     if (!st.domainLookup) L.push("no ip domain lookup");
     if (st.domain) L.push(`ip domain name ${st.domain}`);
+    for (const [n, ip] of Object.entries(st.iosHosts)) L.push(`ip host ${n} ${ip}`);
+    if (st.nameServers.length) L.push(`ip name-server ${st.nameServers.join(" ")}`);
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
     if (st.serviceDhcp===false) L.push("no service dhcp");
     { const D = window.DHCP ? window.DHCP.running(st.dhcp) : []; if (D.length) L.push("!", ...D, "!"); }
@@ -230,6 +240,13 @@ function ios2Env(opts){
     for (const r of (st.routes6||[])) L.push(`ipv6 route ${U(r.net)}/${r.len}${r.ios?" "+r.ios:""}${r.nh?" "+U(r.nh):""}${r.ad?" "+r.ad:""}`);
     for (const r of st.routes.slice().sort((x,y)=>toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.ad?" "+r.ad:""}`);
     { const A = window.ACL ? window.ACL.running(st.acl) : []; if (A.length) L.push("!", ...A); }
+    if (st.dnsServer) L.push("ip dns server");
+    if (st.logBuffered) L.push(`logging buffered ${st.logBuffered}`); if (st.logConsole!=null) L.push(`logging console ${SEV[st.logConsole]}`);
+    if (st.logTrap!==6) L.push(`logging trap ${SEV[st.logTrap]}`); for (const h of st.logHosts) L.push(`logging host ${h}`);
+    for (const [c, v] of Object.entries(st.snmp.communities)) L.push(`snmp-server community ${c} ${v.mode.toUpperCase()}${v.acl ? " " + v.acl : ""}`);
+    if (st.snmp.location) L.push(`snmp-server location ${st.snmp.location}`); if (st.snmp.contact) L.push(`snmp-server contact ${st.snmp.contact}`);
+    if (st.snmp.traps) L.push("snmp-server enable traps");
+    for (const h of st.snmp.hosts) L.push(`snmp-server host ${h.ip}${h.ver!=="1" ? " version " + h.ver : ""} ${h.community}`);
     L.push("!");
     if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
     L.push("!", "line con 0"); const c = st.lines.con;
@@ -241,6 +258,7 @@ function ios2Env(opts){
       L.push(`line vty ${blk}`);
       if (v.timeout && v.timeout!=="10 0") L.push(` exec-timeout ${v.timeout}`); if (v.password) L.push(` password ${pw(v.password)}`); if (v.loginLocal) L.push(" login local"); else if (v.login) L.push(" login"); if (v.transport!=="all") L.push(` transport input ${v.transport}`);
     }
+    if (st.ntpMaster!=null) L.push(st.ntpMaster===8 ? "ntp master" : `ntp master ${st.ntpMaster}`); for (const h of st.ntpServers) L.push(`ntp server ${h}`);
     L.push("!","end");
     return L.join("\n");
   }
@@ -662,7 +680,9 @@ function ios2Env(opts){
       const ip = {"src-mac":"Source MAC address","dst-mac":"Destination MAC address","src-dst-mac":"Source XOR Destination MAC address","src-ip":"Source IP address","dst-ip":"Destination IP address","src-dst-ip":"Source XOR Destination IP address"}[m];
       return `EtherChannel Load-Balancing Configuration:\n        ${m}\n\nEtherChannel Load-Balancing Addresses Used Per-Protocol:\nNon-IP: ${mac}\n  IPv4: ${ip}\n  IPv6: ${ip}`; }),
     X("show vtp status", ()=>kind!=="switch"?inv():`VTP Version capable             : 1 to 3\nVTP version running             : 1\nVTP Domain Name                 : ${st.vtpDomain}\nVTP Pruning Mode                : Disabled\nVTP Traps Generation            : Disabled\nDevice ID                       : ${baseMac}.0000\nVTP Operating Mode              : ${st.vtpMode[0].toUpperCase()+st.vtpMode.slice(1)}\nMaximum VLANs supported locally : 1005\nNumber of existing VLANs        : ${Object.keys(st.vlans).length}`),
-    X("show logging", ()=>{ const L = hooks.logs ? hooks.logs(st) : []; return "Syslog logging: enabled (0 messages dropped, 0 flushes, 0 overruns)\n    Console logging: level debugging\n    Buffer logging:  level debugging\n\nLog Buffer (8192 bytes):\n" + (L.length ? L.map(l=>"*Oct 11 10:"+l).join("\n") : ""); }),
+    X("show logging", ()=>{ const L = hooks.logs ? hooks.logs(st) : [], n = L.length, sync = ntpState().synced;
+      const hostsTxt = st.logHosts.map(h=>`        Logging to ${h}  (udp port 514, audit disabled,\n              link up),\n              ${L.filter(x=>x.sev<=st.logTrap && (x.to||[]).includes(h)).length} message lines logged,\n              0 message lines rate-limited,\n              0 message lines dropped-by-MD,\n              xml disabled, sequence number disabled\n              filtering disabled`).join("\n");
+      return `Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, 0 flushes, 0 overruns, xml disabled, filtering disabled)\n\nNo Active Message Discriminator.\n\n\nNo Inactive Message Discriminator.\n\n\n    Console logging: level ${SEV[st.logConsole!=null ? st.logConsole : 7]}, ${n} messages logged, xml disabled,\n                     filtering disabled\n    Monitor logging: level debugging, 0 messages logged, xml disabled,\n                     filtering disabled\n    Buffer logging:  level debugging, ${n} messages logged, xml disabled,\n                    filtering disabled\n    Exception Logging: size (4096 bytes)\n    Count and timestamp logging messages: disabled\n    Persistent logging: disabled\n\nNo active filter modules.\n\n    Trap logging: level ${SEV[st.logTrap]}, ${L.filter(x=>x.sev<=st.logTrap).length} message lines logged\n${hostsTxt}${hostsTxt ? "\n" : ""}        Logging Source-Interface:       VRF Name:\n\nLog Buffer (8192 bytes):\n\n` + L.map(x=>(sync ? "" : "*") + x.t + ": " + x.msg).join("\n"); }),
     X("show mac address-table", ()=>macTable()||inv()), X("show mac address-table dynamic", ()=>macTable({type:"dynamic"})||inv()),
     X("show mac address-table address A:WORD", a=>macTable({addr:a[0].toLowerCase()})||inv()), X("show mac address-table interface A:IF", a=>{ const n = parseIf(a[0]); return n ? macTable({intf:n}) : "% Invalid interface"; }),
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
@@ -673,7 +693,7 @@ function ios2Env(opts){
     X("show ip nat translations", ()=>window.NAT.show(st.nat)), X("show ip nat statistics", ()=>{ const f = st.natIfs(); return window.NAT.stats(st.nat, f.ins, f.outs); }),
     X("show dhcp lease", ()=>{ const L = ifNames().filter(n=>st.intfs[n].dhcpClient); if (!L.length) return "";
       return L.map(n=>{ const i = st.intfs[n], z = i.dhcpLease; if (!i.ip || !z) return `Temp IP addr: 0.0.0.0  for peer on Interface: ${n}\n   State is Selecting`;
-        return `Temp IP addr: ${i.ip}  for peer on Interface: ${n}\nTemp  sub net mask: ${i.mask}\n   DHCP Lease server: ${z.server}, state: 5 Bound\n   DHCP transaction id: 1A2B\n   Lease: ${z.secs} secs,  Renewal: ${Math.floor(z.secs/2)} secs,  Rebind: ${Math.floor(z.secs*7/8)} secs\nTemp default-gateway addr: ${i.dhcpGw||"0.0.0.0"}`; }).join("\n"); }),
+        return `Temp IP addr: ${i.ip}  for peer on Interface: ${n}\nTemp  sub net mask: ${i.mask}\n   DHCP Lease server: ${z.server}, state: 3 Bound\n   DHCP transaction id: 1A2B\n   Lease: ${z.secs} secs,  Renewal: ${Math.floor(z.secs/2)} secs,  Rebind: ${Math.floor(z.secs*7/8)} secs\nTemp default-gateway addr: ${i.dhcpGw||"0.0.0.0"}\n   Next timer fires after: 11:59:38\n   Retry count: 0   Client-ID: ${cidText(n)}\n   Client-ID hex dump: ${cidHex(n)}\n   Hostname: ${st.host}`; }).join("\n"); }),
     X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()), X("show ip route connected", ()=>routeTable("connected")), X("show ip route static", ()=>routeTable("static")), X("show ip route ospf", ()=>routeTable("ospf")),
     X("show ip route A:IP", a=>{ if (kind==="switch" && !st.ipRouting) return routeTable(); return routeEntryFor(a[0]); }),
     X("show ip ospf neighbor", ()=>ospfNeighbors()), X("show ip ospf interface brief", ()=>ospfIntBrief()), X("show ip ospf interface", ()=>ospfIntDetail(null)),
@@ -686,7 +706,12 @@ function ios2Env(opts){
       ss.forEach((s,i)=>{ o += `\n${s.me?"*":" "}  ${String(i+1).padEnd(2)}vty ${i}     ${pad(s.user||"",11)}idle                 00:00:0${i}  ${s.from}`; });
       return o; }),
     X("show ip ssh", ()=> st.rsa ? `SSH Enabled - version ${st.sshVer==="2"?"2.0":"1.99"}\nAuthentication timeout: 120 secs; Authentication retries: 3` : "SSH Disabled - version 1.99\n%Please create RSA keys to enable SSH (and of atleast 768 bits for SSH v2)."),
-    X("show clock", ()=>"*10:14:07.312 WAT Sun Oct 11 2026"),
+    X("show clock", ()=>clockText()), X("show clock detail", ()=>clockText(true)),
+    X("show ntp status", ()=>ntpStatus()), X("show ntp associations", ()=>ntpAssoc()),
+    X("show hosts", ()=>{ const H = Object.entries(st.iosHosts);
+      return `Name lookup view: Global\nDefault domain is ${st.domain||"not set"}\nName/address lookup uses ${st.domainLookup ? "domain service" : "static mappings"}\nName servers are ${st.nameServers.length ? st.nameServers.join(", ") : "255.255.255.255"}\n\nCodes: UN - unknown, EX - expired, OK - OK, ?? - revalidate\n       temp - temporary, perm - permanent\n       NA - Not Applicable None - Not defined\n\nHost                      Port  Flags      Age Type   Address(es)\n` + H.map(([n,ip])=>`${pad(n,26)}None  (perm, OK)  0   IP     ${ip}`).join("\n"); }),
+    X("show snmp community", ()=>Object.entries(st.snmp.communities).map(([c,v])=>`\nCommunity name: ${c}\nCommunity Index: ${c}\nCommunity SecurityName: ${c}\nstorage-type: nonvolatile\t active ${v.acl ? "access-list: " + v.acl : ""}`.trimEnd()).join("\n")),
+    X("show snmp location", ()=>st.snmp.location || ""), X("show snmp contact", ()=>st.snmp.contact || ""),
   ];
   const execCommon = [
     X("show ip dhcp binding", ()=>window.DHCP.showBinding(st.dhcp)), X("show ip dhcp pool", ()=>window.DHCP.showPool(st.dhcp)), X("show ip dhcp pool A:WORD", a=>window.DHCP.showPool(st.dhcp, a[0])),
@@ -700,6 +725,9 @@ function ios2Env(opts){
       ...execShow, ...execCommon,
       X("copy running-config startup-config", ()=>ask("Destination filename [startup-config]? ", ()=>save())),
       X("write memory", ()=>save()), X("write", ()=>save()),
+      X("copy running-config tftp:", ()=>tftpUp(()=>runningCfg(), "confg")), X("copy startup-config tftp:", ()=>st.startup ? tftpUp(()=>runningCfgFrom(st.startup), "confg") : "%Error opening nvram:/startup-config (No such file or directory)"),
+      X("copy running-config tftp", ()=>tftpUp(()=>runningCfg(), "confg")),
+      X("copy tftp: running-config", ()=>tftpDown()), X("copy tftp running-config", ()=>tftpDown()),
       X("erase startup-config", ()=>ask("Erasing the nvram filesystem will remove all configuration files! Continue? [confirm]", l=> /^n/i.test(l) ? "" : (st.startup=null, st.savedOnce=false, "[OK]\nErase of nvram: complete"))),
       X("write erase", ()=>ask("Erasing the nvram filesystem will remove all configuration files! Continue? [confirm]", l=> /^n/i.test(l) ? "" : (st.startup=null, st.savedOnce=false, "[OK]\nErase of nvram: complete"))),
       X("reload", ()=>{ const unsaved = !st.startup || JSON.stringify(snapshot())!==JSON.stringify(st.startup);
@@ -787,6 +815,34 @@ function ios2Env(opts){
       X("no ip dhcp excluded-address A:LINE", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "no ip dhcp excluded-address " + a[0]); return r.err || ""; }),
       X("ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "ip dhcp pool " + a[0]); if (r.err) return r.err; st.mode = "dhcp-config"; st.curPool = r.ctx; return ""; }),
       X("no ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "no ip dhcp pool " + a[0]); return r.err || ""; }),
+      // ---- syslog ----
+      X("logging host A:IP", a=>{ if (!st.logHosts.includes(a[0])) st.logHosts.push(a[0]); return ""; }), X("logging A:IP", a=>{ if (!st.logHosts.includes(a[0])) st.logHosts.push(a[0]); return ""; }),
+      X("no logging host A:IP", a=>{ st.logHosts = st.logHosts.filter(h=>h!==a[0]); return ""; }), X("no logging A:IP", a=>{ st.logHosts = st.logHosts.filter(h=>h!==a[0]); return ""; }),
+      X("logging trap A:WORD", a=>{ const k = sevOf(a[0]); if (k<0) return inv(); st.logTrap = k; return ""; }), X("logging trap", ()=>{ st.logTrap = 6; return ""; }), X("no logging trap", ()=>{ st.logTrap = 6; return ""; }),
+      X("logging buffered A:LINE", a=>{ st.logBuffered = a[0]; return ""; }), X("no logging buffered", ()=>{ st.logBuffered = null; return ""; }),
+      X("logging console A:WORD", a=>{ const k = sevOf(a[0]); if (k<0) return inv(); st.logConsole = k; return ""; }), X("no logging console", ()=>{ st.logConsole = null; return ""; }),
+      X("service timestamps A:LINE", ()=>""), X("no service timestamps A:LINE", ()=>""),
+      // ---- NTP and the clock ----
+      X("ntp server A:IP", a=>{ if (!st.ntpServers.includes(a[0])) st.ntpServers.push(a[0]); return ""; }), X("ntp server A:IP prefer", a=>{ if (!st.ntpServers.includes(a[0])) st.ntpServers.unshift(a[0]); return ""; }),
+      X("no ntp server A:IP", a=>{ st.ntpServers = st.ntpServers.filter(h=>h!==a[0]); return ""; }),
+      X("ntp master", ()=>{ st.ntpMaster = 8; return ""; }), X("ntp master A:NUM", a=>{ const n = +a[0]; if (!(n>=1 && n<=15)) return inv(); st.ntpMaster = n; return ""; }), X("no ntp master", ()=>{ st.ntpMaster = null; return ""; }),
+      X("ntp update-calendar", ()=>""),
+      X("clock timezone A:WORD A:LINE", a=>{ const t = a[1].trim().split(/\s+/); const h = +t[0], m = +(t[1]||0); if (!Number.isInteger(h) || h<-23 || h>23 || !(m>=0 && m<60) || t.length>2) return inv(); st.tz = {name:a[0], h, m}; return ""; }),
+      X("no clock timezone", ()=>{ st.tz = null; return ""; }),
+      // ---- SNMP ----
+      X("snmp-server community A:WORD A:LINE", a=>{ const t = a[1].trim().split(/\s+/), mode = t[0].toLowerCase(); if (mode!=="ro" && mode!=="rw") return inv(); st.snmp.communities[a[0]] = {mode, acl: t[1] || null}; return ""; }),
+      X("snmp-server community A:WORD", a=>{ st.snmp.communities[a[0]] = {mode:"ro", acl:null}; return ""; }),
+      X("no snmp-server community A:WORD", a=>{ delete st.snmp.communities[a[0]]; return ""; }), X("no snmp-server community A:WORD A:LINE", a=>{ delete st.snmp.communities[a[0]]; return ""; }),
+      X("snmp-server location A:LINE", a=>{ st.snmp.location = a[0]; return ""; }), X("no snmp-server location", ()=>{ st.snmp.location = null; return ""; }),
+      X("snmp-server contact A:LINE", a=>{ st.snmp.contact = a[0]; return ""; }), X("no snmp-server contact", ()=>{ st.snmp.contact = null; return ""; }),
+      X("snmp-server host A:IP A:LINE", a=>{ const t = a[1].trim().split(/\s+/); let v = "1", k = 0; if (t[0]==="version"){ v = t[1]; k = 2; } if (!t[k]) return "% Incomplete command."; st.snmp.hosts = st.snmp.hosts.filter(h=>h.ip!==a[0]); st.snmp.hosts.push({ip:a[0], ver:v, community:t[k]}); return ""; }),
+      X("no snmp-server host A:IP A:LINE", a=>{ st.snmp.hosts = st.snmp.hosts.filter(h=>h.ip!==a[0]); return ""; }),
+      X("snmp-server enable traps", ()=>{ st.snmp.traps = true; return ""; }), X("snmp-server enable traps A:LINE", ()=>{ st.snmp.traps = true; return ""; }), X("no snmp-server enable traps", ()=>{ st.snmp.traps = false; return ""; }),
+      // ---- DNS ----
+      X("ip host A:WORD A:IP", a=>{ st.iosHosts[a[0].toLowerCase()] = a[1]; return ""; }), X("no ip host A:WORD", a=>{ delete st.iosHosts[a[0].toLowerCase()]; return ""; }), X("no ip host A:WORD A:IP", a=>{ delete st.iosHosts[a[0].toLowerCase()]; return ""; }),
+      X("ip name-server A:LINE", a=>{ const t = a[0].trim().split(/\s+/); if (t.some(x=>!ipRe.test(x))) return inv(); for (const x of t) if (!st.nameServers.includes(x)) st.nameServers.push(x); if (st.nameServers.length > 6) st.nameServers = st.nameServers.slice(0, 6); return ""; }),
+      X("no ip name-server", ()=>{ st.nameServers = []; return ""; }), X("no ip name-server A:LINE", a=>{ const t = a[0].trim().split(/\s+/); st.nameServers = st.nameServers.filter(x=>!t.includes(x)); return ""; }),
+      X("ip dns server", ()=>{ st.dnsServer = true; return ""; }), X("no ip dns server", ()=>{ st.dnsServer = false; return ""; }),
       // ---- NAT/PAT ----
       X("ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
       X("no ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "no ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
@@ -943,6 +999,29 @@ function ios2Env(opts){
   for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","dhcp-config"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
+  const SEV = ["emergencies","alerts","critical","errors","warnings","notifications","informational","debugging"];
+  const sevOf = w => { if (/^[0-7]$/.test(w)) return +w; const k = SEV.findIndex(x=>x.startsWith(String(w).toLowerCase()) && String(w).length>=2); return k; };
+  const MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"], DAY3 = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  // the router's clock: the lab's time (or what "clock set" said), shifted by "clock timezone"; "*" = not authoritative (no NTP sync)
+  const clockMs = () => (st.clockSetAt!=null ? st.clockSetAt : hooks.now()) + (st.tz ? (st.tz.h*60 + Math.sign(st.tz.h||1)*st.tz.m)*60000 : 0);
+  const ntpState = () => (hooks.ntp && hooks.ntp(st)) || {synced: st.ntpMaster!=null, stratum: st.ntpMaster!=null ? st.ntpMaster : 16, ref: st.ntpMaster!=null ? "127.127.1.1" : null, peers: []};
+  function clockText(detail){ const t = new Date(clockMs()), n = ntpState(), two = x=>String(x).padStart(2,"0");
+    const line = `${n.synced?"":"*"}${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())}.${String(t.getUTCMilliseconds()).padStart(3,"0")} ${st.tz?st.tz.name:"UTC"} ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`;
+    return detail ? line + "\nTime source is " + (n.synced ? "NTP" : st.clockSetAt!=null ? "user configuration" : "hardware calendar") : line; }
+  function ntpStatus(){ const n = ntpState();
+    if (!n.synced) return "Clock is unsynchronized, stratum 16, no reference clock\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 0 (1/100 of seconds), resolution is 4000\nreference time is 00000000.00000000 (00:00:00.000 UTC Mon Jan 1 1900)\nclock offset is 0.0000 msec, root delay is 0.00 msec\nroot dispersion is 0.00 msec, peer dispersion is 0.00 msec\nloopfilter state is 'FSET' (Drift set from file), drift is 0.000000000 s/s\nsystem poll interval is 8, never updated.";
+    return `Clock is synchronized, stratum ${n.stratum}, reference is ${n.ref}\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 1500 (1/100 of seconds), resolution is 4000\nreference time is E6B2C1A4.3F5C28F6 (${clockText().replace(/^\*/,"")})\nclock offset is 0.0000 msec, root delay is 1.00 msec\nroot dispersion is 7.55 msec, peer dispersion is 0.12 msec\nloopfilter state is 'CTRL' (Normal Controlled Loop), drift is 0.000000000 s/s\nsystem poll interval is 64, last update was 10 sec ago.`; }
+  function ntpAssoc(){ const n = ntpState(), rows = [];
+    if (st.ntpMaster!=null) rows.push({mark: n.ref==="127.127.1.1" ? "*" : " ", addr:"127.127.1.1", ref:".LOCL.", st: st.ntpMaster - 1, reach: 377, delay:"0.000"});
+    for (const pe of (n.peers||[])) rows.push({mark: pe.sys ? "*" : pe.reach ? "+" : " ", addr: pe.ip, ref: pe.ref || ".INIT.", st: pe.reach ? pe.stratum : 16, reach: pe.reach ? 377 : 0, delay: pe.reach ? "1.000" : "0.000"});
+    return "  address         ref clock       st   when   poll reach  delay  offset   disp\n" + rows.map(r=>`${r.mark}~${pad(r.addr,16)}${pad(r.ref,16)}${String(r.st).padStart(2)}  ${String(r.reach ? 14 : "-").padStart(5)}  ${String(64).padStart(5)}  ${String(r.reach).padStart(4)}  ${r.delay.padStart(5)}   0.000  ${r.reach ? "0.123" : "15937."}`).join("\n") + (rows.length ? "\n" : "") + " * sys.peer, # selected, + candidate, - outlyer, x falseticker, ~ configured"; }
+  // name → address: the host table first, then the configured name servers (the default domain is added to a name without a dot)
+  function resolveName(name){ const nm = name.toLowerCase(), fq = !nm.includes(".") && st.domain ? nm + "." + st.domain : nm;
+    if (st.iosHosts[nm]) return {ip: st.iosHosts[nm], how:"table"};
+    if (!st.domainLookup) return {ip:null, how:"nolookup"};
+    if (!st.nameServers.length) return {ip:null, how:"broadcast", tried: fq};
+    const r = hooks.dns ? hooks.dns(fq, st.nameServers) : null;
+    return r && r.ip ? {ip:r.ip, how:"dns", server:r.server, tried:fq} : {ip:null, how:"dns", server: (r && r.server) || st.nameServers[0], tried:fq}; }
   function aclMode(){ const run = (pre, a) => { const r = window.ACL.namedCmd(st.acl, st.curAcl, pre + a.join(" ")); return r.err || ""; };
     return [ ...["permit","deny","remark"].flatMap(k=>[ X(k + " A:LINE", a=>run(k + " ", a)), X("A:NUM " + k + " A:LINE", a=>run(a[0] + " " + k + " ", [a[1]])) ]),
       X("no A:NUM", a=>run("no " + a[0], [])), X("no permit A:LINE", a=>run("no permit ", a)), X("no deny A:LINE", a=>run("no deny ", a)), X("no remark A:LINE", a=>run("no remark ", a)) ]; }
@@ -974,6 +1053,20 @@ function ios2Env(opts){
   function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; st.ospfRidActive = null; st.ospfResets = (st.ospfResets||0) + 1; if (st.confregNext) st.confreg = st.confregNext;
     if (hooks.clearMac) hooks.clearMac(); return {reload:true, text:"\n%SYS-5-RELOAD: Reload requested by console. Reload Reason: Reload Command.\n\n...System restarting...\n\n" + (st.startup ? `${st.host} con0 is now available\n\nPress RETURN to get started.` : "         --- System Configuration Dialog ---\n\nWould you like to enter the initial configuration dialog? [yes/no]: no\n\nPress RETURN to get started.") + (st.banner?`\n\n${st.banner}`:"")}; }
   function ask(prompt, handle){ st.pending = {prompt, handle}; return {ask:prompt}; }
+  // TFTP: back the configuration up to a server, or merge a saved file into the running-config
+  function tftpUp(text, sfx){ return ask("Address or name of remote host []? ", h=>{ const host = h.trim(); if (!host) return "%Error parsing filename (Bad IP address or host name)";
+    const def = `${st.host.toLowerCase()}-${sfx}`; return ask(`Destination filename [${def}]? `, f=>{ const file = f.trim() || def, body = text();
+      const r = hooks.tftpPut ? hooks.tftpPut(host, file, body) : {ok:false};
+      if (!r.ok) return `%Error opening tftp://${host}/${file} (Timed out)`;
+      const n = body.length; return `!!\n${n} bytes copied in 0.512 secs (${Math.round(n/0.512)} bytes/sec)`; }); }); }
+  function tftpDown(){ return ask("Address or name of remote host []? ", h=>{ const host = h.trim(); if (!host) return "%Error parsing filename (Bad IP address or host name)";
+    return ask("Source filename []? ", f=>{ const file = f.trim(); if (!file) return "%Error parsing filename (Bad IP address or host name)";
+      return ask("Destination filename [running-config]? ", ()=>{ const r = hooks.tftpGet ? hooks.tftpGet(host, file) : {ok:false};
+        if (!r.ok) return `Accessing tftp://${host}/${file}...\n%Error opening tftp://${host}/${file} (${r.why==="nofile" ? "No such file or directory" : "Timed out"})`;
+        const lines = r.text.split("\n").filter(l=>l.trim() && !/^(!|Building configuration|Current configuration|version |end$)/.test(l.trim()));
+        const saved = st.mode; st.mode = "config"; for (const l of lines) execInner(l.replace(/\s+$/, "")); st.mode = saved; st.cur = null; st.curList = null;
+        const n = r.text.length;
+        return `Accessing tftp://${host}/${file}...\nLoading ${file} from ${host} (via ${r.via||"GigabitEthernet0/0"}): !\n[OK - ${n} bytes]\n\n${n} bytes copied in 0.312 secs (${Math.round(n/0.312)} bytes/sec)\n%SYS-5-CONFIG_I: Configured from tftp://${host}/${file} by console`; }); }); }); }
   function goEnable(){
     const need = st.enableSecret || st.enablePassword;
     if (!need){ st.mode="priv"; return ""; }
@@ -982,6 +1075,10 @@ function ios2Env(opts){
     st.noEcho=true; return ask("Password: ", tryPw);
   }
   function doPing(ip, srcArg){
+    if (!ipRe.test(ip) && !I6.valid(ip) && /^[a-z0-9][a-z0-9.-]*$/i.test(ip)){ const r = resolveName(ip);
+      if (r.ip){ const head = r.how==="dns" ? `Translating "${ip}"...domain server (${r.server}) [OK]\n\n` : "";
+        const res = doPing(r.ip, srcArg); return typeof res==="string" ? head + res : res; }
+      if (r.how==="dns") return `Translating "${ip}"...domain server (${r.server})\n% Unrecognized host or address, or protocol not running.`; }
     if (I6.valid(ip)){ if (!srcArg) return doPing6(ip, null, null);
       // extended ping: "source" names an interface or one of our own addresses — it sets the source, not the way out
       const n = parseIf(srcArg), mine = ifNames().filter(x=>up(x) && v6on(x));
@@ -1157,6 +1254,7 @@ function ios2Env(opts){
   st.log = [];          // [{cmd, out, mode}] — what the learner typed and saw (text output only), newest last
   st.exec = function(line){
     const before = st.mode, r = execInner(line);
+    { const txt = typeof r==="string" ? r : (r && r.text) || ""; for (const l of txt.split("\n")) if (/^%[A-Z0-9_]+-[0-7]-[A-Z0-9_]+:/.test(l.trim())) hooks.emit(l.trim()); }
     if (typeof r==="string" || (r && r.text)) { st.log.push({cmd:line, out: typeof r==="string" ? r : r.text, mode:before}); if (st.log.length>200) st.log.shift(); }
     return r;
   };

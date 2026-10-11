@@ -153,7 +153,14 @@ function linkUpAt(B, ref){ const c = cableAt(B,ref); return !!(c && CABLES[c.typ
 /* ---- Layer 2 core: 802.1Q tagging, DTP, EtherChannel, Spanning Tree (PVST+/Rapid PVST+), BPDU guard, storms ---- */
 const isSw = d => d && d.kind==="switch";
 const isRouterDev = d => d && (d.kind==="router" || (d.kind==="switch" && d.env.ipRouting));
-function syslog(B, d, msg, force){ const L = B.syslog[d.id] = B.syslog[d.id] || []; if (!force && L.some(x=>x.msg===msg)) return; B.clock = (B.clock||0) + 1; const t = 14*60 + B.clock*7; L.push({t:`${String(Math.floor(t/60)%60).padStart(2,"0")}:${String(t%60).padStart(2,"0")}.${String((B.clock*137)%1000).padStart(3,"0")}`, msg}); if (L.length>60) L.shift(); }
+const LMON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function syslog(B, d, msg, force){ const L = B.syslog[d.id] = B.syslog[d.id] || []; if (!force && L.some(x=>x.msg===msg)) return; B.clock = (B.clock||0) + 1;
+  const tm = new Date((B.now || Date.UTC(2026, 9, 12, 8, 30)) + B.clock*7000 + (B.clock*137)%1000), two = x=>String(x).padStart(2,"0");
+  const t = `${LMON[tm.getUTCMonth()]} ${two(tm.getUTCDate())} ${two(tm.getUTCHours())}:${two(tm.getUTCMinutes())}:${two(tm.getUTCSeconds())}.${String(tm.getUTCMilliseconds()).padStart(3,"0")}`;
+  const sv = (msg.match(/^%[A-Z0-9_]+-([0-7])-/)||[])[1], sev = sv==null ? 6 : +sv, E = d.env;
+  const to = E && E.logHosts && sev <= (E.logTrap==null ? 6 : E.logTrap) ? E.logHosts.slice() : [];
+  const trap = E && E.snmp && E.snmp.traps && /%LINK-3-UPDOWN|%LINEPROTO-5-UPDOWN/.test(msg) ? E.snmp.hosts.map(h=>h.ip) : [];
+  L.push({t, msg, sev, to, trap}); if (L.length>60) L.shift(); }
 const portNum = (d, pid) => d.ports.findIndex(p=>p.id===pid) + 1;
 // physical link usable for frames: cable present and link up (speed/optics/admin/err-disabled)
 const physUp = (B, ref) => linkUpAt(B, ref);
@@ -492,7 +499,7 @@ function sendIp(B, node, dstIp, label, pkt0){
           if (t.drop){ res.kind = "timeout"; res.log.push(`<b>NAT</b> on ${cur.dev.label}: ${pkt.src} is covered by the NAT rule but can't be translated (${t.drop==="pool-exhausted" ? "the NAT pool has no free address" : t.drop}) — the packet is dropped`); return res; }
           if (t.untranslated) res.log.push(`<b>NAT</b> on ${cur.dev.label}: ${pkt.src} isn't matched by any NAT rule's access list — it leaves untranslated, with a private source address nobody on the internet can reply to`);
           else res.log.push(`<b>NAT</b> on ${cur.dev.label} (${shortIf(cur.inIf)} inside → ${shortIf(r.ios)} outside): source ${pkt.src}${natPort(pkt, pkt.sport)} → ${t.pkt.src}${natPort(pkt, t.pkt.sport)} (inside local → inside global)`);
-          pkt.src = t.pkt.src; pkt.sport = t.pkt.sport; } }
+          if (!t.untranslated) (res.natDevs = res.natDevs || new Set()).add(cur.dev); pkt.src = t.pkt.src; pkt.sport = t.pkt.sport; } }
       cur = routerNodeFor(cur.dev, r.ios); nh = r.nh;
     } else {
       if (cur.ip===dstIp){ res.ok = true; res.final = cur; return res; }
@@ -512,7 +519,7 @@ function sendIp(B, node, dstIp, label, pkt0){
     if (to.ios && isRouterDev(to.dev)){
       if (pkt && to.dev.kind==="router" && window.NAT && to.dev.env.intfs[to.ios].natOut){
         const t = window.NAT.inbound(to.dev.env.nat, {src:pkt.src, dst:dstIp, proto:pkt.proto, sport:pkt.sport, dport:pkt.dport, err:pkt.err});
-        if (t){ res.log.push(`<b>NAT</b> on ${to.dev.label} (arriving on outside ${shortIf(to.ios)}): destination ${dstIp}${natPort(pkt, pkt.dport)} → ${t.pkt.dst}${natPort(pkt, t.pkt.dport)} (inside global → inside local)`); dstIp = t.pkt.dst; pkt.dport = t.pkt.dport; } }
+        if (t){ (res.natDevs = res.natDevs || new Set()).add(to.dev); res.log.push(`<b>NAT</b> on ${to.dev.label} (arriving on outside ${shortIf(to.ios)}): destination ${dstIp}${natPort(pkt, pkt.dport)} → ${t.pkt.dst}${natPort(pkt, t.pkt.dport)} (inside global → inside local)`); dstIp = t.pkt.dst; pkt.dport = t.pkt.dport; } }
       const own = Object.entries(to.dev.env.intfs).find(([nm,i])=>(i.ip===dstIp || hsrpOwnsIp(B, to.dev, nm, dstIp)) && !i.shut);
       if (own){ res.ok = true; res.final = {dev:to.dev, ios:own[0]}; seen(dstIp); res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)} — it's addressed to the router itself`); return res; }
       cur = {dev:to.dev, inIp: to.dev.env.intfs[to.ios].ip, inIf: to.ios}; seen(to.dev.env.intfs[to.ios].ip); ttl--; res.routers = (res.routers||0)+1; if (ttl<=0){ res.kind = "ttlexpired"; res.unreachFrom = cur.inIp; res.log.push(`${to.dev.label} decremented the TTL to 0 — it drops the packet and sends ICMP <b>Time Exceeded</b> ("TTL expired in transit") back to the sender. A packet that circles like this is a <b>routing loop</b>.`); return res; } res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
@@ -538,7 +545,10 @@ function ping(B, node, dstIp){
     frames = frames.concat(back.frames); log = log.concat(back.log);
     ok = back.ok && !!back.final && back.final.dev===node.dev; if (!ok){ kind = "timeout"; log.push(`The reply couldn't get back to ${node.ip} — check the far end's default gateway and the return path`); }
     var replyTtl = (go.final.dev.env ? 255 : 128) - (back.routers||0);
+    var natBack = back.natDevs;
   }
+  // a Windows ping sends 4 echoes and an IOS ping 5: the extra packets are NAT hits
+  { const n = node.dev.env ? 5 : 4; for (const r of new Set([...(go.natDevs||[]), ...(natBack||[])])) if (r.env && r.env.nat) r.env.nat.hits += (n-1) * (ok ? 2 : 1); }
   B.frames = frames; B.log = log;
   return {ok, kind, ttl: replyTtl, unreachFrom: go.unreachFrom, firstMiss: go.arpedFirst && node.dev.kind!=="pc" && node.dev.kind!=="server" && node.dev.kind!=="laptop"};
 }
@@ -989,6 +999,121 @@ const WDAY = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Satur
 const winTime = ms => { const t = new Date(ms); let h = t.getUTCHours(); const ap = h<12 ? "AM" : "PM"; h = h%12 || 12;
   return `${WDAY[t.getUTCDay()]}, ${WMON[t.getUTCMonth()]} ${t.getUTCDate()}, ${t.getUTCFullYear()} ${h}:${String(t.getUTCMinutes()).padStart(2,"0")}:${String(t.getUTCSeconds()).padStart(2,"0")} ${ap}`; };
 
+/* ---- IP services: NTP, DNS, TFTP, syslog servers, SNMP ---- */
+const routerFrom = d => d.kind==="router" || (d.env && d.env.ipRouting) ? {dev:d} : (()=>{ const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut); return svi ? sviNode(d, svi) : {dev:d}; })();
+// a UDP request/reply between two devices (no frames or log kept): both directions must route
+function udpTwoWay(B, fromNode, ip){
+  const keep = [B.frames, B.log, B.step]; try {
+    const go = sendIp(B, fromNode, ip, "UDP request"); if (!go.ok) return {ok:false};
+    const rt = !fromNode.ip && fromNode.dev.env && fromNode.dev.env.lookup ? fromNode.dev.env.lookup(ip) : null, srcIp = fromNode.ip || (rt ? fromNode.dev.env.intfs[rt.ios].ip : null);   // a router sends from the interface towards the target
+    if (!srcIp) return {ok:false};
+    const back = sendIp(B, nodeFromFinal(B, go.final), go.pkt ? go.pkt.src : srcIp, "UDP reply");
+    const via = fromNode.dev.env && fromNode.dev.env.lookup && fromNode.dev.env.lookup(ip) ? fromNode.dev.env.lookup(ip).ios : null;
+    return {ok: back.ok && !!back.final && back.final.dev===fromNode.dev, final: go.final, srcIp, via};
+  } finally { [B.frames, B.log, B.step] = keep; }
+}
+// NTP: a router is synchronised if it is a master, or one of its servers answers and is itself synchronised (stratum + 1)
+function ntpOf(B, d, depth){
+  const E = d.env, key = (B._l3 ? B._l3.sig : "") + "|" + d.id; B._ntp = B._ntp || {}; if (B._ntp[key] && depth===0) return B._ntp[key];
+  const res = {synced:false, stratum:16, ref:null, peers:[]};
+  if (E.ntpMaster!=null){ res.synced = true; res.stratum = E.ntpMaster; res.ref = "127.127.1.1"; }
+  if (depth < 4) for (const ip of (E.ntpServers||[])){
+    const pe = {ip, reach:false, stratum:16, ref:".INIT."}; res.peers.push(pe);
+    const o = ipOwner(B, ip); if (!o) continue;
+    const w = udpTwoWay(B, routerFrom(d), ip); if (!w.ok) continue;
+    let up = null; if (o.dev.env) up = ntpOf(B, o.dev, depth+1); else if (o.dev.services && o.dev.services.ntp) up = {synced:true, stratum: o.dev.services.ntp.stratum || 1, ref: o.dev.services.ntp.ref || ".GPS."};
+    if (!up || !up.synced) { pe.reach = true; pe.stratum = 16; pe.ref = ".INIT."; continue; }
+    pe.reach = true; pe.stratum = up.stratum; pe.ref = up.ref;
+    if (up.stratum + 1 < res.stratum){ res.synced = true; res.stratum = up.stratum + 1; res.ref = ip; for (const q of res.peers) q.sys = false; pe.sys = true; } }
+  if (res.ref==="127.127.1.1") res.peers.forEach(q=>q.sys = false);
+  if (depth===0) B._ntp[key] = res; return res;
+}
+// DNS: who answers a query for <name> sent to <ip>: a server with DNS records, or a router with "ip dns server" (host table, then its own name servers)
+function dnsAnswer(B, dev, name, depth){
+  const nm = name.toLowerCase();
+  if (!dev.env){ const z = dev.services && dev.services.dns; if (!z) return {refused:true}; const recs = z.records || {}; const ip = recs[nm];
+    return ip ? {ip, auth: z.authoritative!==false} : {nx:true}; }
+  if (!dev.env.dnsServer) return {refused:true};
+  const h = dev.env.iosHosts && (dev.env.iosHosts[nm] || dev.env.iosHosts[nm.split(".")[0]]); if (h) return {ip:h, auth:true};
+  if (depth < 2) for (const ip of (dev.env.nameServers||[])){ const r = dnsAsk(B, routerFrom(dev), ip, nm, depth+1); if (r.reach) return r.ip ? {ip:r.ip, auth:false} : {nx:true}; }
+  return {nx:true};
+}
+function dnsAsk(B, fromNode, ip, name, depth){
+  const o = ipOwner(B, ip); if (!o) return {reach:false};
+  const w = udpTwoWay(B, fromNode, ip); if (!w.ok) return {reach:false};
+  const a = dnsAnswer(B, o.dev, name, depth); if (a.refused) return {reach:false};
+  return {reach:true, ip:a.ip||null, auth:!!a.auth, nx:!!a.nx, server:ip, srvName: o.dev.services && o.dev.services.dns && o.dev.services.dns.name};
+}
+// Windows: add the connection's DNS suffix to a single-label name, ask the DNS servers in order
+function resolveWin(B, d, name){
+  const fq = !name.includes(".") && d.domain ? (name + "." + d.domain).toLowerCase() : name.toLowerCase();
+  if (!d.ip || !(d.dns||[]).length) return {ip:null, fq, why:"noserver"};
+  for (const ip of d.dns){ const r = dnsAsk(B, hostNode(d), ip, fq, 0); if (r.reach) return Object.assign(r, {fq}); }
+  return {ip:null, fq, why:"timeout", server:d.dns[0]};
+}
+function nslookupText(B, d, name, server){
+  const srv = server || (d.dns||[])[0];
+  if (!srv) return "*** Default servers are not available\nServer:  UnKnown\nAddress:  ::1\n\n*** UnKnown can't find " + name + ": No response from server";
+  const fq = !name.includes(".") && d.domain ? (name + "." + d.domain).toLowerCase() : name.toLowerCase();
+  const r = d.ip ? dnsAsk(B, hostNode(d), srv, fq, 0) : {reach:false};
+  const head = `Server:  ${r.srvName || "UnKnown"}\nAddress:  ${srv}\n\n`;
+  if (!r.reach) return "DNS request timed out.\n    timeout was 2 seconds.\nServer:  UnKnown\nAddress:  " + srv + "\n\nDNS request timed out.\n    timeout was 2 seconds.\nDNS request timed out.\n    timeout was 2 seconds.\n*** Request to UnKnown timed-out";
+  if (!r.ip) return head + `*** ${r.srvName || "UnKnown"} can't find ${fq}: Non-existent domain`;
+  return head + (r.auth ? "" : "Non-authoritative answer:\n") + `Name:    ${fq}\nAddress:  ${r.ip}\n`;
+}
+// TFTP: the router copies to/from a server running a TFTP service, if both directions route
+function tftpTarget(B, d, host){
+  let ip = host; if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip)){ const r = d.env.resolveName ? d.env.resolveName(host) : {}; ip = r.ip; } if (!ip) return {ok:false};
+  const o = ipOwner(B, ip); if (!o || o.dev.env || !o.dev.services || !o.dev.services.tftp) { const w0 = o ? udpTwoWay(B, routerFrom(d), ip) : null; return {ok:false, why: w0 && w0.ok ? "refused" : "timeout"}; }
+  const w = udpTwoWay(B, routerFrom(d), ip); if (!w.ok) return {ok:false, why:"timeout"};
+  return {ok:true, srv:o.dev, via:w.via};
+}
+// what a syslog server / SNMP manager has received: messages addressed to it, from routers that can reach it (UDP, one way)
+function oneWay(B, d, ip){ const keep = [B.frames, B.log, B.step]; try { const go = sendIp(B, routerFrom(d), ip, "UDP"); return go.ok; } finally { [B.frames, B.log, B.step] = keep; } }
+function received(B, srv, kind){
+  const out = []; if (!srv.ip) return out;
+  for (const id of B.order){ const d = B.devs[id]; if (!d.env) continue; const L = (B.syslog[id]||[]).filter(x=>(kind==="trap" ? x.trap : x.to||[]).includes(srv.ip)); if (!L.length) continue;
+    if (!oneWay(B, d, srv.ip)) continue; const r = d.env.lookup ? d.env.lookup(srv.ip) : null; const src = r && d.env.intfs[r.ios] ? d.env.intfs[r.ios].ip : "?";
+    for (const x of L) out.push({from:d.label, src, t:x.t, msg:x.msg, sev:x.sev}); }
+  return out;
+}
+// SNMP tools on a management server (Net-SNMP): snmpget / snmpwalk / snmpset -v2c -c <community> <agent> <object>
+const SNMPOBJ = { sysDescr:"SNMPv2-MIB::sysDescr", sysUpTime:"DISMAN-EVENT-MIB::sysUpTimeInstance", sysContact:"SNMPv2-MIB::sysContact", sysName:"SNMPv2-MIB::sysName", sysLocation:"SNMPv2-MIB::sysLocation", ifDescr:"IF-MIB::ifDescr", ifOperStatus:"IF-MIB::ifOperStatus", ifAdminStatus:"IF-MIB::ifAdminStatus" };
+function snmpTool(B, d, raw){
+  const t = raw.trim().split(/\s+/), cmd = t[0].toLowerCase(); let ver = null, comm = null; const rest = [];
+  for (let k = 1; k < t.length; k++){ if (t[k]==="-v"){ ver = t[++k]; continue; } if (/^-v/.test(t[k])){ ver = t[k].slice(2); continue; } if (t[k]==="-c"){ comm = t[++k]; continue; } rest.push(t[k]); }
+  const agent = rest[0], objs = rest.slice(1);
+  if (!agent || !comm) return `USAGE: ${cmd} [OPTIONS] AGENT OID [OID]...\n  -v 1|2c|3\t\tspecifies SNMP version to use\n  -c COMMUNITY\t\tset the community string`;
+  if (ver!=="2c" && ver!=="1") return "snmp: this lab supports -v2c (and -v1)";
+  const timeout = `Timeout: No Response from ${agent}.`;
+  const o = ipOwner(B, agent); if (!o || !o.dev.env || !d.ip) return timeout;
+  const R = o.dev, E = R.env, c = E.snmp && E.snmp.communities[comm];
+  if (!c || !udpTwoWay(B, hostNode(d), agent).ok) return timeout;
+  if (c.acl && window.ACL && E.acl.lists[c.acl] && !window.ACL.check(E.acl, c.acl, {src:d.ip}, false).permit) return timeout;
+  const ifs = Object.keys(E.intfs).filter(n=>!n.startsWith("Port-channel")), val = (base, idx) => {
+    if (base==="sysDescr") return "STRING: Cisco IOS Software [Cupertino], ISR Software (X86_64_LINUX_IOSD-UNIVERSALK9-M), Version 17.9.4a, RELEASE SOFTWARE (fc3)";
+    if (base==="sysUpTime") return "Timeticks: (1234567) 3:25:45.67";
+    if (base==="sysContact") return "STRING: " + (E.snmp.contact||""); if (base==="sysLocation") return "STRING: " + (E.snmp.location||"");
+    if (base==="sysName") return "STRING: " + E.host + (E.domain ? "." + E.domain : "");
+    const n = ifs[idx-1]; if (!n) return null;
+    if (base==="ifDescr") return "STRING: " + n;
+    if (base==="ifAdminStatus") return E.intfs[n].shut ? "INTEGER: down(2)" : "INTEGER: up(1)";
+    if (base==="ifOperStatus") return E.isUp(n) ? "INTEGER: up(1)" : "INTEGER: down(2)"; return null; };
+  const parse = s => { const m = String(s).replace(/^[A-Za-z0-9-]+::/, "").match(/^(\w+)(?:\.(\d+))?$/); return m && SNMPOBJ[m[1]] ? {base:m[1], idx: m[2]==null ? null : +m[2]} : null; };
+  const line = (base, idx) => { const v = val(base, idx); const nm = base==="sysUpTime" ? SNMPOBJ[base] + ".0" : `${SNMPOBJ[base]}.${idx}`; return v==null ? `${nm} = No Such Instance currently exists at this OID` : `${nm} = ${v}`; };
+  if (cmd==="snmpwalk"){ const w = objs[0] ? objs[0].replace(/^[A-Za-z0-9-]+::/, "") : "system";
+    const bases = w==="system" ? ["sysDescr","sysUpTime","sysContact","sysName","sysLocation"] : SNMPOBJ[w] ? [w] : null; if (!bases) return `${objs[0]}: Unknown Object Identifier`;
+    return bases.flatMap(b=> b.startsWith("if") ? ifs.map((_,k)=>line(b, k+1)) : [line(b, 0)]).join("\n"); }
+  if (cmd==="snmpget"){ if (!objs.length) return "snmpget: Missing object name"; return objs.map(x=>{ const q = parse(x); if (!q) return `${x}: Unknown Object Identifier`; return line(q.base, q.idx==null ? 0 : q.idx); }).join("\n"); }
+  if (cmd==="snmpset"){ const q = parse(objs[0]||""), ty = objs[1], v = objs.slice(2).join(" ").replace(/^"|"$/g, "");
+    if (!q || ty!=="s" || !v) return "snmpset: usage: snmpset ... AGENT OID TYPE VALUE   (e.g. sysLocation.0 s \"Lagos HQ, rack 2\")";
+    if (c.mode!=="rw") return `Error in packet.\nReason: noAccess\nFailed object: ${SNMPOBJ[q.base]}.${q.idx||0}`;
+    if (q.base==="sysLocation") E.snmp.location = v; else if (q.base==="sysContact") E.snmp.contact = v; else if (q.base==="sysName") E.host = v.split(".")[0];
+    else return `Error in packet.\nReason: notWritable (That object does not support modification)\nFailed object: ${SNMPOBJ[q.base]}.${q.idx||0}`;
+    return `${SNMPOBJ[q.base]}.${q.idx||0} = STRING: ${v}`; }
+  return null;
+}
+
 /* ---- hooks the IOS engine calls ---- */
 function makeHooks(B, d){
   const l3 = () => computeL3(B), os = () => l3().ospf[d.id] || null;
@@ -1037,7 +1162,13 @@ function makeHooks(B, d){
       return { isRoot: x.isRoot, root: x.root, bridge: x.bridge, rootCost: x.rootCost, rootPort: x.rootLp ? name(x.rootLp) : null, rootPortNum: x.rootLp ? x.info[x.rootLp].pid.num : 0, ports }; },
     stpState: (name, v) => { const S = l2State(B); const p = d.ports.find(q=>q.ios===name); const lp = name.startsWith("Port-channel") ? "po"+name.slice(12) : p ? (S.bundles.memberOf[d.id+":"+p.id] || p.id) : null; return lp ? stpStateOf(S, d, lp, +v) : "FWD"; },
     ether: () => { const S = l2State(B); return Object.values(S.bundles[d.id]||{}).map(G=>({group:G.group, proto:G.proto, up:G.up, members:G.members.map(m=>({name:m.ios, flag:m.flag}))})); },
-    logs: () => (B.syslog[d.id]||[]).map(x=>`${x.t}: ${x.msg}`),
+    logs: () => (B.syslog[d.id]||[]).slice(),
+    emit: msg => syslog(B, d, msg, true),
+    now: () => B.now || Date.UTC(2026, 9, 12, 8, 30),
+    ntp: st => { computeL3(B); return ntpOf(B, d, 0); },   // refresh first: the cached answer is keyed to the network state
+    dns: (name, servers) => { const fromNode = routerFrom(d); for (const ip of servers){ const r = dnsAsk(B, fromNode, ip, name, 0); if (r.reach) return {ip:r.ip, server:ip}; } return {ip:null, server:servers[0]}; },
+    tftpPut: (host, file, body) => { const t = tftpTarget(B, d, host); if (!t.ok) return t; t.srv.services.tftp.files = t.srv.services.tftp.files || {}; t.srv.services.tftp.files[file] = body; return {ok:true, via:t.via}; },
+    tftpGet: (host, file) => { const t = tftpTarget(B, d, host); if (!t.ok) return t; const f = (t.srv.services.tftp.files||{})[file]; return f==null ? {ok:false, why:"nofile"} : {ok:true, text:f, via:t.via}; },
     lldp: () => {
       const out = [];
       for (const p of d.ports){ if (!p.ios) continue; const c = cableAt(B, d.id+":"+p.id); if (!c || !linkState(B,c).up) continue;
@@ -1072,7 +1203,7 @@ function pcExec(B, d, line){
   const l = raw.toLowerCase(), t = raw.split(/\s+/);
   const media = linkUpAt(B, hostNode(d).ref);
   if (!raw) return "";
-  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ping <ip> · tracert <ip> · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
+  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ipconfig /flushdns · ping <ip|name> · tracert <ip|name> · nslookup <name> [server] · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
   if (l==="cls") return {clear:true};
   if (l==="ipconfig /release" || l==="ipconfig /renew"){
     const head = "\nWindows IP Configuration\n\n";
@@ -1112,6 +1243,17 @@ function pcExec(B, d, line){
   }
   if (/^arp\s+-d/.test(l)){ B.arp[d.id] = {}; return ""; }
   const RTT = "\nApproximate round trip times in milli-seconds:\n    Minimum = 0ms, Maximum = 0ms, Average = 0ms";
+  if (t[0].toLowerCase()==="nslookup"){ if (!t[1]) return "Default Server:  UnKnown\nAddress:  " + ((d.dns||[])[0]||"::1") + "\n\n> (interactive mode isn't available in this lab — use nslookup <name> [server])";
+    const r = nslookupText(B, d, t[1], t[2]); return r; }
+  if (l==="ipconfig /flushdns") return "\nWindows IP Configuration\n\nSuccessfully flushed the DNS Resolver Cache.";
+  if (/^snmp(get|walk|set)$/i.test(t[0])){ if (!(d.services && d.services.nms)) return `'${t[0]}' is not recognized as an internal or external command,\noperable program or batch file.`; return snmpTool(B, d, raw); }
+  if (/^(ping|tracert)$/i.test(t[0]) && t.length>=2){ const tgt = t[t.length-1];
+    if (ipToInt(tgt)==null && !(window.IP6 && window.IP6.valid(tgt.replace(/%\d+$/,""))) && /^[a-z0-9][a-z0-9.-]*$/i.test(tgt) && /[a-z]/i.test(tgt)){
+      const r = media ? resolveWin(B, d, tgt) : {ip:null};
+      if (!r.ip) return t[0].toLowerCase()==="ping" ? `Ping request could not find host ${tgt}. Please check the name and try again.` : `Unable to resolve target system name ${tgt}.`;
+      const o = pcExec(B, d, t.slice(0, -1).concat(r.ip).join(" "));
+      if (typeof o!=="string") return o;
+      return o.replace(`Pinging ${r.ip} with`, `Pinging ${r.fq} [${r.ip}] with`).replace(`Tracing route to ${r.ip} over a maximum of 30 hops`, `Tracing route to ${r.fq} [${r.ip}]\nover a maximum of 30 hops:`); } }
   const v6arg = t.slice(1).find(x=>window.IP6 && window.IP6.valid(x.replace(/%\d+$/,"")));
   if ((t[0].toLowerCase()==="ping" || t[0].toLowerCase()==="tracert") && v6arg){
     const ip = window.IP6.str(window.IP6.parse(v6arg.replace(/%\d+$/,"")));
@@ -1408,6 +1550,7 @@ function mount(el, cfg, tasks, onWin){
       <div class="bn-devs">${B.order.map(id=>{ const d = B.devs[id];
         const btns = [];
         if (d.kind==="pc"||d.kind==="server"||d.kind==="laptop"){ btns.push(`<button class="btn sm ghost" data-tool="ip:${id}">IP settings</button>`); if (v6InPlay(B, cfg)) btns.push(`<button class="btn sm ghost" data-tool="ip6:${id}">IPv6 settings</button>`); btns.push(`<button class="btn sm ghost" data-tool="cmd:${id}">Command Prompt</button>`); }
+        if (d.kind==="server" && d.services) btns.push(`<button class="btn sm ghost" data-tool="svc:${id}">Server services</button>`);
         if (d.kind==="laptop") btns.push(`<button class="btn sm ghost" data-tool="putty:${id}">Terminal app (PuTTY)</button>`);
         if (cfg.builder && d.env) btns.push(`<button class="btn sm ghost" data-tool="cli:${id}">CLI</button>`);
         if (cfg.builder) btns.push(`<button class="btn sm ghost" data-rename="${id}">Rename</button>`, `<button class="btn sm ghost" data-del="${id}">Delete</button>`);
@@ -1431,6 +1574,12 @@ function mount(el, cfg, tasks, onWin){
   function toolHtml(){
     if (!tool) return "";
     const [kind, id] = tool.split(":"), d = B.devs[id];
+    if (kind==="svc"){ const S = d.services || {}, part = [];
+      if (S.dns){ const R = Object.entries(S.dns.records||{}); part.push(`<h4>DNS server${S.dns.authoritative===false ? " (public resolver)" : ""}</h4>` + (R.length ? `<table class="bn-tab"><tr><th>Name</th><th>Type</th><th>Address</th></tr>${R.map(([n,ip])=>`<tr><td>${esc(n)}</td><td>A</td><td>${esc(ip)}</td></tr>`).join("")}</table>` : "<p>No records.</p>")); }
+      if (S.tftp){ const F = Object.entries(S.tftp.files||{}); part.push("<h4>TFTP server — files</h4>" + (F.length ? F.map(([n,b])=>`<details><summary><code>${esc(n)}</code> · ${b.length} bytes</summary><pre class="bn-pre">${esc(b)}</pre></details>`).join("") : "<p>No files yet.</p>")); }
+      if (S.syslog){ const M = received(B, d, "log"); part.push("<h4>Syslog server — messages received (UDP 514)</h4>" + (M.length ? `<table class="bn-tab"><tr><th>Time</th><th>From</th><th>Sev</th><th>Message</th></tr>${M.map(m=>`<tr><td>${esc(m.t)}</td><td>${esc(m.src)} (${esc(m.from)})</td><td>${m.sev}</td><td><code>${esc(m.msg)}</code></td></tr>`).join("")}</table>` : "<p>Nothing received yet.</p>")); }
+      if (S.nms){ const M = received(B, d, "trap"); part.push("<h4>SNMP manager — traps received (UDP 162)</h4>" + (M.length ? `<table class="bn-tab"><tr><th>Time</th><th>From</th><th>Trap</th></tr>${M.map(m=>`<tr><td>${esc(m.t)}</td><td>${esc(m.src)} (${esc(m.from)})</td><td>${/changed state to down/.test(m.msg) ? "IF-MIB::linkDown" : "IF-MIB::linkUp"} — ${esc((m.msg.match(/Interface (\S+?),/)||[])[1]||"")}</td></tr>`).join("")}</table>` : "<p>No traps yet.</p>") + "<p class=\"muted\">This server has the Net-SNMP tools: open its Command Prompt and use snmpget / snmpwalk / snmpset.</p>"); }
+      return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · Server services</div>${part.join("")}<div class="btnrow"><button class="btn sm ghost" data-tool="">Close</button></div></div>`; }
     if (kind==="ip6"){ const v = d.ip6 || {auto:true};
       return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · Internet Protocol Version 6 (TCP/IPv6) Properties</div>
       <div class="bn-form"><label><input type="radio" name="bn6m" value="auto" ${v.auto?"checked":""}> Obtain an IPv6 address automatically</label><label><input type="radio" name="bn6m" value="static" ${v.auto?"":"checked"}> Use the following IPv6 address:</label>
@@ -1584,6 +1733,11 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
   // IP services (Module 7+)
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
+  syslogGot: (B, srv, re) => received(B, B.devs[srv], "log").some(m=>re.test(m.msg)),
+  trapGot: (B, srv, re) => received(B, B.devs[srv], "trap").some(m=>re.test(m.msg)),
+  tftpFile: (B, srv, name) => { const S = B.devs[srv] && B.devs[srv].services; const f = S && S.tftp && S.tftp.files; return f ? (name ? f[name]!=null : Object.keys(f).length > 0) : false; },
+  ntpSynced: (B, r) => { const d = B.devs[r]; computeL3(B); return !!(d && d.env && ntpOf(B, d, 0).synced); },
+  resolved: (B, pc, name) => { const d = B.devs[pc]; return !!(d && resolveWin(B, d, name).ip); },
   natHas: (B, r, re) => { const d = B.devs[r]; return !!(d && d.env && d.env.nat && re.test(window.NAT.show(d.env.nat))); },
   ifLeased: (B, r, ios) => { const d = B.devs[r]; const i = d && d.env && d.env.intfs[ios]; return i && i.dhcpClient && i.ip ? i.ip : null; },
   dhcpBound: (B, r, ip) => { const d = B.devs[r]; return !!(d && d.env && d.env.dhcp && d.env.dhcp.bindings.some(b=>!ip || b.ip===ip)); },

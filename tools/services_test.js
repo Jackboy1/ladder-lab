@@ -161,5 +161,101 @@ const mkNat = (edgeX, extraPcs) => Bench.create({ devices: [
   const r = ["p1","p2","p3"].map(id=>pc(B, id, "ping 198.51.100.10"));
   ok(/Reply from/.test(r[0]) && /Reply from/.test(r[1]) && /Request timed out/.test(r[2]) && /%NAT-6-ADDR_ALLOC_FAILURE/.test(cli(B, "edge", "show logging")), "dynamic pool of 2 addresses: the third PC is dropped and EDGE logs ADDR_ALLOC_FAILURE", r.join("\n---\n") + cli(B, "edge", "show logging")); }
 
+{ // NAT counts packets like IOS: a Windows ping is 4 echoes each way → first packet a miss, 7 hits
+  const B = mkNat(NATX.pat); pc(B, "p1", "ping 198.51.100.10");
+  ok(/Hits: 7  Misses: 1/.test(cli(B, "edge", "show ip nat statistics")), "show ip nat statistics after one Windows ping: Hits: 7  Misses: 1", cli(B, "edge", "show ip nat statistics")); }
+
+// ---- Stage 3: NTP, syslog, DNS, TFTP, SNMP ----
+// HQ: R1 (LAN 192.168.10.0/24, server LAN 192.168.50.0/24 with SRV = DNS + TFTP + syslog + SNMP manager), link to branch router R2 (LAN 192.168.20.0/24)
+const mkSvc = (r1x, r2x) => Bench.create({ devices: [
+    { id:"r1", kind:"router", label:"R1", x:0, y:0, config: cfg(["int g0/0","ip address 192.168.10.1 255.255.255.0","no shut","int g0/1","ip address 10.0.12.1 255.255.255.252","no shut","int g0/2","ip address 192.168.50.1 255.255.255.0","no shut","exit",
+      "ip route 192.168.20.0 255.255.255.0 10.0.12.2","ip dhcp excluded-address 192.168.10.1 192.168.10.9","ip dhcp pool HQ","network 192.168.10.0 255.255.255.0","default-router 192.168.10.1","dns-server 192.168.50.10","domain-name hq.example.com","exit", ...(r1x||[])]) },
+    { id:"r2", kind:"router", label:"R2", x:300, y:0, config: cfg(["int g0/0","ip address 192.168.20.1 255.255.255.0","no shut","int g0/1","ip address 10.0.12.2 255.255.255.252","no shut","exit","ip route 0.0.0.0 0.0.0.0 10.0.12.1", ...(r2x||[])]) },
+    { id:"sw", kind:"switch", label:"SW1", x:0, y:200 }, { id:"sw2", kind:"switch", label:"SW-SRV", x:150, y:200 },
+    { id:"srv", kind:"server", label:"SRV", x:150, y:350, ip:"192.168.50.10", mask:"255.255.255.0", gw:"192.168.50.1",
+      services:{ dns:{ name:"srv.hq.example.com", records:{ "portal.hq.example.com":"192.168.50.20", "srv.hq.example.com":"192.168.50.10" } }, tftp:{ files:{} }, syslog:true, nms:true } },
+    { id:"web", kind:"server", label:"PORTAL", x:250, y:350, ip:"192.168.50.20", mask:"255.255.255.0", gw:"192.168.50.1" },
+    { id:"p1", kind:"pc", label:"PC1", x:0, y:350, dhcp:true },
+    { id:"p2", kind:"pc", label:"PC2", x:300, y:350, ip:"192.168.20.10", mask:"255.255.255.0", gw:"192.168.20.1", dns:"192.168.20.1" } ],
+  cables: [{type:"cat6",a:"r1:g0",b:"sw:g1"},{type:"cat6",a:"p1:eth",b:"sw:g2"},{type:"cat6",a:"r1:g2",b:"sw2:g1"},{type:"cat6",a:"srv:eth",b:"sw2:g2"},{type:"cat6",a:"web:eth",b:"sw2:g3"},{type:"cat6",a:"r1:g1",b:"r2:g1"},{type:"cat6",a:"p2:eth",b:"r2:g0"}] });
+
+{ // NTP and the clock
+  const B = mkSvc();
+  ok(cli(B, "r2", "show clock")==="*08:30:00.000 UTC Mon Oct 12 2026", "show clock before NTP: '*' = not authoritative", cli(B, "r2", "show clock"));
+  ok(/^Clock is unsynchronized, stratum 16, no reference clock/.test(cli(B, "r2", "show ntp status")), "no NTP: unsynchronized, stratum 16");
+  cfg(["ntp master 3"])(B.devs.r1.env); cfg(["ntp server 10.0.12.1", "clock timezone WAT 1"])(B.devs.r2.env);
+  ok(/^Clock is synchronized, stratum 3, reference is 127\.127\.1\.1/.test(cli(B, "r1", "show ntp status")), "R1 ntp master 3: synchronized to its own clock, stratum 3", cli(B, "r1", "show ntp status"));
+  ok(/^Clock is synchronized, stratum 4, reference is 10\.0\.12\.1/.test(cli(B, "r2", "show ntp status")), "R2 ntp server 10.0.12.1: stratum 4 (one more than its server)", cli(B, "r2", "show ntp status"));
+  ok(/\*~10\.0\.12\.1\s+127\.127\.1\.1\s+3 /.test(cli(B, "r2", "show ntp associations")) && / \* sys\.peer, # selected, \+ candidate, - outlyer, x falseticker, ~ configured$/.test(cli(B, "r2", "show ntp associations")), "show ntp associations: *~ = configured and the sys.peer", cli(B, "r2", "show ntp associations"));
+  ok(cli(B, "r2", "show clock")==="09:30:00.000 WAT Mon Oct 12 2026", "synchronized: no '*', and clock timezone WAT 1 shifts the display", cli(B, "r2", "show clock"));
+  ok(/clock timezone WAT 1 0/.test(cli(B, "r2", "show running-config")) && /ntp server 10\.0\.12\.1\n!\nend$/.test(cli(B, "r2", "show running-config")), "running-config: clock timezone near the top, ntp server at the end", cli(B, "r2", "show running-config"));
+  ok(Bench.ntpSynced(B, "r2"), "task helper ntpSynced");
+  cfg(["no ntp server 10.0.12.1", "ntp server 10.0.99.9"])(B.devs.r2.env);
+  ok(/^Clock is unsynchronized/.test(cli(B, "r2", "show ntp status")) && /^ ~10\.0\.99\.9\s+\.INIT\.\s+16 /m.test(cli(B, "r2", "show ntp associations")), "an unreachable NTP server: unsynchronized, the peer stays .INIT. at stratum 16", cli(B, "r2", "show ntp associations")); }
+
+{ // syslog: the router's console messages are logged; a syslog server receives those at or below the trap level
+  const B = mkSvc(null, ["logging host 192.168.50.10", "logging trap warnings"]);
+  cfg(["int g0/0", "shutdown"])(B.devs.r2.env); cfg(["int g0/0", "no shutdown"])(B.devs.r2.env);
+  const sl = cli(B, "r2", "show logging");
+  ok(/Trap logging: level warnings, \d+ message lines logged\n        Logging to 192\.168\.50\.10  \(udp port 514, audit disabled,/.test(sl) && /\*Oct 12 08:3\d:\d\d\.\d{3}: %SYS-5-CONFIG_I: Configured from console by console/.test(sl) && /%LINK-5-CHANGED: Interface GigabitEthernet0\/0, changed state to administratively down/.test(sl), "show logging: trap level, the syslog server, and the console messages in the buffer", sl);
+  ok(Bench.syslogGot(B, "srv", /%LINK-3-UPDOWN: Interface GigabitEthernet0\/0, changed state to up/) && !Bench.syslogGot(B, "srv", /%SYS-5-CONFIG_I/) && !Bench.syslogGot(B, "srv", /LINEPROTO-5/), "the server gets severity 0–4 only (LINK-3 yes; CONFIG_I and LINEPROTO-5 are level 5)");
+  ok(/logging trap warnings\nlogging host 192\.168\.50\.10/.test(cli(B, "r2", "show running-config")), "running-config: logging trap + logging host");
+  const B2 = mkSvc(null, ["logging host 192.168.50.10", "no ip route 0.0.0.0 0.0.0.0 10.0.12.1"]); cfg(["int g0/0", "shutdown"])(B2.devs.r2.env);
+  ok(!Bench.syslogGot(B2, "srv", /LINK/), "no route to the syslog server: nothing arrives (syslog is one-way UDP, no error on the router)"); }
+
+{ // DNS: Windows (nslookup, ping/tracert by name), IOS (name-server, host table), a router as DNS server
+  const B = mkSvc(["ip dns server", "ip host files 192.168.50.20", "ip name-server 192.168.50.10"]);
+  ok(B.devs.p1.dns[0]==="192.168.50.10" && B.devs.p1.domain==="hq.example.com", "PC1 learns the DNS server and suffix from DHCP");
+  const ns = pc(B, "p1", "nslookup portal");
+  ok(ns==="Server:  srv.hq.example.com\nAddress:  192.168.50.10\n\nName:    portal.hq.example.com\nAddress:  192.168.50.20\n", "nslookup adds the DNS suffix; the authoritative server answers", ns);
+  ok(/^\nPinging portal\.hq\.example\.com \[192\.168\.50\.20\] with 32 bytes of data:\nReply from 192\.168\.50\.20: bytes=32/.test(pc(B, "p1", "ping portal")), "ping by name", pc(B, "p1", "ping portal"));
+  ok(/^\nTracing route to portal\.hq\.example\.com \[192\.168\.50\.20\]\nover a maximum of 30 hops:\n/.test(pc(B, "p1", "tracert portal")), "tracert by name: the two-line header", pc(B, "p1", "tracert portal"));
+  ok(/\*\*\* srv\.hq\.example\.com can't find nothere\.hq\.example\.com: Non-existent domain/.test(pc(B, "p1", "nslookup nothere")), "unknown name: Non-existent domain");
+  ok(/^Ping request could not find host nothere\. Please check the name and try again\.$/.test(pc(B, "p1", "ping nothere")), "ping an unknown name");
+  ok(/DNS request timed out\.\n    timeout was 2 seconds\./.test(pc(B, "p1", "nslookup portal 10.9.9.9")), "nslookup to a server that doesn't answer: timed out");
+  // PC2 uses its branch router R2 as DNS server — R2 has no "ip dns server", so nothing answers
+  ok(/could not find host portal\.hq\.example\.com/.test(pc(B, "p2", "ping portal.hq.example.com")), "a DNS server address that isn't running DNS: the name can't be resolved");
+  cfg(["ip dns server", "ip name-server 192.168.50.10"])(B.devs.r2.env);
+  const ns2 = pc(B, "p2", "nslookup portal.hq.example.com");
+  ok(/^Server:  UnKnown\nAddress:  192\.168\.20\.1\n\nNon-authoritative answer:\nName:    portal\.hq\.example\.com\nAddress:  192\.168\.50\.20\n$/.test(ns2), "R2 as a DNS server forwards to SRV: Non-authoritative answer", ns2);
+  // IOS resolving names
+  cfg(["ip domain name hq.example.com", "ip name-server 192.168.50.10", "ip host printer 192.168.20.30"])(B.devs.r1.env);
+  ok(/^Translating "portal"\.\.\.domain server \(192\.168\.50\.10\) \[OK\]\n\nType escape sequence to abort\.\nSending 5, 100-byte ICMP Echos to 192\.168\.50\.20/.test(cli(B, "r1", "ping portal")), "IOS ping by name: Translating … [OK], then the ping", cli(B, "r1", "ping portal"));
+  ok(/Host                      Port  Flags      Age Type   Address\(es\)\nfiles\s+None  \(perm, OK\)  0   IP     192\.168\.50\.20\nprinter\s+None  \(perm, OK\)  0   IP     192\.168\.20\.30/.test(cli(B, "r1", "show hosts")) && /Name servers are 192\.168\.50\.10/.test(cli(B, "r1", "show hosts")), "show hosts: the static host table", cli(B, "r1", "show hosts"));
+  ok(/^Translating "nothere"\.\.\.domain server \(192\.168\.50\.10\)\n% Unrecognized host or address, or protocol not running\.$/.test(cli(B, "r1", "ping nothere")), "IOS: an unknown name", cli(B, "r1", "ping nothere"));
+  ok(/ip host files 192\.168\.50\.20\nip host printer 192\.168\.20\.30\nip name-server 192\.168\.50\.10/.test(cli(B, "r1", "show running-config")) && /ip dns server/.test(cli(B, "r1", "show running-config")), "running-config: ip host, ip name-server, ip dns server");
+  ok(Bench.resolved(B, "p1", "portal"), "task helper resolved"); }
+
+{ // TFTP backup and restore
+  const B = mkSvc();
+  let r = Bench.act(B, ["cli", "r2", "copy running-config tftp:"]); ok(/Address or name of remote host \[\]\? $/.test(out(r)), "copy running-config tftp: asks for the server", out(r));
+  r = Bench.act(B, ["cli", "r2", "192.168.50.10"]); ok(/Destination filename \[r2-confg\]\? $/.test(out(r)), "… then suggests <hostname>-confg", out(r));
+  r = Bench.act(B, ["cli", "r2", ""]); ok(/^!!\n\d+ bytes copied in 0\.512 secs \(\d+ bytes\/sec\)$/.test(out(r)) && Bench.tftpFile(B, "srv", "r2-confg"), "backup: !! and the byte count; the file is on the server", out(r));
+  ok(/ip route 0\.0\.0\.0 0\.0\.0\.0 10\.0\.12\.1/.test(B.devs.srv.services.tftp.files["r2-confg"]), "the saved file is the running-config");
+  cfg(["no ip route 0.0.0.0 0.0.0.0 10.0.12.1"])(B.devs.r2.env);
+  Bench.act(B, ["cli", "r2", "copy running-config tftp:"]); Bench.act(B, ["cli", "r2", "192.168.50.10"]); r = Bench.act(B, ["cli", "r2", "r2-new"]);
+  ok(/%Error opening tftp:\/\/192\.168\.50\.10\/r2-new \(Timed out\)/.test(out(r)), "no route to the TFTP server: Timed out", out(r));
+  cfg(["ip route 192.168.50.0 255.255.255.0 10.0.12.1"])(B.devs.r2.env);
+  Bench.act(B, ["cli", "r2", "copy tftp: running-config"]); Bench.act(B, ["cli", "r2", "192.168.50.10"]); Bench.act(B, ["cli", "r2", "r2-confg"]); r = Bench.act(B, ["cli", "r2", ""]);
+  ok(/^Accessing tftp:\/\/192\.168\.50\.10\/r2-confg\.\.\.\nLoading r2-confg from 192\.168\.50\.10 \(via GigabitEthernet0\/1\): !\n\[OK - \d+ bytes\]\n\n\d+ bytes copied in/.test(out(r)) && /S\*\s+0\.0\.0\.0\/0 \[1\/0\] via 10\.0\.12\.1/.test(cli(B, "r2", "show ip route")), "restore: copy tftp: running-config merges the saved file — the default route is back", out(r) + "\n" + cli(B, "r2", "show ip route"));
+  Bench.act(B, ["cli", "r2", "copy tftp: running-config"]); Bench.act(B, ["cli", "r2", "192.168.50.10"]); Bench.act(B, ["cli", "r2", "nosuch"]); r = Bench.act(B, ["cli", "r2", ""]);
+  ok(/%Error opening tftp:\/\/192\.168\.50\.10\/nosuch \(No such file or directory\)/.test(out(r)), "a file the server doesn't have", out(r)); }
+
+{ // SNMP: polling from the management server, communities, ACL, write access, traps
+  const B = mkSvc(null, ["snmp-server community LabRO RO", "snmp-server community LabRW RW", "snmp-server location Kano branch, comms room", "snmp-server contact noc@example.com",
+    "access-list 5 permit host 192.168.50.99", "snmp-server community Locked RO 5", "snmp-server host 192.168.50.10 version 2c LabRO", "snmp-server enable traps"]);
+  const g = pc(B, "srv", "snmpget -v2c -c LabRO 10.0.12.2 sysName.0 sysLocation.0");
+  ok(g==="SNMPv2-MIB::sysName.0 = STRING: R2\nSNMPv2-MIB::sysLocation.0 = STRING: Kano branch, comms room", "snmpget sysName.0 sysLocation.0", g);
+  ok(/^IF-MIB::ifDescr\.1 = STRING: GigabitEthernet0\/0\nIF-MIB::ifDescr\.2 = STRING: GigabitEthernet0\/1/.test(pc(B, "srv", "snmpwalk -v2c -c LabRO 10.0.12.2 ifDescr")), "snmpwalk ifDescr", pc(B, "srv", "snmpwalk -v2c -c LabRO 10.0.12.2 ifDescr"));
+  ok(/IF-MIB::ifOperStatus\.3 = INTEGER: down\(2\)/.test(pc(B, "srv", "snmpwalk -v2c -c LabRO 10.0.12.2 ifOperStatus")), "ifOperStatus of an unused port: down(2)");
+  ok(pc(B, "srv", "snmpget -v2c -c wrong 10.0.12.2 sysName.0")==="Timeout: No Response from 10.0.12.2.", "a wrong community: the agent stays silent → Timeout");
+  ok(pc(B, "srv", "snmpget -v2c -c Locked 10.0.12.2 sysName.0")==="Timeout: No Response from 10.0.12.2.", "a community limited by ACL 5 to another host: Timeout");
+  ok(/^Error in packet\.\nReason: noAccess/.test(pc(B, "srv", 'snmpset -v2c -c LabRO 10.0.12.2 sysLocation.0 s "Kano rack 3"')), "snmpset with a read-only community: noAccess");
+  ok(/sysLocation\.0 = STRING: Kano rack 3/.test(pc(B, "srv", 'snmpset -v2c -c LabRW 10.0.12.2 sysLocation.0 s "Kano rack 3"')) && /snmp-server location Kano rack 3/.test(cli(B, "r2", "show running-config")), "snmpset with RW changes the router's location");
+  ok(/not recognized as an internal or external command/.test(pc(B, "p1", "snmpget -v2c -c LabRO 10.0.12.2 sysName.0")), "an ordinary PC has no SNMP tools");
+  cfg(["int g0/0", "shutdown"])(B.devs.r2.env);
+  ok(Bench.trapGot(B, "srv", /GigabitEthernet0\/0, changed state to down/) || Bench.trapGot(B, "srv", /administratively down/) || Bench.trapGot(B, "srv", /LINEPROTO.*down/), "traps: the interface going down reaches the manager", JSON.stringify(B.syslog.r2.map(x=>x.msg)));
+  ok(/snmp-server community LabRO RO\nsnmp-server community LabRW RW\nsnmp-server community Locked RO 5\nsnmp-server location Kano rack 3\nsnmp-server contact noc@example\.com\nsnmp-server enable traps\nsnmp-server host 192\.168\.50\.10 version 2c LabRO/.test(cli(B, "r2", "show running-config")), "running-config: snmp-server lines", cli(B, "r2", "show running-config")); }
+
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;
