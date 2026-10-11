@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ladder Lab</title>
+</head>
+<body>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: ops-console — fixed-feel header, rail nav on desktop, chip nav on phone; content column ~880px */
+:root{
+  --bg:#0e1420; --panel:#151d2d; --panel2:#111826; --line:#26324c; --fg:#e8edf6; --muted:#94a2ba;
+  --accent:#4fd1c5; --accent-ink:#06211e; --link:#8ab8ff;
+  --ok:#5cc97e; --warn:#e4b352; --bad:#e06c75; --chip:#1c2740;
+  --display:"Chakra Petch",system-ui,sans-serif; --body:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]){
+  --bg:#f3f5fa; --panel:#ffffff; --panel2:#eef1f7; --line:#d7deeb; --fg:#17202f; --muted:#5b687f;
+  --accent:#0d8f84; --accent-ink:#ffffff; --link:#1f5fd0;
+  --ok:#1e8f4b; --warn:#9a6c00; --bad:#bb3540; --chip:#e7ecf6; color-scheme:light;
+}}
+:root[data-theme="light"]{
+  --bg:#f3f5fa; --panel:#ffffff; --panel2:#eef1f7; --line:#d7deeb; --fg:#17202f; --muted:#5b687f;
+  --accent:#0d8f84; --accent-ink:#ffffff; --link:#1f5fd0;
+  --ok:#1e8f4b; --warn:#9a6c00; --bad:#bb3540; --chip:#e7ecf6; color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 var(--body)}
+a{color:var(--link)}
+h1,h2,h3,h4{font-family:var(--display);line-height:1.25;text-wrap:balance;margin:0 0 .5rem}
+h1{font-size:1.55rem} h2{font-size:1.25rem} h3{font-size:1.05rem}
+code,pre,kbd,.mono{font-family:var(--mono)}
+code{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:.08em .35em;font-size:.88em}
+pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:.85rem;line-height:1.55}
+pre code{background:none;border:none;padding:0}
+p{margin:.55rem 0}
+ul,ol{margin:.5rem 0;padding-left:1.3rem}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left}
+th{background:var(--panel2);font-family:var(--display);font-weight:600;font-size:.78rem;letter-spacing:.04em;text-transform:uppercase}
+.tablewrap{overflow-x:auto;margin:.6rem 0}
+.tablewrap table{min-width:480px}
+img{max-width:100%}
+button{font-family:var(--display);font-weight:600;cursor:pointer}
+input,textarea,select{font-family:var(--body)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+
+/* shell */
+.shell{max-width:1080px;margin:0 auto;padding-block:0 48px;padding-inline:16px}
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:40;background:var(--bg);border-bottom:1px solid var(--line);margin:0 -16px;padding:10px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:8px;font-family:var(--display)}
+.brand b{font-size:1.05rem;letter-spacing:.02em}
+.brand span{font-size:.72rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+.statline{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pill{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:.78rem;font-family:var(--display);font-weight:600;white-space:nowrap}
+.pill .dot{color:var(--accent)}
+nav.tabs{display:flex;gap:6px;overflow-x:auto;margin:14px 0 18px;padding-bottom:2px}
+nav.tabs button{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:999px;padding:7px 15px;font-size:.84rem;white-space:nowrap}
+nav.tabs button.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+main{min-height:60vh}
+
+/* cards & common */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:0 0 14px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-bottom:14px}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:14px}
+.eyebrow{font-family:var(--display);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.muted{color:var(--muted)}
+.small{font-size:.83rem}
+.btn{background:var(--accent);color:var(--accent-ink);border:1px solid var(--accent);border-radius:8px;padding:9px 16px;font-size:.88rem}
+.btn.ghost{background:transparent;color:var(--fg);border-color:var(--line)}
+.btn.sm{padding:5px 11px;font-size:.8rem}
+.btn:disabled{opacity:.45;cursor:default}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.bar{height:7px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.tag{display:inline-block;font-family:var(--display);font-size:.68rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:1px 7px;color:var(--muted)}
+.tag.ok{color:var(--ok);border-color:var(--ok)}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+.tag.acc{color:var(--accent);border-color:var(--accent)}
+.num{font-variant-numeric:tabular-nums}
+hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+.callout{border-left:3px solid var(--accent);background:var(--panel2);border-radius:0 8px 8px 0;padding:9px 13px;margin:.7rem 0;font-size:.92rem}
+.callout.warn{border-left-color:var(--warn)}
+.crumbs{font-size:.8rem;color:var(--muted);margin-bottom:10px}
+.crumbs a{color:var(--muted);text-decoration:none}
+.crumbs a:hover{color:var(--fg)}
+.listrow{display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--line)}
+.listrow:last-child{border-bottom:0}
+.listrow .grow{flex:1;min-width:0}
+.check{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:.72rem;flex:none;color:transparent}
+.check.done{background:var(--ok);border-color:var(--ok);color:#fff}
+
+/* dashboard rank strip */
+.rankstrip{display:flex;gap:0;overflow-x:auto;padding:8px 2px 4px}
+.rk{min-width:116px;text-align:center;position:relative;padding-top:6px}
+.rk::before{content:"";position:absolute;top:21px;left:0;right:0;height:2px;background:var(--line)}
+.rk:first-child::before{left:50%}.rk:last-child::before{right:50%}
+.rk .medal{width:32px;height:32px;border-radius:50%;margin:0 auto;border:2px solid var(--line);background:var(--panel2);display:flex;align-items:center;justify-content:center;font-family:var(--display);font-size:.7rem;position:relative;z-index:1;color:var(--muted)}
+.rk.got .medal{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.rk .nm{font-size:.7rem;margin-top:5px;line-height:1.3}
+.rk .pt{font-size:.68rem;color:var(--muted)}
+.bignum{font-family:var(--display);font-size:1.9rem;font-weight:700;line-height:1}
+
+/* quiz */
+.opt{display:block;width:100%;text-align:left;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px 13px;margin:7px 0;font-family:var(--body);font-size:.92rem}
+.opt.right{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,var(--panel2))}
+.opt.wrong{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,var(--panel2))}
+.opt:disabled{cursor:default;opacity:1}
+
+/* flashcards */
+.flash{background:var(--panel);border:1px solid var(--line);border-radius:14px;min-height:190px;display:flex;align-items:center;justify-content:center;text-align:center;padding:22px;font-size:1.05rem;cursor:pointer}
+.flash .side{max-width:560px}
+
+/* terminal */
+.term{background:#0a0f17;border:1px solid var(--line);border-radius:10px;padding:10px 12px;height:330px;overflow-y:auto;font-family:var(--mono);font-size:.82rem;line-height:1.5;color:#d7e3f4}
+:root[data-theme="light"] .term{background:#101826}
+.term .ln{white-space:pre-wrap;word-break:break-word}
+.term .in{color:#9fe8df}
+.termbar{display:flex;gap:8px;margin-top:8px}
+.termbar input{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:9px 12px;font-family:var(--mono);font-size:.85rem}
+textarea.codebox{width:100%;min-height:170px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:10px 12px;font-family:var(--mono);font-size:.85rem;line-height:1.5}
+input.txt{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:9px 12px;font-size:.9rem}
+textarea.txt{width:100%;min-height:110px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:10px 12px;font-size:.9rem;line-height:1.55}
+
+/* certificate */
+.cert{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 24px;position:relative;overflow:hidden}
+.cert::after{content:"";position:absolute;inset:8px;border:1px solid var(--line);border-radius:9px;pointer-events:none}
+.cert .cname{font-family:var(--display);font-size:1.7rem;font-weight:700;margin:.3rem 0}
+.cert .cred{font-family:var(--display);font-size:1.15rem;color:var(--accent);font-weight:600}
+.sealbox{position:absolute;top:22px;right:22px;width:58px;height:58px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1rem;font-weight:600}
+@media(max-width:560px){.sealbox{display:none}}
+footer{margin-top:34px;color:var(--muted);font-size:.78rem;border-top:1px solid var(--line);padding-top:14px}
+</style>
+
+<div class="shell">
+  <header class="top">
+    <div class="brand"><b>LADDER LAB</b><span>practice · don't forget</span></div>
+    <div class="statline" id="statline"></div>
+  </header>
+  <nav class="tabs" id="tabs"></nav>
+  <main id="main"></main>
+  <footer>Built from Akpevwe's course history (Andrei's Python network automation, Jeremy's IT Lab CCNA, Stephane Maarek AWS, CompTIA A+, Linux/Git/DevOps) and the Infrastructure Ladder plan. Progress is saved in this browser — use Settings → Backup to copy it before switching devices.</footer>
+</div>
+
+<script src="data_core.js"></script>
+<script src="data_foundations.js"></script>
+<script src="data_ccna2.js"></script>
+<script src="data_career.js"></script>
+<script src="data_linux_git.js"></script>
+<script src="data_linux2.js"></script>
+<script src="data_python.js"></script>
+<script src="data_python2.js"></script>
+<script src="data_aws.js"></script>
+<script src="data_aws2.js"></script>
+<script src="data_devops.js"></script>
+<script src="data_devops2.js"></script>
+<script src="data_labs.js"></script>
+<script src="data_tickets.js"></script>
+<script src="data_interview.js"></script>
+<script src="data_itsupport2.js"></script>
+<script src="data_hardmode.js"></script>
+<script src="data_visuals.js"></script>
+<script src="sim.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>

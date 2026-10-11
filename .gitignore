@@ -1,0 +1,13 @@
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+._*
+
+# Editor / local
+.vscode/
+.idea/
+*.swp
+*~
+.claude/settings.local.json
