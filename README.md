@@ -33,9 +33,16 @@ Progress (points, streak, SRS, certificates) is saved in the browser you use (lo
 Use **Settings → Backup** inside the app to copy your progress and paste it on another device/browser.
 
 ## Adding content
-All content lives in `data_*.js` — plain objects:
-- tracks: `lessons[{t,html}]`, `quiz[{q,o,a,why}]`, `cards[{f,b}]`, `labs[ids]`, `codelabs[{id,t,brief,checks,model}]`, `videos[{t,u}]`
+Every new or rebuilt lesson follows **[CONTENT_GUIDE.md](CONTENT_GUIDE.md)** (the depth standard and the `K.*`
+lesson kit in `kit.js`). What's built and what's next is in **[ROADMAP.md](ROADMAP.md)**.
+
+- Rebuilt modules live in `data_<track>_m<N>.js` and register with `K.module(...)`; classic lessons stay in the older `data_*.js` files until their module is rebuilt.
+- tracks: `modules[{id,t,blurb}]`, `lessons[{id,t,mins,level,mod,html,quiz,cards}]`, `quiz[{q,o,a,why}]`, `cards[{f,b}]`, `labs[ids]`, `codelabs[{id,t,brief,checks,model}]`, `videos[{t,u}]`
 - `data_labs.js` / `data_linux2.js`: lab definitions with `objectives[{text, done(state)}]` over the simulator state
 - `sim.js`: the Linux / Cisco IOS / Git / Kubernetes terminal engines
 
-`test_all.js` (Node) verifies everything: `node test_all.js`.
+## Checks (run before every commit)
+- `node tools/validate.js` — loads every data file like the browser does and fails on broken JS, wrong quiz/quick-check
+  answers, unbalanced HTML, code-lab model solutions that fail their own checks, unsolvable in-lesson terminals, and
+  incomplete tickets/interview questions. `--words` prints a per-lesson depth report.
+- Open the site with `#selftest` on the end of the URL — it renders every page in the app and lists anything broken.

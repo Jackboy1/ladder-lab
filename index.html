@@ -134,6 +134,117 @@ textarea.txt{width:100%;min-height:110px;background:var(--panel2);border:1px sol
 .sealbox{position:absolute;top:22px;right:22px;width:58px;height:58px;border-radius:50%;background:var(--accent);color:var(--accent-ink);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1rem;font-weight:600}
 @media(max-width:560px){.sealbox{display:none}}
 footer{margin-top:34px;color:var(--muted);font-size:.78rem;border-top:1px solid var(--line);padding-top:14px}
+
+/* ---------- rich lessons (kit.js) ---------- */
+.lesson-body{max-width:780px}
+.lesson-body h2{margin-top:2rem;padding-top:.6rem;border-top:1px solid var(--line);scroll-margin-top:12px}
+.lesson-body h3{margin-top:1.3rem}
+.lesson-body p,.lesson-body li{line-height:1.75}
+.lesson-body kbd{font-family:var(--mono);font-size:.8em;background:var(--panel2);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:.05em .4em}
+.ktoc{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:12px 0;max-width:780px}
+.ktoc ol{margin:.3rem 0 0;padding-left:1.3rem;font-size:.88rem;columns:2;column-gap:28px}
+.ktoc li{break-inside:avoid;margin:2px 0}
+@media(max-width:620px){.ktoc ol{columns:1}}
+.kbox{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:11px 15px;margin:1rem 0}
+.kbox ul{margin:.3rem 0 0;padding-left:1.2rem}
+.kbox-h{font-family:var(--display);font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:700;margin-bottom:4px}
+.kbox.goals{border-left:4px solid var(--accent)}
+.kbox.pre{border-left:4px solid var(--link)} .kbox.pre .kbox-h{color:var(--link)}
+.kbox.analogy{border-left:4px solid var(--warn)} .kbox.analogy .kbox-h{color:var(--warn)}
+.kbox.job{border-left:4px solid var(--ok);background:color-mix(in srgb,var(--ok) 7%,var(--panel2))} .kbox.job .kbox-h{color:var(--ok)}
+.kbox.case{border-left:4px solid var(--link);background:color-mix(in srgb,var(--link) 7%,var(--panel2))} .kbox.case .kbox-h{color:var(--link)}
+.kbox.recap{border-left:4px solid var(--accent)}
+.kbox.nextup{border-style:dashed}
+.ksteps{counter-reset:ks;list-style:none;padding:0;margin:1rem 0}
+.ksteps>li{counter-increment:ks;position:relative;padding:0 0 14px 44px;border-left:2px solid var(--line);margin-left:15px}
+.ksteps>li:last-child{border-left-color:transparent}
+.ksteps>li::before{content:counter(ks);position:absolute;left:-16px;top:-2px;width:30px;height:30px;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;display:flex;align-items:center;justify-content:center;font-size:.85rem}
+.ks-t{font-family:var(--display);font-weight:600;margin-bottom:2px}
+.ks-b>:first-child{margin-top:0}
+.kreveal{border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin:.9rem 0;background:var(--panel2)}
+.kreveal summary{cursor:pointer;font-weight:600;font-family:var(--display)}
+.kreveal[open] summary{margin-bottom:6px}
+.kfig{margin:1.1rem 0;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px}
+.kfig svg{width:100%;height:auto;display:block}
+.kfig figcaption,.kout figcaption{margin-top:6px}
+.kout{margin:.8rem 0}
+.gl{border-bottom:1.5px dotted var(--accent);cursor:help;position:relative;outline:none}
+.gl-tip{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:20;width:min(300px,78vw);background:var(--panel);color:var(--fg);border:1px solid var(--accent);border-radius:8px;padding:8px 10px;font-size:.82rem;line-height:1.5;font-weight:400;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+.gl:hover .gl-tip,.gl:focus .gl-tip{display:block}
+.kc{border:1px solid var(--accent);border-radius:10px;padding:11px 14px;margin:1.2rem 0;background:color-mix(in srgb,var(--accent) 5%,var(--panel2))}
+.kc-h{font-family:var(--display);font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:700}
+.kc-q{font-weight:600;margin:4px 0 2px}
+.kc-why{font-size:.9rem;margin-top:6px}
+.mt{border:1px solid var(--accent);border-radius:12px;padding:12px 14px;margin:1.3rem 0;background:var(--panel)}
+.mt-h{font-family:var(--display);font-weight:700;color:var(--accent);margin-bottom:4px}
+.mt .term{height:240px}
+.mt-tasks{margin:6px 0 10px}
+.mt-task{display:flex;gap:9px;align-items:flex-start;font-size:.88rem;padding:3px 0}
+.mt-task.ok{color:var(--muted)}
+.khint{border:1px dashed var(--warn);border-radius:8px;padding:6px 12px;margin:.6rem 0}
+.khint summary{cursor:pointer;color:var(--warn);font-weight:600;font-size:.9rem}
+.kbox.dyk{border-left:4px solid var(--link)} .kbox.dyk .kbox-h{color:var(--link)}
+.kbox.remember{border-left:4px solid var(--warn)} .kbox.remember .kbox-h{color:var(--warn)}
+.callout.exam{border-left-color:var(--link)}
+.kbox.myth{border-left:4px solid var(--bad)} .kbox.myth .kbox-h{color:var(--bad)}
+.km{padding:6px 0;border-bottom:1px solid var(--line)} .km:last-child{border-bottom:0}
+.km-m{color:var(--muted);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--bad) 60%,transparent)}
+.km-f{margin-top:2px}
+.km-x{color:var(--bad);font-weight:700;display:inline-block;width:1.1em;text-decoration:none}
+.km-ok{color:var(--ok);font-weight:700;display:inline-block;width:1.1em}
+.kdd{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:1rem 0}
+@media(max-width:620px){.kdd{grid-template-columns:1fr}}
+.kdd>div{border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:var(--panel2)}
+.kdd ul{margin:.3rem 0 0;padding-left:1.2rem}
+.kdd-do{border-top:3px solid var(--ok)!important} .kdd-do .kbox-h{color:var(--ok)}
+.kdd-dont{border-top:3px solid var(--bad)!important} .kdd-dont .kbox-h{color:var(--bad)}
+.kbox.when .tablewrap table{min-width:560px;font-size:.88rem}
+.kvid{display:flex;gap:12px;align-items:flex-start;text-decoration:none;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:.7rem 0;background:var(--panel2)}
+.kvid:hover{border-color:var(--accent)}
+.kvid>span:last-child{display:flex;flex-direction:column;gap:2px}
+.kvid-play{flex:none;width:34px;height:34px;border-radius:50%;background:var(--bad);color:#fff;display:flex;align-items:center;justify-content:center;font-size:.85rem}
+.kimg{margin:1.1rem 0}
+.kimg img{max-width:100%;height:auto;border-radius:10px;border:1px solid var(--line);display:block}
+.kcredit{opacity:.8}
+.bn-scene{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px;overflow-x:auto}
+.bn-scene svg{width:100%;min-width:680px;height:auto;display:block}
+.bn-prog{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin:4px 0 8px}
+.bn-tasks{margin-top:8px}.bn-tasks summary{cursor:pointer;font-family:var(--display);font-weight:600;font-size:.88rem}
+.bp:hover rect{stroke:var(--accent)}
+.bn-tray{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+.bn-item{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:99px;padding:5px 11px;font-size:.8rem;font-family:var(--body);cursor:pointer}
+.bn-item.on{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 35%,transparent)}
+.bn-item.ghost{color:var(--muted)}
+.bn-item i{width:16px;height:5px;border-radius:3px;display:inline-block}
+.bn-item i.sfp{width:12px;height:8px;border-radius:1px;background:var(--muted)}
+.bn-msg{font-size:.86rem;padding:7px 11px;border-radius:8px;background:var(--chip);margin:4px 0 8px;border-left:3px solid var(--accent)}
+.bn-msg.bad{border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 10%,var(--panel2))}
+.bn-sel{border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin:8px 0;background:var(--panel2);font-size:.88rem}
+.bn-devs{display:flex;flex-direction:column;gap:6px;margin:8px 0}
+.bn-dev{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.88rem}
+.bn-dev b{min-width:80px}
+.bn-panel{border:1px solid var(--accent);border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--panel)}
+.bn-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px 12px;margin:6px 0}
+.bn-form label{font-size:.8rem;color:var(--muted);display:flex;flex-direction:column;gap:3px}
+.bn-form select.txt{padding:7px 9px}
+.bn-term{height:220px}
+.qt-ex{margin:.4rem 0 .8rem}
+.opt.picked{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--panel2))}
+.qt-box{font-family:var(--mono);margin-right:4px}
+.qt-order{list-style:none;counter-reset:qo;padding:0;margin:.5rem 0}
+.qt-order li{counter-increment:qo;display:flex;align-items:center;gap:10px;justify-content:space-between;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0}
+.qt-order li::before{content:counter(qo);font-family:var(--display);font-weight:700;color:var(--accent);min-width:1.2em}
+.qt-order li>span:first-of-type{flex:1}
+.qt-mv{display:flex;gap:4px}
+.qt-order li.right,.qt-row.right,.qt-fill label.right{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 12%,var(--panel2))}
+.qt-order li.wrong,.qt-row.wrong,.qt-fill label.wrong{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,var(--panel2))}
+.qt-match{display:flex;flex-direction:column;gap:6px;margin:.5rem 0}
+.qt-row{display:grid;grid-template-columns:1fr 1.2fr;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--panel2)}
+@media(max-width:560px){.qt-row{grid-template-columns:1fr}}
+.qt-fix{color:var(--ok);grid-column:1/-1}
+.qt-fill{display:flex;flex-direction:column;gap:8px;margin:.5rem 0}
+.qt-fill label{display:flex;flex-direction:column;gap:4px;border:1px solid transparent;border-radius:8px;padding:4px;font-size:.88rem}
+.kq .kq-check,.kq .kq-again{margin-top:8px}
 </style>
 
 <div class="shell">
@@ -146,26 +257,29 @@ footer{margin-top:34px;color:var(--muted);font-size:.78rem;border-top:1px solid 
   <footer>Built from Akpevwe's course history (Andrei's Python network automation, Jeremy's IT Lab CCNA, Stephane Maarek AWS, CompTIA A+, Linux/Git/DevOps) and the Infrastructure Ladder plan. Progress is saved in this browser — use Settings → Backup to copy it before switching devices.</footer>
 </div>
 
-<script src="data_core.js"></script>
-<script src="data_foundations.js"></script>
-<script src="data_ccna2.js"></script>
-<script src="data_career.js"></script>
-<script src="data_linux_git.js"></script>
-<script src="data_linux2.js"></script>
-<script src="data_python.js"></script>
-<script src="data_python2.js"></script>
-<script src="data_aws.js"></script>
-<script src="data_aws2.js"></script>
-<script src="data_devops.js"></script>
-<script src="data_devops2.js"></script>
-<script src="data_labs.js"></script>
-<script src="data_tickets.js"></script>
-<script src="data_interview.js"></script>
-<script src="data_itsupport2.js"></script>
-<script src="data_hardmode.js"></script>
-<script src="data_visuals.js"></script>
-<script src="sim.js"></script>
-<script src="app.js"></script>
+<script src="data_core.js?v=20261011b"></script>
+<script src="kit.js?v=20261011b"></script>
+<script src="qtypes.js?v=20261011b"></script>
+<script src="data_foundations.js?v=20261011b"></script>
+<script src="data_ccna2.js?v=20261011b"></script>
+<script src="data_career.js?v=20261011b"></script>
+<script src="data_linux_git.js?v=20261011b"></script>
+<script src="data_linux2.js?v=20261011b"></script>
+<script src="data_python.js?v=20261011b"></script>
+<script src="data_python2.js?v=20261011b"></script>
+<script src="data_aws.js?v=20261011b"></script>
+<script src="data_aws2.js?v=20261011b"></script>
+<script src="data_devops.js?v=20261011b"></script>
+<script src="data_devops2.js?v=20261011b"></script>
+<script src="data_labs.js?v=20261011b"></script>
+<script src="data_tickets.js?v=20261011b"></script>
+<script src="data_interview.js?v=20261011b"></script>
+<script src="data_itsupport2.js?v=20261011b"></script>
+<script src="data_hardmode.js?v=20261011b"></script>
+<script src="data_visuals.js?v=20261011b"></script>
+<script src="sim.js?v=20261011b"></script>
+<script src="bench.js?v=20261011b"></script>
+<script src="app.js?v=20261011b"></script>
 
 </body>
 </html>

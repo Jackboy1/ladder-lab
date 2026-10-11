@@ -48,8 +48,10 @@ function toast(msg){
 }
 
 /* ---------- track completion ---------- */
+function lkey(l,i){ return l.id || String(l._i!=null ? l._i : i); }
+function lessonDone(t,i){ return !!(P.lessonsDone[t.id]||{})[lkey(t.lessons[i],i)]; }
 function trackProgress(t){
-  const L = Object.keys(P.lessonsDone[t.id]||{}).length;
+  const L = t.lessons.filter((_,i)=>lessonDone(t,i)).length;
   const total = t.lessons.length + (t.quiz.length?1:0) + t.labs.length + t.codelabs.length;
   let done = L;
   if (t.quiz.length && (P.quizBest[t.id]||0)>=70) done++;
@@ -89,6 +91,7 @@ function render(){ clearLLTimers(); tabs(); statline();
   if (v==="labs") return labsView();
   if (v==="lab") return labView(route.id);
   if (v==="play") return playView(route.env);
+  if (v==="bench") return benchView(route.id);
   if (v==="drill") return drillView();
   if (v==="exam") return examView();
   if (v==="career") return careerView();
@@ -112,7 +115,7 @@ function home(){
   let cont = "";
   if (next){
     const p = trackProgress(next);
-    const li = next.lessons.findIndex((_,i)=>!(P.lessonsDone[next.id]||{})[i]);
+    const li = next.lessons.findIndex((_,i)=>!lessonDone(next,i));
     cont = `<div class="card">
       <div class="eyebrow">Continue where you left off</div>
       <h3>${esc(next.title)} <span class="tag acc">${esc(next.tag)}</span></h3>
@@ -209,13 +212,13 @@ function trackView(id){
     <div class="small muted" style="margin-top:4px">${p.done}/${p.total} complete</div>
     ${trackComplete(t)?`<div class="btnrow"><button class="btn" onclick="GO('cert',{id:'${t.id}'})">View certificate</button></div>`:""}
   </div>
-  <div class="card"><h2>Lessons</h2>
-    ${t.lessons.map((l,i)=>`<div class="listrow">
-      <span class="check ${(P.lessonsDone[id]||{})[i]?"done":""}">✓</span>
-      <div class="grow">${i+1}. ${esc(l.t)}</div>
-      <button class="btn sm ghost" onclick="GO('lesson',{id:'${id}',i:${i}})">${(P.lessonsDone[id]||{})[i]?"Review":"Study"}</button>
+  ${lessonGroups(t).map(g=>`<div class="card">${g.mod?`<div class="eyebrow">Module ${g.n}</div><h2>${esc(g.mod.t)}</h2>${g.mod.blurb?`<p class="small muted">${esc(g.mod.blurb)}</p>`:""}`:`<h2>${t.modules&&t.modules.length?"More lessons (classic format — being rebuilt)":"Lessons"}</h2>`}
+    ${g.items.map(({l,i})=>`<div class="listrow">
+      <span class="check ${lessonDone(t,i)?"done":""}">✓</span>
+      <div class="grow">${i+1}. ${esc(l.t)}${l.mins?` <span class="small muted">· ${l.mins} min</span>`:""}</div>
+      <button class="btn sm ghost" onclick="GO('lesson',{id:'${id}',i:${i}})">${lessonDone(t,i)?"Review":"Study"}</button>
     </div>`).join("")}
-  </div>
+  </div>`).join("")}
   <div class="grid2">
     ${t.quiz.length?`<div class="card"><h2>Quiz ${quizDone?'<span class="tag ok">PASSED</span>':""}</h2>
       <p class="small muted">${t.quiz.length} questions · pass at 70% · best: ${P.quizBest[id]!=null? P.quizBest[id]+"%":"—"}</p>
@@ -243,17 +246,28 @@ function trackView(id){
   </div>`:""}`;
 }
 
+function lessonGroups(t){
+  const mods = t.modules||[], groups = [];
+  mods.forEach((m,n)=>{ const items = t.lessons.map((l,i)=>({l,i})).filter(x=>x.l.mod===m.id); if (items.length) groups.push({mod:m, n:n+1, items}); });
+  const rest = t.lessons.map((l,i)=>({l,i})).filter(x=>!x.l.mod || !mods.some(m=>m.id===x.l.mod));
+  if (rest.length) groups.push({mod:null, items:rest});
+  return groups;
+}
+
 function lessonView(id,i){
   route.group="tracks";
   const t = LL.tracks.find(x=>x.id===id); if(!t) return go("tracks");
   const l = t.lessons[i]; if(!l) return go("track",{id});
-  const done = (P.lessonsDone[id]||{})[i];
+  const done = lessonDone(t,i);
+  const mod = l.mod && (t.modules||[]).find(m=>m.id===l.mod);
   main.innerHTML = `
   <div class="crumbs"><a href="#" onclick="GO('tracks');return false">Courses</a> / <a href="#" onclick="GO('track',{id:'${id}'});return false">${esc(t.title)}</a> / Lesson ${i+1}</div>
   <div class="card">
-    <div class="eyebrow">${esc(t.title)} · lesson ${i+1} of ${t.lessons.length}</div>
+    <div class="eyebrow">${esc(t.title)}${mod?` · ${esc(mod.t)}`:""} · lesson ${i+1} of ${t.lessons.length}</div>
     <h1>${esc(l.t)}</h1>
-    <div class="lesson-body">${l.html}</div>
+    ${l.mins||l.level?`<div class="small muted">${l.mins?`⏱ about ${l.mins} min`:""}${l.mins&&l.level?" · ":""}${l.level?esc(l.level):""}</div>`:""}
+    <nav class="ktoc" id="ktoc" hidden></nav>
+    <div class="lesson-body" id="lbody">${l.html}</div>
     <hr>
     <div class="btnrow">
       ${i>0?`<button class="btn ghost" onclick="GO('lesson',{id:'${id}',i:${i-1}})">← Previous</button>`:""}
@@ -261,8 +275,14 @@ function lessonView(id,i){
       ${i<t.lessons.length-1?`<button class="btn ghost" onclick="GO('lesson',{id:'${id}',i:${i+1}})">Next →</button>`:`<button class="btn ghost" onclick="GO('track',{id:'${id}'})">Back to course</button>`}
     </div>
   </div>`;
+  const body = $("#lbody");
+  const hs = [...body.querySelectorAll("h2")];
+  if (hs.length>=3){ const toc=$("#ktoc"); hs.forEach((h,n)=>h.id="sec"+n);
+    toc.innerHTML = `<div class="eyebrow">In this lesson</div><ol>${hs.map((h,n)=>`<li><a href="#" data-sec="sec${n}">${esc(h.textContent)}</a></li>`).join("")}</ol>`;
+    toc.hidden=false; toc.querySelectorAll("a").forEach(a=>a.onclick=e=>{ e.preventDefault(); document.getElementById(a.dataset.sec).scrollIntoView({behavior:"smooth"}); }); }
+  if (window.K) K.hydrate(body);
   const b = $("#donebtn");
-  if (b) b.onclick = ()=>{ P.lessonsDone[id]=P.lessonsDone[id]||{}; P.lessonsDone[id][i]=true; addPoints(LL.points.lesson,"lesson complete"); render(); };
+  if (b) b.onclick = ()=>{ P.lessonsDone[id]=P.lessonsDone[id]||{}; P.lessonsDone[id][lkey(l,i)]=true; addPoints(LL.points.lesson,"lesson complete"); render(); };
 }
 
 /* ---------- quiz ---------- */
@@ -270,7 +290,7 @@ let QZ=null;
 function quizView(id){
   route.group="tracks";
   const t = LL.tracks.find(x=>x.id===id); if(!t) return go("tracks");
-  if (!QZ || QZ.id!==id){ QZ = {id, i:0, score:0, answered:false}; }
+  if (!QZ || QZ.id!==id){ QZ = {id, i:0, score:0, answered:false, resp:undefined}; }
   const q = t.quiz[QZ.i];
   if (!q){ // finished
     const pct = Math.round(QZ.score/t.quiz.length*100);
@@ -295,26 +315,15 @@ function quizView(id){
   <div class="crumbs"><a href="#" onclick="GO('track',{id:'${id}'});return false">${esc(t.title)}</a> / Quiz</div>
   <div class="card">
     <div class="eyebrow">Question ${QZ.i+1} of ${t.quiz.length} · score ${QZ.score}</div>
-    <h2>${esc(q.q)}</h2>
-    <div id="opts">${q.o.map((o,oi)=>`<button class="opt" data-i="${oi}">${esc(o)}</button>`).join("")}</div>
-    <div id="why" hidden class="callout"></div>
-    <div class="btnrow"><button class="btn" id="nextq" hidden>Next</button></div>
+    ${QT.prompt(q)}
+    <div id="opts">${QT.body(q, QZ.resp===undefined ? (QZ.resp=QT.initial(q)) : QZ.resp, QZ.answered)}</div>
+    <div id="why" ${QZ.answered?"":"hidden"} class="callout">${QZ.answered?`<b>${QT.grade(q,QZ.resp)?"Correct.":"Not quite."}</b> ${esc(q.why||"")}${QT.grade(q,QZ.resp)?"":`<div class="small" style="margin-top:4px"><b>Answer:</b> ${esc(QT.answerText(q))}</div>`}`:""}</div>
+    <div class="btnrow">${QZ.answered?`<button class="btn" id="nextq">Next</button>`:QT.type(q)==="mcq"?"":`<button class="btn" id="checkq" ${QT.answered(q,QZ.resp)?"":"disabled"}>Check answer</button>`}</div>
   </div>`;
-  document.querySelectorAll(".opt").forEach(btn=>{
-    btn.onclick = ()=>{
-      if (QZ.answered) return; QZ.answered=true;
-      const pick = +btn.dataset.i;
-      document.querySelectorAll(".opt").forEach((b,bi)=>{
-        b.disabled=true;
-        if (bi===q.a) b.classList.add("right");
-        else if (bi===pick) b.classList.add("wrong");
-      });
-      if (pick===q.a) QZ.score++;
-      const why=$("#why"); why.hidden=false; why.innerHTML = `<b>${pick===q.a?"Correct.":"Not quite."}</b> ${esc(q.why)}`;
-      $("#nextq").hidden=false;
-    };
-  });
-  $("#nextq").onclick = ()=>{ QZ.i++; QZ.answered=false; quizView(id); };
+  const submit = ()=>{ if (QZ.answered) return; QZ.answered=true; if (QT.grade(q,QZ.resp)) QZ.score++; quizView(id); };
+  if (!QZ.answered) QT.wire($("#opts"), q, ()=>QZ.resp, (v, soft)=>{ QZ.resp=v; if (QT.type(q)==="mcq") return submit(); if (soft){ const c=$("#checkq"); if (c) c.disabled=!QT.answered(q,QZ.resp); return; } quizView(id); });
+  if ($("#checkq")) $("#checkq").onclick = submit;
+  if ($("#nextq")) $("#nextq").onclick = ()=>{ QZ.i++; QZ.answered=false; QZ.resp=undefined; quizView(id); };
 }
 
 /* ---------- exam simulator ---------- */
@@ -348,11 +357,11 @@ function examView(){
   function finishExam(){
     EXAM.done = true;
     const qs = EXAM.qs;
-    const score = qs.filter((q,i)=>EXAM.picks[i]===q.a).length;
+    const score = qs.filter((q,i)=>QT.grade(q, EXAM.picks[i])).length;
     const pct = Math.round(score/qs.length*100);
     P.exams=(P.exams||0)+1; if (pct>(P.examBest||0)) P.examBest=pct;
     if (pct>=70) addPoints(40,"exam passed "+pct+"%"); else { touchDay(); saveP(); statline(); }
-    const misses = qs.map((q,i)=>({q,i})).filter(x=>EXAM.picks[x.i]!==x.q.a);
+    const misses = qs.map((q,i)=>({q,i})).filter(x=>!QT.grade(x.q, EXAM.picks[x.i]));
     main.innerHTML = `<div class="card" style="text-align:center">
       <div class="eyebrow">Exam result${EXAM.secs<=0?" · time expired":""}</div>
       <div class="bignum num">${pct}%</div>
@@ -362,8 +371,8 @@ function examView(){
       ${misses.map(({q,i})=>`<div class="callout warn" style="margin:.8rem 0">
         <div class="small muted">${esc(q.track)}</div>
         <b>${esc(q.q)}</b><br>
-        <span class="small" style="color:var(--bad)">Your answer: ${EXAM.picks[i]!=null?esc(q.o[EXAM.picks[i]]):"(unanswered)"}</span><br>
-        <span class="small" style="color:var(--ok)">Correct: ${esc(q.o[q.a])}</span>
+        <span class="small" style="color:var(--bad)">Your answer: ${esc(QT.respText(q, EXAM.picks[i]))}</span><br>
+        <span class="small" style="color:var(--ok)">Correct: ${esc(QT.answerText(q))}</span>
         <div class="small" style="margin-top:4px">${esc(q.why)}</div></div>`).join("")}
       <p class="small muted">The misses ARE the syllabus — hit the matching flashcard decks before retaking.</p></div>`
       :`<div class="card"><h2>Clean sheet.</h2><p class="small muted">Full marks under the clock — that's interview-day form.</p></div>`}
@@ -375,7 +384,8 @@ function examView(){
   if (EXAM.done) return finishExam();
   const q = EXAM.qs[EXAM.i];
   if (!q) return finishExam();
-  const answered = Object.keys(EXAM.picks).length;
+  if (EXAM.picks[EXAM.i]===undefined && QT.type(q)!=="mcq") EXAM.picks[EXAM.i] = QT.initial(q);
+  const answered = EXAM.qs.filter((qq,i)=>EXAM.picks[i]!=null && QT.answered(qq, EXAM.picks[i]) && (QT.type(qq)!=="order" || (EXAM.touched && EXAM.touched[i]))).length;
   main.innerHTML = `
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -383,8 +393,8 @@ function examView(){
       <div class="pill">⏱ <span class="num" id="examclock">${fmtTime(EXAM.secs)}</span></div>
     </div>
     <div class="small muted">${esc(q.track)}</div>
-    <h2>${esc(q.q)}</h2>
-    <div>${q.o.map((o,oi)=>`<button class="opt" data-i="${oi}" style="${EXAM.picks[EXAM.i]===oi?"border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--panel2))":""}">${esc(o)}</button>`).join("")}</div>
+    ${QT.prompt(q)}
+    <div id="eopts">${QT.body(q, EXAM.picks[EXAM.i], false)}</div>
     <div class="btnrow">
       ${EXAM.i>0?`<button class="btn ghost" id="eprev">← Back</button>`:""}
       ${EXAM.i<EXAM.qs.length-1?`<button class="btn" id="enext">Next →</button>`:""}
@@ -392,7 +402,7 @@ function examView(){
     </div>
     <p class="small muted">No feedback until the end — flag mentally and move on; the clock is part of the test.</p>
   </div>`;
-  document.querySelectorAll(".opt").forEach(b=>b.onclick=()=>{ EXAM.picks[EXAM.i]=+b.dataset.i; examView(); });
+  QT.wire($("#eopts"), q, ()=>EXAM.picks[EXAM.i], (v, soft)=>{ EXAM.picks[EXAM.i]=v; EXAM.touched=EXAM.touched||{}; EXAM.touched[EXAM.i]=true; if (!soft) examView(); });
   if ($("#enext")) $("#enext").onclick=()=>{ EXAM.i++; examView(); };
   if ($("#eprev")) $("#eprev").onclick=()=>{ EXAM.i--; examView(); };
   $("#esubmit").onclick=()=>{ finishExam(); };
@@ -478,6 +488,11 @@ function labsView(){
   const envs = {linux:"Linux terminal", ios:"Cisco IOS console", git:"Git workstation", k8s:"Kubernetes bastion"};
   main.innerHTML = `<h1>Hands-on labs</h1>
   <p class="muted small">Real command practice in a simulated terminal — objectives tick off as your commands and device state prove them. Certificates here are earned by doing, not by guessing options.</p>
+  ${Object.keys(LL.benches).length?`<div class="card"><h2>Hands-on benches — cable it, configure it, prove it</h2>
+    <p class="small muted">Real-looking switches, routers and PCs: plug in copper, fibre and console cables, fit SFP optics, set IP addresses, console in with PuTTY and ping across what you built. Tasks tick off from what you actually did.</p>
+    ${Object.entries(LL.benches).map(([id,b])=>`<div class="listrow"><span class="check ${P.labsDone["bench:"+id]?"done":""}">✓</span>
+      <div class="grow"><b>${esc(b.title)}</b> <span class="tag">BENCH</span><div class="small muted">${(b.tasks||[]).length} tasks · +${b.points||60} pts${b.from?` · from ${esc(b.from)}`:""}</div></div>
+      <button class="btn sm" onclick="GO('bench',{id:'${id}'})">Open bench</button></div>`).join("")}</div>`:""}
   <div class="grid2">${Object.entries(LL.labs).map(([id,lab])=>`
     <div class="card"><h3>${esc(lab.title)} ${P.labsDone[id]?'<span class="tag ok">DONE</span>':""}</h3>
       <div class="small muted">${envs[lab.env]} · ${lab.objectives.length} objectives · +${lab.points} pts</div>
@@ -555,6 +570,23 @@ function labView(id){
   }
   if ($("#claim")) $("#claim").onclick = ()=>{ P.labsDone[id]=true; addPoints(lab.points,"lab complete"); labView(id); };
   $("#resetlab").onclick = ()=>{ LAB=null; labView(id); };
+}
+
+/* ---------- hands-on bench (standalone) ---------- */
+window.LLBenchWin = function(id){
+  const b = LL.benches[id]; if (!b || P.labsDone["bench:"+id]) return;
+  P.labsDone["bench:"+id] = true; addPoints(b.points||60, "bench complete");
+};
+function benchView(id){
+  route.group="labs";
+  const b = LL.benches[id]; if (!b) return go("labs");
+  main.innerHTML = `<div class="crumbs"><a href="#" onclick="GO('labs');return false">Labs</a> / ${esc(b.title)}</div>
+  <div class="card"><h2>${esc(b.title)} ${P.labsDone["bench:"+id]?'<span class="tag ok">DONE</span>':""}</h2>
+    ${b.intro?`<p class="small">${b.intro}</p>`:""}<div id="bnb"></div>
+    <div class="btnrow"><button class="btn sm ghost" id="bnreset">Reset bench</button></div></div>`;
+  const el = $("#bnb");
+  Bench.mount(el, b, b.tasks||[], ()=>LLBenchWin(id));
+  $("#bnreset").onclick = ()=>el.reset();
 }
 
 /* ---------- playground (free practice) ---------- */
@@ -931,9 +963,41 @@ function settingsView(){
   };
 }
 
+/* ---------- self-test: open every page and report problems (visit #selftest) ---------- */
+function selfTest(){
+  const saved = JSON.stringify(P), routes = [];
+  for (const [id] of TABS) routes.push({view:id});
+  for (const t of LL.tracks){
+    routes.push({view:"track",id:t.id},{view:"quiz",id:t.id},{view:"cardsession",id:t.id},{view:"cert",id:t.id},{view:"exam",track:t.id});
+    t.lessons.forEach((_,i)=>routes.push({view:"lesson",id:t.id,i}));
+    t.codelabs.forEach(c=>routes.push({view:"codelab",tid:t.id,cid:c.id}));
+  }
+  Object.keys(LL.labs).forEach(id=>routes.push({view:"lab",id}));
+  Object.keys(LL.benches).forEach(id=>routes.push({view:"bench",id}));
+  ["linux","ios","git","k8s"].forEach(env=>routes.push({view:"play",env}));
+  LL.tickets.forEach(tk=>routes.push({view:"ticket",id:tk.id}));
+  routes.push({view:"drill"},{view:"mock",topic:"",timed:false});
+  const problems = [];
+  for (const r of routes){
+    const label = JSON.stringify(r);
+    try {
+      EXAM=null; MOCK=null; LAB=null; route = Object.assign({}, r); render();
+      const txt = main.innerText;
+      if (!txt.trim()) problems.push(label+": rendered nothing");
+      if (/\bundefined\b|\bNaN\b|\[object Object\]/.test(txt)) problems.push(label+": shows undefined/NaN/[object Object]");
+      main.querySelectorAll("img").forEach(im=>{ if (im.complete && im.naturalWidth===0) problems.push(label+": broken image "+im.getAttribute("src")); });
+    } catch(e){ problems.push(label+": "+e.message); }
+  }
+  clearLLTimers(); P = JSON.parse(saved); saveP(); EXAM=null; MOCK=null; LAB=null;
+  route = {view:"selftest"};
+  main.innerHTML = `<div class="card"><h1>Self-test</h1><p>Opened <b>${routes.length}</b> pages.</p>${problems.length?`<div class="callout warn"><b>${problems.length} problem(s):</b><ul>${problems.map(p=>`<li><code>${esc(p)}</code></li>`).join("")}</ul></div>`:`<div class="callout"><b>Every page rendered without errors.</b></div>`}<button class="btn" onclick="GO('home')">Back to dashboard</button></div>`;
+  return { pages: routes.length, problems };
+}
+window.LLSelfTest = selfTest;
+
 /* ---------- boot ---------- */
 touchDay(); saveP();
 const startHash = (location.hash||"").replace("#","");
 if (TABS.some(([id])=>id===startHash)) route={view:startHash};
-render();
+if (startHash==="selftest") selfTest(); else render();
 })();

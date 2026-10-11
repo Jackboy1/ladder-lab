@@ -2,6 +2,7 @@
 window.LL = {
   tracks: [],          // {id, phase, title, tag, hours, blurb, lessons:[{t,html}], quiz:[{q,o,a,why}], cards:[{f,b}], labs:[labId], codelabs:[{id,t,brief,starter,checks:[{re,hint}],model}]}
   labs: {},            // id -> {env:'linux'|'ios'|'k8s'|'git', title, scenario, objectives:[{text, done(st)}], points}
+  benches: {},         // id -> hands-on bench config (bench.js); registered by K.bench({id, ...}) inside lessons
   tickets: [],
   interview: [],
   phases: [
