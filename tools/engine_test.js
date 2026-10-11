@@ -195,6 +195,12 @@ ok(/no ip proxy-arp/.test(B.devs.r.env.exec("show run | section GigabitEthernet0
   ok(!!e.vlans[2000] && /2000 +VLAN2000 +active/.test(e.exec("show vlan brief")) && /^vlan 2000$/m.test(e.exec("show run")), "extended VLAN in transparent mode is active and in running-config");
   e.exec("conf t"); ok(/out of the range/.test(e.exec("vlan 4095")), "vlan 4095 rejected"); e.exec("no vlan 30-32"); ok(!e.vlans[31], "no vlan with a range deletes them"); }
 
+// 11c a topology saved by an older version (missing settings added since) still loads
+{ const e = SIM.ios2Env({kind:"switch"}); e.exec("en"); e.exec("conf t"); e.exec("hostname OLD-SW"); e.exec("end");
+  const snap = e.exportConfig(); delete snap.lbMethod; delete snap.vtpDomain;
+  const e2 = SIM.ios2Env({kind:"switch"}); let threw = null; try { e2.importConfig(snap); } catch(x){ threw = x.message; }
+  ok(!threw && e2.host==="OLD-SW" && /src-mac/.test((e2.exec("en"), e2.exec("show etherchannel load-balance"))), "an older saved config (missing newer settings) imports with factory defaults"); }
+
 // 12 topology builder templates: every starter network works, and survives export → import
 if (ctx.LLTOPO){ const T = ctx.LLTOPO.TEMPLATES;
   const tests = {soho:[["pc1","192.168.1.12"],["pc1","8.8.8.8"]], campus2:[["pc1","10.10.20.51"],["pc2","10.10.10.11"]], campus3:[["pc1","10.2.10.11"],["pc2","10.100.0.10"]], wan:[["hqpc","10.20.0.11"],["brpc","8.8.8.8"]], spineleaf:[["srv1","10.1.2.10"],["srv3","10.1.1.10"]]};

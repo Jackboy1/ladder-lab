@@ -58,7 +58,8 @@ function ios2Env(opts){
   function bcastOf(ip, m){ const a = toInt(ip), b = toInt(m); const x = ((a & b) + (0xFFFFFFFF - b)) >>> 0; return [24,16,8,0].map(s=>Math.floor(x/2**s)%256).join("."); }
   const cfgKeys = Object.keys(factory());
   const snapshot = () => JSON.parse(JSON.stringify(cfgKeys.reduce((o,k)=>(o[k]=st[k],o),{})));
-  const restore = snap => { for (const k of cfgKeys) st[k] = JSON.parse(JSON.stringify(snap[k])); };
+  // a key missing from an older save (a setting added since) falls back to the factory default
+  const restore = snap => { const f = factory(); for (const k of cfgKeys) st[k] = JSON.parse(JSON.stringify(snap[k] !== undefined ? snap[k] : f[k] !== undefined ? f[k] : null)); };
   if (opts.config) Object.assign(st, opts.config);
 
   /* ---------- names ---------- */
