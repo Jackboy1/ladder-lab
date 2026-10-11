@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ladder Lab</title>
+<script>/* theme before first paint: light (default), dark, or system */
+(function(){ var t = "light"; try { t = localStorage.getItem("ladderlab-theme") || "light"; } catch(e){}
+  if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t); })();</script>
 </head>
 <body>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -56,6 +59,9 @@ header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:40;backgroun
 .brand b{font-size:1.05rem;letter-spacing:.02em}
 .brand span{font-size:.72rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
 .statline{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.themebtn{cursor:pointer;font:inherit;color:var(--fg);border:1px solid var(--line)}
+.themebtn:hover{border-color:var(--accent)}
+@media (max-width:640px){ .brand span{display:none} .themebtn .lbl{display:none} header.top{gap:8px;padding:8px 16px} .statline{gap:6px} }
 .pill{background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:3px 11px;font-size:.78rem;font-family:var(--display);font-weight:600;white-space:nowrap}
 .pill .dot{color:var(--accent)}
 nav.tabs{display:flex;gap:6px;overflow-x:auto;margin:14px 0 18px;padding-bottom:2px}
@@ -276,6 +282,7 @@ footer{margin-top:34px;color:var(--muted);font-size:.78rem;border-top:1px solid 
   <header class="top">
     <div class="brand"><b>LADDER LAB</b><span>practice · don't forget</span></div>
     <div class="statline" id="statline"></div>
+    <button class="pill themebtn" id="themebtn" type="button" aria-label="Change colour theme"></button>
   </header>
   <nav class="tabs" id="tabs"></nav>
   <div id="backbar"></div>
@@ -283,38 +290,39 @@ footer{margin-top:34px;color:var(--muted);font-size:.78rem;border-top:1px solid 
   <footer>Built from Akpevwe's course history (Andrei's Python network automation, Jeremy's IT Lab CCNA, Stephane Maarek AWS, CompTIA A+, Linux/Git/DevOps) and the Infrastructure Ladder plan. Progress is saved in this browser — use Settings → Backup to copy it before switching devices.</footer>
 </div>
 
-<script src="data_core.js?v=20261011m"></script>
-<script src="kit.js?v=20261011m"></script>
-<script src="qtypes.js?v=20261011m"></script>
-<script src="drills.js?v=20261011m"></script>
-<script src="data_foundations.js?v=20261011m"></script>
-<script src="data_ccna2.js?v=20261011m"></script>
-<script src="data_career.js?v=20261011m"></script>
-<script src="data_certs.js?v=20261011m"></script>
-<script src="data_linux_git.js?v=20261011m"></script>
-<script src="data_linux2.js?v=20261011m"></script>
-<script src="data_python.js?v=20261011m"></script>
-<script src="data_python2.js?v=20261011m"></script>
-<script src="data_aws.js?v=20261011m"></script>
-<script src="data_aws2.js?v=20261011m"></script>
-<script src="data_devops.js?v=20261011m"></script>
-<script src="data_devops2.js?v=20261011m"></script>
-<script src="data_labs.js?v=20261011m"></script>
-<script src="data_lab_solutions.js?v=20261011m"></script>
-<script src="data_tickets.js?v=20261011m"></script>
-<script src="data_interview.js?v=20261011m"></script>
-<script src="data_itsupport2.js?v=20261011m"></script>
-<script src="data_hardmode.js?v=20261011m"></script>
-<script src="data_visuals.js?v=20261011m"></script>
+<script src="data_core.js?v=20261011n"></script>
+<script src="kit.js?v=20261011n"></script>
+<script src="qtypes.js?v=20261011n"></script>
+<script src="drills.js?v=20261011n"></script>
+<script src="data_foundations.js?v=20261011n"></script>
+<script src="data_ccna2.js?v=20261011n"></script>
+<script src="data_career.js?v=20261011n"></script>
+<script src="data_certs.js?v=20261011n"></script>
+<script src="data_linux_git.js?v=20261011n"></script>
+<script src="data_linux2.js?v=20261011n"></script>
+<script src="data_python.js?v=20261011n"></script>
+<script src="data_python2.js?v=20261011n"></script>
+<script src="data_aws.js?v=20261011n"></script>
+<script src="data_aws2.js?v=20261011n"></script>
+<script src="data_devops.js?v=20261011n"></script>
+<script src="data_devops2.js?v=20261011n"></script>
+<script src="data_labs.js?v=20261011n"></script>
+<script src="data_lab_solutions.js?v=20261011n"></script>
+<script src="data_tickets.js?v=20261011n"></script>
+<script src="data_interview.js?v=20261011n"></script>
+<script src="data_itsupport2.js?v=20261011n"></script>
+<script src="data_hardmode.js?v=20261011n"></script>
+<script src="data_visuals.js?v=20261011n"></script>
 <!-- rebuilt modules (load after data_visuals.js: it injects diagrams by lesson index) -->
-<script src="data_ccna_m1.js?v=20261011m"></script>
-<script src="data_ccna_m2.js?v=20261011m"></script>
-<script src="data_ccna_m3.js?v=20261011m"></script>
-<script src="sim.js?v=20261011m"></script>
-<script src="sim_ios.js?v=20261011m"></script>
-<script src="bench.js?v=20261011m"></script>
-<script src="builder.js?v=20261011m"></script>
-<script src="app.js?v=20261011m"></script>
+<script src="data_ccna_m1.js?v=20261011n"></script>
+<script src="data_ccna_m2.js?v=20261011n"></script>
+<script src="data_ccna_m3.js?v=20261011n"></script>
+<script src="data_ccna_m4.js?v=20261011n"></script>
+<script src="sim.js?v=20261011n"></script>
+<script src="sim_ios.js?v=20261011n"></script>
+<script src="bench.js?v=20261011n"></script>
+<script src="builder.js?v=20261011n"></script>
+<script src="app.js?v=20261011n"></script>
 
 </body>
 </html>

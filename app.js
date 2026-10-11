@@ -74,6 +74,15 @@ const UP = { lesson:r=>["track",{id:r.id}], quiz:r=>["track",{id:r.id}], track:(
 window.LLBack = () => { if (navDepth>0) history.back(); else { const u = UP[route.view]; u ? go(...u(route)) : go("home"); } };
 window.GO = go;
 
+/* colour theme: light (default) → dark → follow the device; remembered in this browser */
+const THEMES = { light:["☀","Light"], dark:["☾","Dark"], system:["◐","Auto"] };
+function themeGet(){ try { return localStorage.getItem("ladderlab-theme") || "light"; } catch(e){ return "light"; } }
+function themeApply(t){ const r = document.documentElement; if (t==="system") r.removeAttribute("data-theme"); else r.setAttribute("data-theme", t);
+  const b = document.getElementById("themebtn"); if (b){ b.innerHTML = `<span aria-hidden="true">${THEMES[t][0]}</span><span class="lbl"> ${THEMES[t][1]}</span>`; b.title = `Theme: ${THEMES[t][1]} — click to change`; b.setAttribute("aria-label", `Colour theme: ${THEMES[t][1]}. Click to change`); } }
+function themeNext(){ const order = ["light","dark","system"], t = order[(order.indexOf(themeGet())+1) % order.length];
+  try { localStorage.setItem("ladderlab-theme", t); } catch(e){} themeApply(t); }
+(()=>{ const b = document.getElementById("themebtn"); if (b) b.onclick = themeNext; themeApply(themeGet()); })();
+
 function statline(){
   const r = rank(), nx = nextRank();
   $("#statline").innerHTML =
