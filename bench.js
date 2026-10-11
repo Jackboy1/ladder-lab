@@ -51,6 +51,7 @@ function addDevice(B, d0){
     if (d.kind==="switch" || d.kind==="router"){
       d.env = SIM.ios2Env({ host:d0.host || d0.label, kind:d.kind, ports:d.ports.filter(p=>p.ios).map(p=>p.ios), mac:d0.mac || macFor(d.id).slice(0,9), model:d0.platform, hooks:makeHooks(B, d) });
       if (d0.config) d0.config(d.env);              // pre-configure (e.g. a broken network to troubleshoot)
+      B.syslog[d.id] = [];                          // the lab's own setup leaves nothing in the log (the learner starts with a clean buffer)
       if (!d0.fresh) d.env.baseline();              // the device's starting config is its saved startup-config (fresh:true = out of the box)
       B.mac[d.id] = {}; B.arp[d.id] = {};
     } else if (d.kind!=="hub"){
