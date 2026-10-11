@@ -17,6 +17,9 @@ const fakeHash = (s, t) => t==="7" ? [...String(s)].map((c,i)=>((c.charCodeAt(0)
   : "$9$" + [...String(s)+"salt"].map((c,i)=>"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./"[(c.charCodeAt(0)*7+i*13)%64]).join("").slice(0,14) + "$" + [...String(s)].map((c,i)=>"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(c.charCodeAt(0)*31+i*17)%62]).join("").padEnd(43,"x").slice(0,43);
 
 const HELP = {
+  ospf:"OSPF information", protocols:"IP routing protocol process parameters and statistics", standby:"HSRP information", router:"Enable a routing process", network:"Enable routing on an IP network",
+  "passive-interface":"Suppress routing updates on an interface", "router-id":"router-id for this OSPF process", "default-information":"Control distribution of default information",
+  "auto-cost":"Calculate OSPF interface cost according to bandwidth", bandwidth:"Set bandwidth informational parameter", neighbor:"Neighbor list", database:"Database summary",
   enable:"Turn on privileged commands", disable:"Turn off privileged commands", exit:"Exit from the EXEC", logout:"Exit from the EXEC", ping:"Send echo messages",
   show:"Show running system information", configure:"Enter configuration mode", copy:"Copy from one file to another", write:"Write running configuration to memory, network, or terminal",
   reload:"Halt and perform a cold restart", erase:"Erase a filesystem", clear:"Reset functions", traceroute:"Trace route to destination", terminal:"Set terminal line parameters",
@@ -49,7 +52,7 @@ function ios2Env(opts){
     return { host: opts.host || (kind==="router"?"Router":"Switch"), enableSecret:null, enablePassword:null, servicePwEnc:false, banner:null,
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
-      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null,
+      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null,
       vlans: kind==="switch" ? {1:"default", 1002:"fddi-default", 1003:"token-ring-default", 1004:"fddinet-default", 1005:"trnet-default"} : {}, intfs };
   };
   const st = Object.assign(factory(), { kind, mode:"user", cur:null, curList:null, curLine:null, curVlan:null, history:[], savedOnce:false, startup:null, pending:null, noEcho:false, motd: opts.motd!=null?opts.motd:"" });
@@ -186,7 +189,15 @@ function ios2Env(opts){
           if (t.guard) L.push(` spanning-tree guard ${t.guard}`); if (t.cost) L.push(` spanning-tree cost ${t.cost}`); if (t.prio!=null) L.push(` spanning-tree port-priority ${t.prio}`);
         }
       }
+      if (i.bw) L.push(` bandwidth ${i.bw}`);
       if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
+      if (i.hsrpVer===2) L.push(" standby version 2");
+      if (i.hsrp) for (const [g,h] of Object.entries(i.hsrp)){ if (h.ip) L.push(` standby ${g} ip ${h.ip}`); if (h.prio!=null && h.prio!==100) L.push(` standby ${g} priority ${h.prio}`); if (h.preempt) L.push(` standby ${g} preempt`); }
+      if (i.ospfNet==="point-to-point") L.push(" ip ospf network point-to-point");
+      if (i.ospfPrio!=null) L.push(` ip ospf priority ${i.ospfPrio}`);
+      if (i.ospfHello) L.push(` ip ospf hello-interval ${i.ospfHello}`); if (i.ospfDead && i.ospfDead!==(i.ospfHello||10)*4) L.push(` ip ospf dead-interval ${i.ospfDead}`);
+      if (i.ospfArea) L.push(` ip ospf ${i.ospfArea.pid} area ${i.ospfArea.area}`);
+      if (i.ospfCost) L.push(` ip ospf cost ${i.ospfCost}`);
       if (i.speed!=="auto" && i.speed) L.push(` speed ${i.speed}`);
       if (i.duplex!=="auto" && i.duplex) L.push(` duplex ${i.duplex}`);
       if (i.cdp===false && i.mode!=="svi" && !i.loop && !i.sub && !i.po) L.push(" no cdp enable");
@@ -194,8 +205,11 @@ function ios2Env(opts){
       if (i.shut) L.push(" shutdown");
       L.push("!");
     }
+    if (st.ospf){ const o = st.ospf; L.push(`router ospf ${o.pid}`); if (o.rid) L.push(` router-id ${o.rid}`); if (o.refBw && o.refBw!==100) L.push(` auto-cost reference-bandwidth ${o.refBw}`);
+      if (o.passiveDefault){ L.push(" passive-interface default"); for (const n of (o.noPassive||[])) L.push(` no passive-interface ${n}`); } else for (const n of (o.passive||[])) L.push(` passive-interface ${n}`);
+      for (const w of o.networks) L.push(` network ${w.net} ${w.wild} area ${w.area}`); if (o.defOrig) L.push(` default-information originate${o.defAlways?" always":""}`); L.push("!"); }
     if (st.defaultGw) L.push(`ip default-gateway ${st.defaultGw}`);
-    for (const r of st.routes) L.push(`ip route ${r.net} ${r.mask} ${r.nh}`);
+    for (const r of st.routes.slice().sort((x,y)=>toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.ad?" "+r.ad:""}`);
     L.push("!");
     if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
     L.push("!", "line con 0"); const c = st.lines.con;
@@ -303,24 +317,195 @@ function ios2Env(opts){
     for (const r of rows) o += `Internet  ${pad(r.ip,17)}${pad(r.age||"0",11)}${pad(r.mac,16)}ARPA   ${r.intf}\n`;
     return o.trimEnd();
   }
+
+  /* ---------- routing: one RIB (connected, local, static, OSPF) chosen by administrative distance, then longest-prefix match ---------- */
+  const routingOn = () => kind==="router" || !!st.ipRouting;
+  const inNet = (ip, net, len) => len===0 || (toInt(ip) >>> (32-len)) === (toInt(net) >>> (32-len));
+  const ones32 = x => (x>>>0).toString(2).replace(/0/g,"").length;
+  const ageOf = s => { let h = 7; for (const ch of String(s)) h = (h*31 + ch.charCodeAt(0)) % 2400; h += 300; return `00:${String(Math.floor(h/60)).padStart(2,"0")}:${String(h%60).padStart(2,"0")}`; };
+  // OSPF, this router's side: which interfaces run it, in which area, at what cost, with which timers
+  function ospfAreaOf(n){ const i = st.intfs[n]; if (!i || !i.ip) return null;
+    if (i.ospfArea) return i.ospfArea.area;                       // interface method: ip ospf 1 area 0
+    if (!st.ospf) return null; let best = null;
+    for (const w of st.ospf.networks){ const care = (0xFFFFFFFF - toInt(w.wild))>>>0;   // network statements: the most specific match wins
+      if (((toInt(i.ip) & care)>>>0) === ((toInt(w.net) & care)>>>0)){ const b = ones32(care); if (!best || b > best.b) best = {area:w.area, b}; } }
+    return best ? best.area : null; }
+  const ospfPassive = n => { const o = st.ospf; if (!o) return false; return o.passiveDefault ? !(o.noPassive||[]).includes(n) : (o.passive||[]).includes(n); };
+  const bwKbit = n => { const i = st.intfs[n]; if (i.bw) return i.bw; if (i.loop) return 8000000; if (i.sub) return bwKbit(i.parent); if (i.mode==="svi"||n.startsWith("Port-channel")) return 1000000;
+    const c = hooks.counters(n) || {}; const sp = i.speed && i.speed!=="auto" ? i.speed : (c.speed || 1000); return sp*1000; };
+  const ospfCost = n => { const i = st.intfs[n]; if (i.ospfCost) return i.ospfCost; const ref = (st.ospf && st.ospf.refBw) || 100; return Math.max(1, Math.floor(ref*1000 / bwKbit(n))); };
+  const ospfNetType = n => { const i = st.intfs[n]; if (i.ospfNet==="point-to-point") return "POINT_TO_POINT"; return i.loop ? "LOOPBACK" : "BROADCAST"; };
+  function ospfRidPick(){ const o = st.ospf; if (!o) return null; if (o.rid) return o.rid;
+    const hi = arr => arr.sort((a,b)=>toInt(b)-toInt(a))[0] || null;   // highest loopback IP, else highest active interface IP
+    return hi(ifNames().filter(n=>st.intfs[n].loop && st.intfs[n].ip && up(n)).map(n=>st.intfs[n].ip)) || hi(ifNames().filter(n=>!st.intfs[n].loop && st.intfs[n].ip && up(n)).map(n=>st.intfs[n].ip)); }
+  function ospfRid(){ if (!st.ospf || !routingOn()) return null; if (!st.ospfRidActive) st.ospfRidActive = ospfRidPick(); return st.ospfRidActive; }   // chosen when the process starts; changes only on reload / clear ip ospf process
+  function ospfIfaces(){ if (!st.ospf || !routingOn()) return [];
+    return ifNames().map(n=>{ const i = st.intfs[n]; const area = ospfAreaOf(n); if (area==null) return null; const hello = i.ospfHello || 10;
+      return {ios:n, ip:i.ip, mask:i.mask, len:maskLen(i.mask), area, cost:ospfCost(n), prio: i.ospfPrio!=null ? i.ospfPrio : 1, hello, dead: i.ospfDead || hello*4,
+        net: ospfNetType(n), passive: ospfPassive(n), loop: !!i.loop, up: up(n), mac:i.mac, via: i.ospfArea ? "Interface Configuration" : "Network Statement"}; }).filter(Boolean); }
+  const areaStr = a => String(a);
+  // static routes are installed only when they resolve: exit interface up, or the next hop reachable through another route
+  function resolveStatic(r, cand){
+    const len = maskLen(r.mask), base = {code: len===0 ? "S*" : "S", net:r.net, len, ad: r.ad || 1, metric:0};
+    if (r.ios){ if (!st.intfs[r.ios] || !up(r.ios)) return null; return Object.assign(base, {nhs:[{ios:r.ios, nh:r.nh||null, cfgNh:r.nh||null, direct:!r.nh, full:!!r.nh}]}); }
+    const m = bestMatch(cand, r.nh, r.net+"/"+len); if (!m || m.code==="L") return null;
+    const via = m.nhs[0]; return Object.assign(base, {nhs:[{ios:via.ios, nh: via.nh || r.nh, cfgNh:r.nh}]});
+  }
+  function bestMatch(entries, ip, skipKey){ let b = null; for (const e of entries){ if (skipKey && e.net+"/"+e.len===skipKey) continue; if (inNet(ip, e.net, e.len) && (!b || e.len > b.len || (e.len===b.len && e.ad < b.ad))) b = e; } return b; }
+  function ribAll(){
+    const cand = [];
+    for (const n of ifNames()){ const i = st.intfs[n]; if (!i.ip || !up(n)) continue; const len = maskLen(i.mask);
+      cand.push({code:"C", net:netOf(i.ip,i.mask), len, ad:0, metric:0, nhs:[{ios:n, nh:null}]});
+      if (len<32) cand.push({code:"L", net:i.ip, len:32, ad:0, metric:0, nhs:[{ios:n, nh:null}]}); }
+    if (routingOn()) for (const r of ((hooks.ospfRoutes && hooks.ospfRoutes()) || [])) cand.push({code:r.type, net:r.net, len:r.len, ad:110, metric:r.cost, fwd:r.fwd, nhs:r.nhs.map(x=>({ios:x.ios, nh:x.nh, from:x.from}))});
+    if (routingOn()){ let pend = st.routes.slice();
+      for (let pass=0; pass<4 && pend.length; pass++){ const left = []; for (const r of pend){ const e = resolveStatic(r, cand); if (e) cand.push(e); else left.push(r); } if (left.length===pend.length) break; pend = left; } }
+    const best = new Map();   // per prefix: the lowest administrative distance wins; equal-distance statics share the load
+    for (const c of cand){ const k = c.net+"/"+c.len, b = best.get(k);
+      if (!b || c.ad < b.ad) best.set(k, Object.assign({}, c, {nhs:[...c.nhs]}));
+      else if (c.ad===b.ad && c.code[0]==="S" && b.code[0]==="S") b.nhs.push(...c.nhs); }
+    return [...best.values()];
+  }
+  // forwarding decision: longest match, then (equal-cost) one path per destination like CEF
+  st.lookup = dst => { if (!routingOn()) return null; const e = bestMatch(ribAll(), dst); if (!e) return null;
+    const x = e.nhs[e.nhs.length>1 ? toInt(dst) % e.nhs.length : 0]; return {ios:x.ios, nh: x.nh || dst, code:e.code, net:e.net, len:e.len}; };
+  st.rib = () => ribAll();
+  st.ospfInfo = () => st.ospf && routingOn() ? {pid:st.ospf.pid, rid:ospfRid(), ifaces:ospfIfaces(), defOrig:st.ospf.defOrig, defAlways:st.ospf.defAlways, resets:st.ospfResets||0,
+    hasDefault: ribAll().some(e=>e.len===0 && e.code!=="O*E2")} : null;
+  st.hsrpGroups = () => { const out = []; for (const n of ifNames()){ const i = st.intfs[n]; if (i.hsrp) for (const [g, h] of Object.entries(i.hsrp)) if (h.ip) out.push({ios:n, grp:+g, vip:h.ip, prio: h.prio!=null ? h.prio : 100, preempt:!!h.preempt, ver: i.hsrpVer||1, ip:i.ip, up: up(n) && !!i.ip}); } return out; };
+  const hsrpVmac = (g, ver) => ver===2 ? `0000.0c9f.f${g.toString(16).padStart(3,"0")}` : `0000.0c07.ac${g.toString(16).padStart(2,"0")}`;
+
+  function ribLine(e, noLen){   // noLen: under an "is subnetted" heading IOS prints the prefix without its length
+    const code = pad(e.code, 9), pfx = noLen ? e.net : `${e.net}/${e.len}`, ind = " ".repeat(9 + pfx.length + 1);
+    if (e.code==="C" || e.code==="L") return `${code}${pfx} is directly connected, ${e.nhs[0].ios}`;
+    if (e.code[0]==="S") return e.nhs.map((h,k)=>{ const body = h.direct ? `is directly connected, ${h.ios}` : `[${e.ad}/0] via ${h.cfgNh||h.nh}${h.full ? ", "+h.ios : ""}`; return (k ? ind : `${code}${pfx} `) + body; }).join("\n");
+    return e.nhs.map((h,k)=>(k ? ind : `${code}${pfx} `) + `[110/${e.metric}] via ${h.nh}, ${ageOf(pfx)}, ${h.ios}`).join("\n");
+  }
+  function routeEntryFor(ip){
+    const e = bestMatch(ribAll().filter(x=>x.len>0), ip);   // like IOS: the default route isn't shown as a match here
+    if (!e) return "% Network not in table";
+    const pfx = `${e.net}/${e.len}`, tail = "\n      Route metric is ";
+    if (e.code==="C"||e.code==="L") return `Routing entry for ${pfx}\n  Known via "connected", distance 0, metric 0 (connected, via interface)\n  Routing Descriptor Blocks:\n  * directly connected, via ${e.nhs[0].ios}${tail}0, traffic share count is 1`;
+    if (e.code[0]==="S") return `Routing entry for ${pfx}\n  Known via "static", distance ${e.ad}, metric 0${e.nhs.some(h=>h.direct)?" (connected)":""}\n  Routing Descriptor Blocks:\n` +
+      e.nhs.map((h,k)=>`  ${k?" ":"*"} ${h.direct ? `directly connected, via ${h.ios}` : (h.cfgNh||h.nh) + (h.full ? `, via ${h.ios}` : "")}${tail}0, traffic share count is 1`).join("\n");
+    const type = e.code==="O IA" ? "inter area" : /E2/.test(e.code) ? `extern 2, forward metric ${e.fwd||1}` : "intra area";
+    return `Routing entry for ${pfx}\n  Known via "ospf ${st.ospf?st.ospf.pid:1}", distance 110, metric ${e.metric}, type ${type}\n  Last update from ${e.nhs[0].nh} on ${e.nhs[0].ios}, ${ageOf(pfx)} ago\n  Routing Descriptor Blocks:\n` +
+      e.nhs.map((h,k)=>`  ${k?" ":"*"} ${h.nh}, from ${h.from||h.nh}, ${ageOf(pfx)} ago, via ${h.ios}${tail}${e.metric}, traffic share count is 1`).join("\n");
+  }
+
+  /* ---------- OSPF show commands (neighbours, DR/BDR and routes come from the bench through hooks) ---------- */
+  const ospfIfState = (n, f) => { const x = hooks.ospfIf ? hooks.ospfIf(n) : null; if (x) return x;
+    return f.loop && f.net==="LOOPBACK" ? {state:"LOOP", nbrs:[], adj:0} : f.net==="POINT_TO_POINT" ? {state:"P2P", nbrs:[], adj:0} : {state:"DR", dr:{rid:ospfRid(), ip:f.ip}, bdr:null, nbrs:[], adj:0}; };
+  function ospfNeighbors(){
+    if (!st.ospf) return "";
+    const rows = (hooks.ospfNbrs ? hooks.ospfNbrs() : []) || [];
+    let o = "\nNeighbor ID     Pri   State           Dead Time   Address         Interface\n";
+    for (const r of rows) o += pad(r.rid,16) + String(r.prio).padStart(3) + "   " + pad(r.state,16) + pad(`00:00:${String(Math.max(1, r.dead - 1 - (toInt(r.ip)%7))).padStart(2,"0")}`,12) + pad(r.ip,16) + r.ios + "\n";
+    return o.replace(/\n$/,"");
+  }
+  function ospfIntBrief(){
+    const fs = ospfIfaces(); if (!fs.length) return "";
+    let o = "Interface    PID   Area            IP Address/Mask    Cost  State Nbrs F/C\n";
+    for (const f of fs){ const x = ospfIfState(f.ios, f); const st8 = !f.up ? "DOWN" : x.state;
+      o += pad(short(f.ios),13) + pad(st.ospf.pid,6) + pad(areaStr(f.area),16) + pad(`${f.ip}/${f.loop && f.net==="LOOPBACK" ? 32 : f.len}`,19) + pad(f.cost,6) + pad(st8,6) + `${x.adj||0}/${(x.nbrs||[]).length}\n`; }
+    return o.replace(/\n$/,"");
+  }
+  function ospfIntDetail(only){
+    const fs = ospfIfaces().filter(f=>!only || f.ios===only);
+    if (only && !fs.length){ const i = st.intfs[only]; return `${only} is ${i.shut?"administratively down":up(only)?"up":"down"}, line protocol is ${up(only)?"up":"down"}\n  OSPF not enabled on this interface`; }
+    return fs.map(f=>{ const i = st.intfs[f.ios], x = ospfIfState(f.ios, f), rid = ospfRid();
+      const L = [`${f.ios} is ${i.shut?"administratively down":f.up?"up":"down"}, line protocol is ${f.up?"up":"down"}`,
+        `  Internet Address ${f.ip}/${f.len}, Interface ID ${ifNames().indexOf(f.ios)+1}, Area ${areaStr(f.area)}`, `  Attached via ${f.via}`,
+        `  Process ID ${st.ospf.pid}, Router ID ${rid}, Network Type ${f.net}, Cost: ${f.cost}`,
+        "  Topology-MTID    Cost    Disabled    Shutdown      Topology Name", `        0           ${pad(f.cost,10)}no          no            Base`];
+      if (f.via==="Interface Configuration") L.push("  Enabled by interface config, including secondary ip addresses");
+      if (f.net==="LOOPBACK"){ L.push("  Loopback interface is treated as a stub Host"); return L.join("\n"); }
+      if (!f.up){ L.push("  Transmit Delay is 1 sec, State DOWN" + (f.net==="BROADCAST" ? `, Priority ${f.prio}` : "")); return L.join("\n"); }
+      if (f.net==="POINT_TO_POINT") L.push("  Transmit Delay is 1 sec, State POINT_TO_POINT");
+      else { L.push(`  Transmit Delay is 1 sec, State ${x.state}, Priority ${f.prio}`);
+        if (x.dr) L.push(`  Designated Router (ID) ${x.dr.rid}, Interface address ${x.dr.ip}`); else L.push("  No designated router on this network");
+        if (x.bdr) L.push(`  Backup Designated router (ID) ${x.bdr.rid}, Interface address ${x.bdr.ip}`); else if (x.dr) L.push("  No backup designated router on this network"); }
+      L.push(`  Timer intervals configured, Hello ${f.hello}, Dead ${f.dead}, Wait ${f.dead}, Retransmit 5`, `    oob-resync timeout ${f.dead}`);
+      if (f.passive) L.push("    No Hellos (Passive interface)"); else L.push(`    Hello due in 00:00:0${Math.max(1, f.hello%10 || 4)}`);
+      L.push("  Supports Link-local Signaling (LLS)", "  Cisco NSF helper support enabled", "  IETF NSF helper support enabled",
+        `  Neighbor Count is ${(x.nbrs||[]).length}, Adjacent neighbor count is ${x.adj||0}`);
+      for (const nb of (x.nbrs||[]).filter(nb=>/^FULL/.test(nb.state))) L.push(`    Adjacent with neighbor ${nb.rid}${/\/DR$/.test(nb.state)?"  (Designated Router)":/\/BDR$/.test(nb.state)?"  (Backup Designated Router)":""}`);
+      L.push("  Suppress hello for 0 neighbor(s)");
+      return L.join("\n"); }).join("\n");
+  }
+  function ospfAreas(){ return [...new Set(ospfIfaces().map(f=>f.area))].sort((a,b)=>a-b); }
+  function ipProtocols(){
+    if (!st.ospf || !routingOn()) return "";
+    const o = st.ospf, fs = ospfIfaces(), areas = ospfAreas(), info = hooks.ospfSelf ? hooks.ospfSelf() || {} : {};
+    const L = [`Routing Protocol is "ospf ${o.pid}"`, "  Outgoing update filter list for all interfaces is not set", "  Incoming update filter list for all interfaces is not set", `  Router ID ${ospfRid()}`];
+    if (info.abr) L.push("  It is an area border router"); if (o.defOrig) L.push("  It is an autonomous system boundary router", " Redistributing External Routes from,");
+    L.push(`  Number of areas in this router is ${areas.length}. ${areas.length} normal 0 stub 0 nssa`, "  Maximum path: 4", "  Routing for Networks:");
+    for (const w of o.networks) L.push(`    ${w.net} ${w.wild} area ${areaStr(w.area)}`);
+    const expl = fs.filter(f=>f.via==="Interface Configuration"); if (expl.length){ for (const a of [...new Set(expl.map(f=>f.area))]){ L.push(`  Routing on Interfaces Configured Explicitly (Area ${areaStr(a)}):`); expl.filter(f=>f.area===a).forEach(f=>L.push(`    ${f.ios}`)); } }
+    const pas = ifNames().filter(n=>ospfPassive(n) && st.intfs[n].ip); if (pas.length){ L.push("  Passive Interface(s):"); pas.forEach(n=>L.push(`    ${n}`)); }
+    L.push("  Routing Information Sources:", "    Gateway         Distance      Last Update");
+    const srcs = [...new Set(((hooks.ospfRoutes && hooks.ospfRoutes()) || []).flatMap(r=>r.nhs.map(x=>x.from)).filter(Boolean))].sort((a,b)=>toInt(a)-toInt(b));
+    for (const g of srcs) L.push(`    ${pad(g,16)}${String(110).padStart(8)}      ${ageOf(g)}`);
+    L.push(`  Distance: (default is 110)`);
+    return L.join("\n");
+  }
+  function ospfProcess(){
+    if (!st.ospf || !routingOn()) return "";
+    const o = st.ospf, rid = ospfRid(), info = hooks.ospfSelf ? hooks.ospfSelf() || {} : {}, fs = ospfIfaces();
+    const L = [` Routing Process "ospf ${o.pid}" with ID ${rid}`, " Start time: 00:00:41.112, Time elapsed: 01:12:07.418", " Supports only single TOS(TOS0) routes", " Supports opaque LSA", " Supports Link-local Signaling (LLS)", " Supports area transit capability"];
+    if (info.abr) L.push(" It is an area border router"); if (o.defOrig) L.push(" It is an autonomous system boundary router");
+    L.push(" Router is not originating router-LSAs with maximum metric", " Initial SPF schedule delay 50 msecs", " Minimum hold time between two consecutive SPFs 200 msecs", " Maximum wait time between two consecutive SPFs 5000 msecs",
+      ` Number of areas in this router is ${ospfAreas().length}. ${ospfAreas().length} normal 0 stub 0 nssa`, ` Reference bandwidth unit is ${o.refBw||100} mbps`);
+    for (const a of ospfAreas()){ const inA = fs.filter(f=>f.area===a); L.push(`    Area ${a===0?"BACKBONE(0)":a}`, `        Number of interfaces in this area is ${inA.length}${inA.some(f=>f.loop)?` (${inA.filter(f=>f.loop).length} loopback)`:""}`, "        Area has no authentication", `        SPF algorithm last executed 00:0${(toInt(rid||"0.0.0.1")%8)+1}:12.448 ago`, `        SPF algorithm executed ${(info.spfRuns||3)} times`); }
+    return L.join("\n");
+  }
+  function ospfDatabase(){
+    if (!st.ospf || !routingOn()) return "";
+    const rid = ospfRid(), db = (hooks.ospfLsdb && hooks.ospfLsdb()) || {areas:{}, ext:[]};
+    const hdr = "Link ID         ADV Router      Age         Seq#       Checksum", row = (id, adv, extra) => pad(id,16) + pad(adv,16) + pad(String(100 + toInt(id)%1500),12) + "0x80000" + String(1 + toInt(adv)%9).padStart(3,"0") + " 0x00" + ((toInt(id)+toInt(adv))%65536).toString(16).toUpperCase().padStart(4,"0") + (extra!=null ? " " + extra : "");
+    const L = ["", `            OSPF Router with ID (${rid}) (Process ID ${st.ospf.pid})`];
+    for (const a of ospfAreas()){ const A = db.areas[a] || {routers:[], nets:[], sums:[]};
+      L.push("", `                Router Link States (Area ${a})`, "", hdr + " Link count"); for (const r of A.routers) L.push(row(r.rid, r.rid, r.links));
+      if (A.nets.length){ L.push("", `                Net Link States (Area ${a})`, "", hdr); for (const nn of A.nets) L.push(row(nn.ip, nn.rid)); }
+      if (A.sums.length){ L.push("", `                Summary Net Link States (Area ${a})`, "", hdr); for (const sm of A.sums) L.push(row(sm.net, sm.rid)); } }
+    if (db.ext.length){ L.push("", "                Type-5 AS External Link States", "", hdr + " Tag"); for (const x of db.ext) L.push(row(x.net, x.rid, 1)); }
+    return L.join("\n");
+  }
+  function standbyBrief(){
+    const gs = st.hsrpGroups(); if (!gs.length) return "";
+    let o = "                     P indicates configured to preempt.\n                     |\nInterface   Grp  Pri P State   Active          Standby         Virtual IP\n";
+    for (const g of gs){ const x = (hooks.hsrp && hooks.hsrp(g.ios, g.grp)) || {state: g.up ? "Active" : "Init", active: g.up ? "local" : "unknown", standby:"unknown"};
+      o += pad(short(g.ios),12) + pad(g.grp,5) + pad(g.prio,4) + pad(g.preempt?"P":" ",2) + pad(x.state,8) + pad(x.active,16) + pad(x.standby,16) + g.vip + "\n"; }
+    return o.replace(/\n$/,"");
+  }
+  function standbyDetail(){
+    return st.hsrpGroups().map(g=>{ const x = (hooks.hsrp && hooks.hsrp(g.ios, g.grp)) || {state: g.up ? "Active" : "Init", active: g.up ? "local" : "unknown", standby:"unknown"}; const vm = hsrpVmac(g.grp, g.ver);
+      return [`${g.ios} - Group ${g.grp}${g.ver===2?" (version 2)":""}`, `  State is ${x.state}`, `    ${x.changes||1} state change${(x.changes||1)>1?"s":""}, last state change 00:0${(g.grp%8)+1}:14`, `  Virtual IP address is ${g.vip}`,
+        `  Active virtual MAC address is ${x.active==="unknown" ? "unknown" : vm}${x.state==="Active"?" (MAC In Use)":""}`, `    Local virtual MAC address is ${vm} (v${g.ver} default)`, "  Hello time 3 sec, hold time 10 sec", "    Next hello sent in 1.264 secs",
+        `  Preemption ${g.preempt?"enabled":"disabled"}`, `  Active router is ${x.active}${x.activePrio!=null && x.active!=="local" ? `, priority ${x.activePrio} (expires in 8.912 sec)` : ""}`,
+        `  Standby router is ${x.standby}${x.standbyPrio!=null && x.standby!=="local" ? `, priority ${x.standbyPrio} (expires in 9.360 sec)` : ""}`, `  Priority ${g.prio} (${g.prio===100?"default 100":"configured "+g.prio})`, `  Group name is "hsrp-${short(g.ios)}-${g.grp}" (default)`].join("\n"); }).join("\n");
+  }
   function routeTable(only){
     if (kind==="switch" && !st.ipRouting) return `Default gateway is ${st.defaultGw||"not set"}\n\nHost               Gateway           Last Use    Total Uses  Interface\nICMP redirect cache is empty`;   // a Layer 2 switch has no routing table until "ip routing"
-    const L = ["Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP","       O - OSPF, IA - OSPF inter area, * - candidate default","",
-      (st.routes.find(r=>r.net==="0.0.0.0") ? `Gateway of last resort is ${st.routes.find(r=>r.net==="0.0.0.0").nh} to network 0.0.0.0` : "Gateway of last resort is not set"), ""];
-    const rows = [];
-    for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && up(n)){ rows.push({net:netOf(i.ip,i.mask), len:maskLen(i.mask), text:`C        ${netOf(i.ip,i.mask)}/${maskLen(i.mask)} is directly connected, ${n}`}); rows.push({net:i.ip, len:32, text:`L        ${i.ip}/32 is directly connected, ${n}`}); } }
-    for (const r of st.routes) rows.push({net:r.net, len:maskLen(r.mask), text:`S${r.net==="0.0.0.0"?"*":" "}       ${r.net}/${maskLen(r.mask)} [1/0] via ${r.nh}`});
-    const keep = only==='connected' ? (r=>/^[CL]/.test(r.text)) : only==='static' ? (r=>/^S/.test(r.text)) : (()=>true);
-    for (let k=rows.length-1;k>=0;k--) if (!keep(rows[k])) rows.splice(k,1);
+    const rib = ribAll(), def = rib.find(e=>e.len===0);
+    const L = ["Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP", "       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area",
+      "       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2", "       E1 - OSPF external type 1, E2 - OSPF external type 2",
+      "       i - IS-IS, su - IS-IS summary, L1 - IS-IS level-1, L2 - IS-IS level-2", "       ia - IS-IS inter area, * - candidate default, U - per-user static route",
+      "       o - ODR, P - periodic downloaded static route, H - NHRP, l - LISP", "       a - application route", "       + - replicated route, % - next hop override, p - overrides from PfR", "",
+      def ? `Gateway of last resort is ${def.nhs[0].direct ? "0.0.0.0" : (def.nhs[0].cfgNh || def.nhs[0].nh)} to network 0.0.0.0` : "Gateway of last resort is not set", ""];
+    const keep = only==="connected" ? (e=>/^[CL]/.test(e.code)) : only==="static" ? (e=>/^S/.test(e.code)) : only==="ospf" ? (e=>/^O/.test(e.code)) : (()=>true);
+    const rows = rib.map(e=>({net:e.net, len:e.len, e, show:keep(e), text:ribLine(e)}));   // headings count the whole table, even in a filtered view
     const classful = ip => { const f = +ip.split(".")[0]; const p = f<128 ? 8 : f<192 ? 16 : 24; return {major: netOf(ip, [0,0,0,0].map((_,k)=>k<p/8?255:0).join(".")), p}; };
     const groups = new Map();
-    for (const r of rows){ if (r.net==="0.0.0.0"){ groups.set("0.0.0.0", {hdr:null, rows:[r]}); continue; } const c = classful(r.net); const key = c.major+"/"+c.p; if (!groups.has(key)) groups.set(key, {major:c.major, p:c.p, rows:[]}); groups.get(key).rows.push(r); }
+    for (const r of rows){ if (r.len===0){ groups.set("0.0.0.0", {hdr:null, rows:[r]}); continue; } const c = classful(r.net); const key = c.major+"/"+c.p; if (!groups.has(key)) groups.set(key, {major:c.major, p:c.p, rows:[]}); groups.get(key).rows.push(r); }
     for (const [key,g] of [...groups].sort((x,y)=>x[0]==="0.0.0.0"?-1:y[0]==="0.0.0.0"?1:toInt(x[1].major)-toInt(y[1].major))){
       if (g.major){ const masks = [...new Set(g.rows.map(r=>r.len))]; const sub = g.rows.length;
-        if (!(masks.length===1 && masks[0]===g.p)) L.push(masks.length>1 ? `      ${g.major}/${g.p} is variably subnetted, ${sub} subnets, ${masks.length} masks` : `      ${g.major}/${masks[0]} is subnetted, ${sub} subnets`); }
-      g.rows.sort((x,y)=>toInt(x.net)-toInt(y.net) || x.len-y.len).forEach(r=>L.push(r.text));
+        if (!(masks.length===1 && masks[0]===g.p)) L.push(masks.length>1 ? `      ${g.major}/${g.p} is variably subnetted, ${sub} subnets, ${masks.length} masks` : `      ${g.major}/${masks[0]} is subnetted, ${sub} subnets`);
+        if (masks.length===1 && masks[0]!==g.p) g.rows.forEach(r=>{ r.text = ribLine(r.e, true); }); }
+      const hdr = L.length; g.rows.sort((x,y)=>toInt(x.net)-toInt(y.net) || x.len-y.len).forEach(r=>{ if (r.show) L.push(r.text); });
+      if (g.major && L.length===hdr && /^ {6}\S/.test(L[hdr-1]||"")) L.pop();   // nothing shown under this heading: drop it
     }
-    return L.join("\n");
+    return L.join("\n").replace(/\n$/,"");
   }
   function version(){
     const sw = kind==="switch";
@@ -368,7 +553,11 @@ function ios2Env(opts){
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
     X("show cdp neighbors", ()=>cdpNeighbors(false)), X("show cdp neighbors detail", ()=>cdpNeighbors(true)),
     X("show lldp neighbors", ()=>lldpNeighbors()),
-    X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()), X("show ip route connected", ()=>routeTable("connected")), X("show ip route static", ()=>routeTable("static")),
+    X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()), X("show ip route connected", ()=>routeTable("connected")), X("show ip route static", ()=>routeTable("static")), X("show ip route ospf", ()=>routeTable("ospf")),
+    X("show ip route A:IP", a=>{ if (kind==="switch" && !st.ipRouting) return routeTable(); return routeEntryFor(a[0]); }),
+    X("show ip ospf neighbor", ()=>ospfNeighbors()), X("show ip ospf interface brief", ()=>ospfIntBrief()), X("show ip ospf interface", ()=>ospfIntDetail(null)),
+    X("show ip ospf interface A:IF", a=>{ const n = parseIf(a[0]); return n ? ospfIntDetail(n) : inv(); }), X("show ip ospf database", ()=>ospfDatabase()), X("show ip ospf", ()=>ospfProcess()),
+    X("show ip protocols", ()=>ipProtocols()), X("show standby brief", ()=>standbyBrief()), X("show standby", ()=>standbyDetail()),
     X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show users", ()=>{ const ss = (hooks.sessions && hooks.sessions()) || [];
       let o = "    Line       User       Host(s)              Idle       Location\n" + `${ss.some(s=>s.me)?" ":"*"}  0 con 0                idle                 00:00:00`;
       ss.forEach((s,i)=>{ o += `\n${s.me?"*":" "}  ${String(i+1).padEnd(2)}vty ${i}     ${pad(s.user||"",11)}idle                 00:00:0${i}  ${s.from}`; });
@@ -395,7 +584,8 @@ function ios2Env(opts){
       X("reload cancel", ()=>{ if (!st.reloadIn) return "%No reload is scheduled."; st.reloadIn = null; return "\n\n***\n*** --- SHUTDOWN ABORTED ---\n***\n"; }),
       X("show reload", ()=>st.reloadIn ? `Reload scheduled in ${st.reloadIn} minutes by console\nReload reason: Reload Command` : "No reload is scheduled."),
       X("clear mac address-table dynamic", ()=>{ if (kind!=="switch") return inv(); hooks.clearMac(); return ""; }),
-      X("clear arp-cache", ()=>""), X("clear counters", ()=>ask("Clear \"show interface\" counters on all interfaces [confirm]", ()=>"")),
+      X("clear arp-cache", ()=>""), X("clear ip route *", ()=>""),
+      X("clear ip ospf process", ()=>{ if (!st.ospf) return ""; return ask("Reset ALL OSPF processes? [no]: ", l=>{ if (!/^y/i.test(l.trim())) return ""; st.ospfRidActive = null; st.ospfResets = (st.ospfResets||0) + 1; ospfRid(); return ""; }); }), X("clear counters", ()=>ask("Clear \"show interface\" counters on all interfaces [confirm]", ()=>"")),
     ],
     config: [
       X("hostname A:WORD", a=>{ if (!/^[A-Za-z][\w-]{0,62}$/.test(a[0])) return "% Hostname contains one or more illegal characters."; st.host = a[0]; return ""; }),
@@ -428,8 +618,19 @@ function ios2Env(opts){
       X("ip ssh version A:NUM", a=>{ if (!/^[12]$/.test(a[0])) return "% Invalid input"; if (!st.rsa && a[0]==="2") return "Please create RSA keys to enable SSH (and of atleast 768 bits for SSH v2)."; st.sshVer=a[0]; return ""; }),
       X("config-register A:WORD", a=>{ if (!/^0x[0-9a-f]{1,4}$/i.test(a[0])) return "% Invalid input detected at '^' marker."; st.confregNext = "0x" + a[0].slice(2).toUpperCase().padStart(4,"0"); return ""; }),
       X("ip default-gateway A:IP", a=>{ if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; st.defaultGw=a[0]; return ""; }), X("no ip default-gateway", ()=>{ st.defaultGw=null; return ""; }),
-      X("ip route A:IP A:MASK A:WORD", a=>{ const mOk = a[1]==="0.0.0.0" || maskOk(a[1]); if (!ipRe.test(a[0]) || !mOk || netOf(a[0], a[1])!==a[0]) return "%Inconsistent address and mask"; if (!st.routes.some(r=>r.net===a[0]&&r.mask===a[1]&&r.nh===a[2])) st.routes.push({net:a[0], mask:a[1], nh:a[2]}); return ""; }),
-      X("no ip route A:IP A:MASK A:WORD", a=>{ st.routes = st.routes.filter(r=>!(r.net===a[0]&&r.mask===a[1]&&r.nh===a[2])); return ""; }),
+      X("ip route A:IP A:MASK A:LINE", a=>{ const mOk = a[1]==="0.0.0.0" || maskOk(a[1]); if (!ipRe.test(a[0]) || !mOk || netOf(a[0], a[1])!==a[0]) return "%Inconsistent address and mask";
+        const r = parseRouteArgs(a[2]); if (r.err) return r.err;
+        if (r.nh && Object.values(st.intfs).some(i=>i.ip===r.nh)) return "%Invalid next hop address (it's this router)";
+        const same = x => x.net===a[0] && x.mask===a[1] && (x.ios||null)===(r.ios||null) && (x.nh||null)===(r.nh||null);
+        const ex = st.routes.find(same); if (ex){ if (r.ad) ex.ad = r.ad; else delete ex.ad; return ""; }
+        const e = {net:a[0], mask:a[1]}; if (r.ios) e.ios = r.ios; if (r.nh) e.nh = r.nh; if (r.ad) e.ad = r.ad; st.routes.push(e); return ""; }),
+      X("no ip route A:IP A:MASK", a=>{ st.routes = st.routes.filter(r=>!(r.net===a[0]&&r.mask===a[1])); return ""; }),
+      X("no ip route A:IP A:MASK A:LINE", a=>{ const r = parseRouteArgs(a[2]); if (r.err) return r.err; st.routes = st.routes.filter(x=>!(x.net===a[0]&&x.mask===a[1]&&(!r.ios||x.ios===r.ios)&&(!r.nh||x.nh===r.nh))); return ""; }),
+      X("router ospf A:NUM", a=>{ const pid = +a[0]; if (!(pid>=1 && pid<=65535)) return inv(); if (kind==="switch" && !st.ipRouting) return "% IP routing not enabled";
+        if (st.ospf && st.ospf.pid!==pid) return `% This lab runs one OSPF process — this router already has "router ospf ${st.ospf.pid}"`;
+        if (!st.ospf) st.ospf = {pid, rid:null, networks:[], passive:[], noPassive:[], passiveDefault:false, defOrig:false, defAlways:false, refBw:100};
+        st.mode = "config-router"; const rid = ospfRid(); return rid ? "" : `%OSPF-4-NORTRID: OSPF process ${pid} failed to allocate unique router-id and cannot start`; }),
+      X("no router ospf A:NUM", a=>{ if (!st.ospf || st.ospf.pid!==+a[0]) return ""; st.ospf = null; st.ospfRidActive = null; for (const i of Object.values(st.intfs)) if (i.ospfArea) delete i.ospfArea; return ""; }),
       X("cdp run", ()=>{ st.cdpRun=true; return ""; }), X("no cdp run", ()=>{ st.cdpRun=false; return ""; }),
       X("spanning-tree mode A:WORD", a=>{ const m = a[0].toLowerCase(); if (!["pvst","rapid-pvst","mst"].includes(m)) return inv(); if (kind!=="switch") return inv(); st.stpMode = m==="mst" ? "rapid-pvst" : m; return m==="mst" ? "(MST isn't modelled in this lab — staying in rapid-pvst)" : ""; }),
       X("spanning-tree vlan A:WORD priority A:NUM", a=>{ if (kind!=="switch") return inv(); const p = +a[1]; if (p%4096 || p<0 || p>61440) return "% Bridge Priority must be in increments of 4096.\n% Allowed values are:\n  0     4096  8192  12288 16384 20480 24576 28672\n  32768 36864 40960 45056 49152 53248 57344 61440"; for (const v of vlist(a[0])) st.stpPrio[v] = p; return ""; }),   // stored as typed; the bridge ID adds the VLAN (sys-id-ext)
@@ -494,6 +695,25 @@ function ios2Env(opts){
       X("switchport nonegotiate", ()=>{ if ((st.curList||[st.cur]).some(n=>st.intfs[n].mode==="dynamic")) return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."; return l2(i=>{ i.nonegotiate=true; }); }), X("switchport trunk encapsulation dot1q", ()=>""),
       X("ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=true); return ""; }), X("no ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=false); return ""; }),
       X("cdp enable", ()=>{ forCur(i=>i.cdp=true); return ""; }), X("no cdp enable", ()=>{ forCur(i=>i.cdp=false); return ""; }),
+      X("bandwidth A:NUM", a=>{ const b = +a[0]; if (!(b>=1 && b<=100000000)) return inv(); forCur(i=>i.bw=b); return ""; }), X("no bandwidth", ()=>{ forCur(i=>{ delete i.bw; }); return ""; }),
+      X("ip ospf cost A:NUM", a=>{ const c = +a[0]; if (!(c>=1 && c<=65535)) return inv(); forCur(i=>i.ospfCost=c); return ""; }), X("no ip ospf cost", ()=>{ forCur(i=>{ delete i.ospfCost; }); return ""; }),
+      X("ip ospf priority A:NUM", a=>{ const p = +a[0]; if (!(p>=0 && p<=255)) return inv(); forCur(i=>i.ospfPrio=p); return ""; }), X("no ip ospf priority", ()=>{ forCur(i=>{ delete i.ospfPrio; }); return ""; }),
+      X("ip ospf hello-interval A:NUM", a=>{ const h = +a[0]; if (!(h>=1 && h<=65535)) return inv(); forCur(i=>{ const autoDead = !i.ospfDead || i.ospfDead===(i.ospfHello||10)*4; i.ospfHello=h; if (autoDead) i.ospfDead = h*4; }); return ""; }),
+      X("no ip ospf hello-interval", ()=>{ forCur(i=>{ const autoDead = !i.ospfDead || i.ospfDead===(i.ospfHello||10)*4; delete i.ospfHello; if (autoDead) delete i.ospfDead; }); return ""; }),
+      X("ip ospf dead-interval A:NUM", a=>{ const d = +a[0]; if (!(d>=1 && d<=65535)) return inv(); forCur(i=>i.ospfDead=d); return ""; }), X("no ip ospf dead-interval", ()=>{ forCur(i=>{ delete i.ospfDead; }); return ""; }),
+      X("ip ospf network point-to-point", ()=>{ forCur(i=>i.ospfNet="point-to-point"); return ""; }), X("ip ospf network broadcast", ()=>{ forCur(i=>{ delete i.ospfNet; }); return ""; }), X("no ip ospf network", ()=>{ forCur(i=>{ delete i.ospfNet; }); return ""; }),
+      X("ip ospf A:NUM area A:WORD", a=>{ const pid = +a[0], area = areaParse(a[1]); if (area==null || !(pid>=1&&pid<=65535)) return inv(); if (kind==="switch" && !st.ipRouting) return "% IP routing not enabled";
+        if (st.ospf && st.ospf.pid!==pid) return `% This lab runs one OSPF process — this router already has "router ospf ${st.ospf.pid}"`;
+        if (!st.ospf) st.ospf = {pid, rid:null, networks:[], passive:[], noPassive:[], passiveDefault:false, defOrig:false, defAlways:false, refBw:100};
+        forCur(i=>i.ospfArea = {pid, area}); return ""; }),
+      X("no ip ospf A:NUM area A:WORD", ()=>{ forCur(i=>{ delete i.ospfArea; }); return ""; }),
+      X("standby A:NUM ip A:IP", a=>{ const g = +a[0]; if (!(g>=0 && g<=4095)) return inv(); const i = st.intfs[st.cur]; if (!i.ip) return "% Address must be configured on the interface first";
+        if (!sameNet(i.ip, a[1], i.mask)) return `% Address ${a[1]} in group ${g} does not belong to the subnet of ${st.cur}`; i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {ip:a[1]}); return ""; }),
+      X("standby A:NUM priority A:NUM", a=>{ const g = +a[0], p = +a[1]; if (!(p>=0 && p<=255)) return inv(); const i = st.intfs[st.cur]; i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {prio:p}); return ""; }),
+      X("standby A:NUM preempt", a=>{ const g = +a[0], i = st.intfs[st.cur]; i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {preempt:true}); return ""; }),
+      X("no standby A:NUM preempt", a=>{ const i = st.intfs[st.cur]; if (i.hsrp && i.hsrp[+a[0]]) i.hsrp[+a[0]].preempt = false; return ""; }),
+      X("no standby A:NUM", a=>{ const i = st.intfs[st.cur]; if (i.hsrp) delete i.hsrp[+a[0]]; return ""; }),
+      X("standby version A:NUM", a=>{ if (!/^[12]$/.test(a[0])) return inv(); forCur(i=>i.hsrpVer = +a[0]); return ""; }),
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
     ],
     "config-line": [
@@ -504,17 +724,41 @@ function ios2Env(opts){
       X("exec-timeout A:NUM A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} ${a[1]}`; return ""; }), X("exec-timeout A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} 0`; return ""; }),
       X("logging synchronous", ()=>{ st.lines[st.curLine].sync=true; return ""; }),
     ],
+    "config-router": [
+      X("network A:IP A:IP area A:WORD", a=>{ const area = areaParse(a[2]); if (area==null || !ipRe.test(a[0]) || !ipRe.test(a[1])) return inv();
+        const o = st.ospf; if (!o.networks.some(w=>w.net===a[0] && w.wild===a[1])) o.networks.push({net:a[0], wild:a[1], area}); else o.networks.find(w=>w.net===a[0] && w.wild===a[1]).area = area; return ""; }),
+      X("no network A:IP A:IP area A:WORD", a=>{ st.ospf.networks = st.ospf.networks.filter(w=>!(w.net===a[0] && w.wild===a[1])); return ""; }),
+      X("router-id A:IP", a=>{ if (!ipRe.test(a[0])) return inv(); st.ospf.rid = a[0]; if (st.ospfRidActive && st.ospfRidActive!==a[0]) return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; st.ospfRidActive = a[0]; return ""; }),
+      X("no router-id", ()=>{ st.ospf.rid = null; return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; }),
+      X("passive-interface default", ()=>{ st.ospf.passiveDefault = true; st.ospf.noPassive = []; return ""; }), X("no passive-interface default", ()=>{ st.ospf.passiveDefault = false; st.ospf.passive = []; return ""; }),
+      X("passive-interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return inv(); const o = st.ospf; if (o.passiveDefault) o.noPassive = o.noPassive.filter(x=>x!==n); else if (!o.passive.includes(n)) o.passive.push(n); return ""; }),
+      X("no passive-interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return inv(); const o = st.ospf; if (o.passiveDefault){ if (!o.noPassive.includes(n)) o.noPassive.push(n); } else o.passive = o.passive.filter(x=>x!==n); return ""; }),
+      X("default-information originate", ()=>{ st.ospf.defOrig = true; st.ospf.defAlways = false; return ""; }), X("default-information originate always", ()=>{ st.ospf.defOrig = true; st.ospf.defAlways = true; return ""; }),
+      X("no default-information originate", ()=>{ st.ospf.defOrig = false; st.ospf.defAlways = false; return ""; }),
+      X("auto-cost reference-bandwidth A:NUM", a=>{ const b = +a[0]; if (!(b>=1 && b<=4294967)) return inv(); st.ospf.refBw = b; return "% OSPF: Reference bandwidth is changed.\n        Please ensure reference bandwidth is consistent across all routers."; }),
+      X("no auto-cost reference-bandwidth", ()=>{ st.ospf.refBw = 100; return "% OSPF: Reference bandwidth is changed.\n        Please ensure reference bandwidth is consistent across all routers."; }),
+    ],
     "config-vlan": [ X("name A:WORD", a=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=a[0].slice(0,32); return ""; }), X("no name", ()=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=`VLAN${String(v).padStart(4,"0")}`; return ""; }) ],
   };
   const cfgDone = () => `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
-  for (const m of ["config","config-if","config-line","config-vlan"]) T[m].push(...cfgCommon);
+  for (const m of ["config","config-if","config-line","config-vlan","config-router"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
   function forCur(fn){ for (const n of (st.curList||[st.cur])) fn(st.intfs[n], n); }
   function l2(fn){ const bad = (st.curList||[st.cur]).find(n=>st.intfs[n].mode==="routed"||st.intfs[n].mode==="svi"); if (bad || kind!=="switch") return inv(); forCur(fn);
     for (const n of (st.curList||[st.cur])) if (n.startsWith("Port-channel")){ const g = +n.slice(12); for (const m of physical){ const i = st.intfs[m]; if (i.channel && i.channel.group===g){ const keep = i.channel; fn(i, m); i.channel = keep; } } }
     return ""; }
+  function areaParse(x){ if (/^\d+$/.test(x)){ const n = +x; return n<=4294967295 ? n : null; } if (ipRe.test(x)) return toInt(x); return null; }
+  function parseRouteArgs(line){   // what follows "ip route NET MASK": [interface] [next hop] [distance] [permanent|name ...]
+    const t = tokens(line); let ios = null, nh = null, ad = null, k = 0;
+    if (t[k] && !ipRe.test(t[k]) && !/^\d+$/.test(t[k])){ let n = parseIf(t[k]); if (!n && t[k+1]){ n = parseIf(t[k]+t[k+1]); if (n) k++; } if (!n) return {err:"% Invalid input detected at '^' marker."}; ios = n; k++; }
+    if (t[k] && ipRe.test(t[k])){ nh = t[k]; k++; }
+    if (t[k] && /^\d+$/.test(t[k])){ ad = +t[k]; if (!(ad>=1 && ad<=255)) return {err:"% Invalid input detected at '^' marker."}; k++; }
+    if (t[k] && /^(permanent|name|tag|track)$/i.test(t[k])) k = t.length;
+    if (k < t.length) return {err:"% Invalid input detected at '^' marker."};
+    if (!ios && !nh) return {err:"% Incomplete command."};
+    return {ios, nh, ad}; }
   function vlistRaw(s){ return String(s).split(",").flatMap(x=>{ const m = x.match(/^(\d+)-(\d+)$/); return m ? [...Array(Math.max(0,+m[2]-+m[1]+1))].map((_,k)=>+m[1]+k) : [+x]; }); }
   function vlist(s){ return String(s).split(",").flatMap(x=>{ const m = x.match(/^(\d+)-(\d+)$/); return m ? [...Array(+m[2]-+m[1]+1)].map((_,k)=>+m[1]+k) : [+x]; }).filter(v=>v>=1&&v<=4094); }
   // interface range: "g0/1 - 4", "g0/8", "g0/1 - 2 , g0/5 , g0/7 - 8" (like IOS)
@@ -526,7 +770,7 @@ function ios2Env(opts){
     return out.length ? out : null; }
   function save(){ st.startup = snapshot(); st.savedOnce = true; return "Building configuration...\n[OK]"; }
   function runningCfgFrom(snap){ const cur = snapshot(); restore(snap); const out = runningCfg().replace("Current configuration","Using 2104 out of 524288 bytes\n!\n! Last configuration change"); restore(cur); return out; }
-  function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; if (st.confregNext) st.confreg = st.confregNext;
+  function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; st.ospfRidActive = null; st.ospfResets = (st.ospfResets||0) + 1; if (st.confregNext) st.confreg = st.confregNext;
     if (hooks.clearMac) hooks.clearMac(); return {reload:true, text:"\n%SYS-5-RELOAD: Reload requested by console. Reload Reason: Reload Command.\n\n...System restarting...\n\n" + (st.startup ? `${st.host} con0 is now available\n\nPress RETURN to get started.` : "         --- System Configuration Dialog ---\n\nWould you like to enter the initial configuration dialog? [yes/no]: no\n\nPress RETURN to get started.") + (st.banner?`\n\n${st.banner}`:"")}; }
   function ask(prompt, handle){ st.pending = {prompt, handle}; return {ask:prompt}; }
   function goEnable(){
@@ -543,7 +787,7 @@ function ios2Env(opts){
     const n = (bar.match(/!/g)||[]).length;
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
-  function doTrace(ip){ const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
+  function doTrace(ip){ if (hooks.trace) return hooks.trace(ip); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
 
   /* ---------- parser ---------- */
   const isArg = p => p.startsWith("A:");
@@ -616,7 +860,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;

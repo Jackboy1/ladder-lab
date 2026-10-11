@@ -38,6 +38,7 @@ function create(cfg){
   for (const d0 of cfg.devices) addDevice(B, d0);
   for (const c of (cfg.cables||[])){ const r = plug(B, c.type, c.a, c.b, true); if (r.ok && c.swapped) r.cable.swapped = true; }
   if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}
+  if (B.order.some(id=>B.devs[id].env)) try { computeL3(B); } catch(e){}
   return B;
 }
 function addDevice(B, d0){
@@ -78,7 +79,7 @@ function exportTopology(B){
 function defaultPorts(kind){
   if (kind==="switch") return [...Array(8)].map((_,i)=>({id:"g"+(i+1), type:"rj45", label:String(i+1), ios:"GigabitEthernet0/"+(i+1)}))
     .concat([{id:"g9", type:"sfp", label:"9", ios:"GigabitEthernet0/9"},{id:"g10", type:"sfp", label:"10", ios:"GigabitEthernet0/10"},{id:"con", type:"console", label:"CON"}]);
-  if (kind==="router") return [{id:"g0", type:"rj45", label:"G0/0", ios:"GigabitEthernet0/0"},{id:"g1", type:"rj45", label:"G0/1", ios:"GigabitEthernet0/1"},{id:"con", type:"console", label:"CON"}];
+  if (kind==="router") return [{id:"g0", type:"rj45", label:"G0/0", ios:"GigabitEthernet0/0"},{id:"g1", type:"rj45", label:"G0/1", ios:"GigabitEthernet0/1"},{id:"g2", type:"rj45", label:"G0/2", ios:"GigabitEthernet0/2"},{id:"con", type:"console", label:"CON"}];
   if (kind==="hub") return [1,2,3,4].map(i=>({id:"p"+i, type:"rj45", label:String(i)}));
   if (kind==="laptop") return [{id:"eth", type:"rj45", label:"ETH"},{id:"usb", type:"usb", label:"USB"}];
   return [{id:"eth", type:"rj45", label:"NIC"}];
@@ -341,8 +342,8 @@ function deliver(B, from, frame, step0){
     if (inLp) T[sk] = { port: inLp, vlan, mac: frame.src };
     if (inLp) pushNote(had ? `${sw.label} already knew ${frame.src} on ${lpName(inLp)} — refreshed its aging timer` : moved ? `${sw.label} saw ${frame.src} move to ${lpName(inLp)} — updated the table` : `${sw.label} learned ${frame.src} on ${lpName(inLp)} (VLAN ${vlan})`);
     const svi = sw.env.intfs["Vlan"+vlan];
-    if (svi && !svi.shut && svi.ip && (frame.dst===BCAST || frame.dst===svi.mac)) recv.push({dev:sw, svi:"Vlan"+vlan, vlan});
-    if (svi && frame.dst===svi.mac) return;
+    if (svi && !svi.shut && svi.ip && (frame.dst===BCAST || frame.dst===svi.mac || hsrpOwnsMac(B, sw, "Vlan"+vlan, frame.dst))) recv.push({dev:sw, svi:"Vlan"+vlan, vlan});
+    if (svi && (frame.dst===svi.mac || hsrpOwnsMac(B, sw, "Vlan"+vlan, frame.dst))) return;
     const known = frame.dst!==BCAST && T[dk] ? T[dk] : null;
     const outs = [];
     for (const l of logicalPorts(B, sw, S)){
@@ -387,7 +388,7 @@ function deliver(B, from, frame, step0){
       else ln = (subs.find(([n,s])=>s.encap===tag && !s.encapNative)||[])[0] || null;
       if (!ln){ if (tag!=null) pushNote(`${d.label} has no subinterface for VLAN ${tag} on ${shortIf(x.port.ios)} — frame dropped`); return; }
       const li = d.env.intfs[ln];
-      if (frame.dst===BCAST || frame.dst===li.mac) recv.push({dev:d, ref, ios:ln, tag});
+      if (frame.dst===BCAST || frame.dst===li.mac || hsrpOwnsMac(B, d, ln, frame.dst)) recv.push({dev:d, ref, ios:ln, tag});
       return;
     }
     if (tag!=null){ pushNote(`${d.label} received a frame with an 802.1Q tag and ignored it (a normal NIC expects untagged frames)`); return; }
@@ -423,13 +424,7 @@ function routerNodeFor(r, ios){ const i = r.env.intfs[ios];
   if (i.mode==="svi") return {dev:r, svi:ios, vlan:i.vlan, ios, ip:i.ip, mask:i.mask, mac:i.mac};
   if (i.sub) return {dev:r, ref:refOfIos(r, i.parent), ios, tag: i.encapNative ? null : i.encap, ip:i.ip, mask:i.mask, mac:i.mac};
   return {dev:r, ref:refOfIos(r, ios), ios, ip:i.ip, mask:i.mask, mac:i.mac}; }
-function routeLookup(r, dst){
-  const env = r.env; let best = null;
-  for (const [n,i] of Object.entries(env.intfs)) if (i.ip && !i.shut && sameNet(i.ip, dst, i.mask) && env.intfs[n] && ifaceUp(r, n)) { const len = i.mask.split(".").reduce((a,o)=>a+((+o).toString(2).match(/1/g)||[]).length,0); if (!best || len>best.len) best = {ios:n, nh:dst, len}; }
-  if (best) return best;
-  for (const rt of env.routes){ if (sameNet(rt.net, dst, rt.mask)){ for (const [n,i] of Object.entries(env.intfs)) if (i.ip && !i.shut && sameNet(i.ip, rt.nh, i.mask) && ifaceUp(r,n)) return {ios:n, nh:rt.nh}; } }
-  return null;
-}
+function routeLookup(r, dst){ const x = r.env.lookup ? r.env.lookup(dst) : null; return x ? {ios:x.ios, nh:x.nh} : null; }
 function ifaceUp(d, ios){ return !!d.env.isUp(ios); }
 const B_ctx = {B:null};
 // ARP + one IP hop from `node` towards `nh`; returns {ok, toNode (receiving endpoint), arped}
@@ -444,7 +439,7 @@ function hop(B, node, nhIp, label, ttl){
     if (req.storm){ out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast) from ${node.dev.label}: "Who has ${nhIp}?"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n)); B.step += 1; return Object.assign(out, {ok:false, arped:true, storm:true}); }
     out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast to ${BCAST}) from ${node.dev.label}: "Who has ${nhIp}? Tell ${node.ip}"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n));
     B.step += Math.max(1, ...req.hops.map(h=>h.step+1-B.step));
-    let owner = req.recv.find(r=>{ if (r.svi) return r.dev.env.intfs[r.svi].ip===nhIp; if (r.ios) return r.dev.env.intfs[r.ios].ip===nhIp; return r.dev.ip===nhIp; });
+    let owner = req.recv.find(r=>{ if (r.svi) return r.dev.env.intfs[r.svi].ip===nhIp || hsrpOwnsIp(B, r.dev, r.svi, nhIp); if (r.ios) return r.dev.env.intfs[r.ios].ip===nhIp || hsrpOwnsIp(B, r.dev, r.ios, nhIp); return r.dev.ip===nhIp; });
     let viaProxy = false;
     if (!owner){
       // proxy ARP (on by default in IOS): a router answers for an address it can route to out of a DIFFERENT interface
@@ -452,7 +447,8 @@ function hop(B, node, nhIp, label, ttl){
       viaProxy = !!owner;
     }
     if (!owner){ out.log.push(`&nbsp;&nbsp;· No device answered — nothing on this network has ${nhIp} (or it can't be reached at Layer 2)`); return Object.assign(out, {ok:false, arped}); }
-    const ownerMac = owner.svi ? owner.dev.env.intfs[owner.svi].mac : owner.ios ? owner.dev.env.intfs[owner.ios].mac : owner.dev.mac;
+    const vOwn = (owner.svi || owner.ios) && hsrpFor(B, owner.dev, owner.svi || owner.ios).find(v=>v.vip===nhIp);
+    const ownerMac = vOwn ? vOwn.vmac : owner.svi ? owner.dev.env.intfs[owner.svi].mac : owner.ios ? owner.dev.env.intfs[owner.ios].mac : owner.dev.mac;
     const ownerFrom = owner.svi ? {svi:owner.dev.id, vlan:owner.vlan} : (owner.tag!=null ? {ref:owner.ref, tag:owner.tag} : owner.ref);   // a router subinterface answers with its 802.1Q tag
     const ownerCache = B.arp[owner.dev.id] || (B.arp[owner.dev.id] = {});
     ownerCache[node.ip] = {mac:node.mac, intf: owner.svi || owner.ios || "eth"};
@@ -466,18 +462,18 @@ function hop(B, node, nhIp, label, ttl){
   const f = deliver(B, fromSpec, {src:node.mac, dst:entry.mac, kind:"ip", label}, B.step);
   out.frames.push(...f.hops); out.log.push(`<b>${label}</b> ${node.ip} → ${nhIp==="?"?"":""}frame to ${entry.mac} (TTL ${ttl})`, ...f.notes.map(n=>"&nbsp;&nbsp;· "+n));
   B.step += Math.max(1, ...f.hops.map(h=>h.step+1-B.step));
-  const rcv = f.recv.find(r=>{ const m = r.svi ? r.dev.env.intfs[r.svi].mac : r.ios ? r.dev.env.intfs[r.ios].mac : r.dev.mac; return m===entry.mac; });
+  const rcv = f.recv.find(r=>{ const m = r.svi ? r.dev.env.intfs[r.svi].mac : r.ios ? r.dev.env.intfs[r.ios].mac : r.dev.mac; return m===entry.mac || ((r.svi || r.ios) && hsrpOwnsMac(B, r.dev, r.svi || r.ios, entry.mac)); });
   return Object.assign(out, {ok:!!rcv, to:rcv, arped});
 }
 // one direction: node → dstIp, hop by hop. returns {ok, kind, arpedFirst, frames, log, finalNode}
 function sendIp(B, node, dstIp, label){
-  const res = {frames:[], log:[], ok:false, kind:"timeout"};
+  const res = {frames:[], log:[], ok:false, kind:"timeout", path:[]};
   let cur = node, ttl = node.dev && node.dev.env ? 255 : 128;
   for (let n=0; n<8; n++){
     let nh;
     if (isRouterDev(cur.dev) && (cur.dev.kind==="router" || !cur.svi || cur.dev.env.ipRouting)){
       // a router: own address?
-      for (const [nm,i] of Object.entries(cur.dev.env.intfs)) if (i.ip===dstIp && !i.shut){ res.ok = true; res.final = {dev:cur.dev, ios:nm}; return res; }
+      for (const [nm,i] of Object.entries(cur.dev.env.intfs)) if ((i.ip===dstIp || hsrpOwnsIp(B, cur.dev, nm, dstIp)) && !i.shut){ res.ok = true; res.final = {dev:cur.dev, ios:nm}; if (n>0) res.path.push(dstIp); return res; }
       const r = routeLookup(cur.dev, dstIp);
       if (!r){ if (n===0){ res.kind = "noroute"; res.log.push(`${cur.dev.label} has no route to ${dstIp}`); return res; }
         res.kind = "netunreach"; res.unreachFrom = cur.inIp; res.log.push(`${cur.dev.label} has no route to ${dstIp} (no connected, static or default route) — it drops the packet and sends an ICMP <b>Destination net unreachable</b> back to the sender from ${cur.inIp}`); return res; }
@@ -494,14 +490,14 @@ function sendIp(B, node, dstIp, label){
     if (n===0) res.arpedFirst = h.arped;
     if (!h.ok){ res.kind = n===0 ? "unreach" : "timeout"; return res; }
     const to = h.to;
-    if (to.svi){ if (to.dev.env.intfs[to.svi].ip===dstIp){ res.ok=true; res.final={dev:to.dev, svi:to.svi, vlan:+to.svi.slice(4)}; return res; }
-      if (isRouterDev(to.dev)){ cur = {dev:to.dev, inIp: to.dev.env.intfs[to.svi].ip}; ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} (Layer 3 switch) received it on ${to.svi}, decrements TTL to ${ttl} and routes it between VLANs`); continue; }
+    if (to.svi){ if (to.dev.env.intfs[to.svi].ip===dstIp || hsrpOwnsIp(B, to.dev, to.svi, dstIp)){ res.ok=true; res.final={dev:to.dev, svi:to.svi, vlan:+to.svi.slice(4)}; res.path.push(dstIp); return res; }
+      if (isRouterDev(to.dev)){ cur = {dev:to.dev, inIp: to.dev.env.intfs[to.svi].ip}; res.path.push(to.dev.env.intfs[to.svi].ip); ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} (Layer 3 switch) received it on ${to.svi}, decrements TTL to ${ttl} and routes it between VLANs`); continue; }
       res.log.push(`${to.dev.label} isn't routing (no ip routing) — dropped`); return res; }
     if (to.ios && isRouterDev(to.dev)){
-      const own = Object.entries(to.dev.env.intfs).find(([nm,i])=>i.ip===dstIp && !i.shut);
-      if (own){ res.ok = true; res.final = {dev:to.dev, ios:own[0]}; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)} — it's addressed to the router itself`); return res; }
-      cur = {dev:to.dev, inIp: to.dev.env.intfs[to.ios].ip}; ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
-    if (to.dev.ip===dstIp){ res.ok = true; res.final = hostNode(to.dev); return res; }
+      const own = Object.entries(to.dev.env.intfs).find(([nm,i])=>(i.ip===dstIp || hsrpOwnsIp(B, to.dev, nm, dstIp)) && !i.shut);
+      if (own){ res.ok = true; res.final = {dev:to.dev, ios:own[0]}; res.path.push(dstIp); res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)} — it's addressed to the router itself`); return res; }
+      cur = {dev:to.dev, inIp: to.dev.env.intfs[to.ios].ip}; res.path.push(to.dev.env.intfs[to.ios].ip); ttl--; res.routers = (res.routers||0)+1; res.log.push(`${to.dev.label} received it on ${shortIf(to.ios)}, decrements TTL to ${ttl} and routes it`); continue; }
+    if (to.dev.ip===dstIp){ res.ok = true; res.final = hostNode(to.dev); res.path.push(dstIp); return res; }
     return res;
   }
   return res;
@@ -514,7 +510,7 @@ function nodeFromFinal(B, f){
 function sviNode(sw, name){ const i = sw.env.intfs[name]; return {dev:sw, svi:name, vlan:+name.slice(4), ip:i.ip, mask:i.mask, gw:sw.env.defaultGw, mac:i.mac}; }
 // full ping: request + reply. returns {ok, kind, firstMiss}
 function ping(B, node, dstIp){
-  B_ctx.B = B; B.step = 0;
+  B_ctx.B = B; B.step = 0; computeL3(B);
   if (isRouterDev(node.dev) && !node.ip && !node.svi){ const r = routeLookup(node.dev, dstIp); if (r) node = {dev:node.dev, ip:node.dev.env.intfs[r.ios].ip}; }
   const go = sendIp(B, node, dstIp, "ICMP echo request");
   let frames = go.frames, log = go.log.slice(), ok = false, kind = go.kind;
@@ -528,9 +524,204 @@ function ping(B, node, dstIp){
   return {ok, kind, ttl: replyTtl, unreachFrom: go.unreachFrom, firstMiss: go.arpedFirst && node.dev.kind!=="pc" && node.dev.kind!=="server" && node.dev.kind!=="laptop"};
 }
 
+
+/* ---- Layer 3 control plane: OSPF (neighbours, DR/BDR, SPF per area, inter-area, default) and HSRP, from the real topology ---- */
+const ipInt = ip => ip.split(".").reduce((a,o)=>a*256 + +o, 0);
+const netStr = (ip, len) => { const v = len ? Math.floor(ipInt(ip) / 2**(32-len)) * 2**(32-len) : 0; return [24,16,8,0].map(k=>Math.floor(v/2**k)%256).join("."); };
+const routersOf = B => B.order.map(id=>B.devs[id]).filter(d=>d.env && d.on!==false && (d.kind==="router" || (isSw(d) && d.env.ipRouting)));
+// router interfaces that receive a broadcast sent out of d's interface (same Layer 2 domain: cables, switches, VLANs, trunks, STP)
+function l3Hear(B, d, ios){
+  const i = d.env.intfs[ios]; if (!i || i.loop || !i.mac) return [];
+  const node = routerNodeFor(d, ios); if (!node.svi && !node.ref) return [];
+  const from = node.svi ? {svi:d.id, vlan:node.vlan} : (node.tag!=null ? {ref:node.ref, tag:node.tag} : node.ref);
+  const r = deliver(B, from, {src:i.mac, dst:BCAST, kind:"ctl", label:"hello"}, 0);
+  return (r.recv||[]).filter(x=>x.dev!==d && x.dev.env).map(x=>({dev:x.dev, ios: x.svi || x.ios}));
+}
+function l3Sig(B){
+  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask]; }),
+    B.cables.map(c=>[c.a, c.b, c.type])]);
+}
+function computeL3(B){
+  if (B._l3busy) return B._l3 || {ospf:{}, hsrp:{}};
+  const sig = l3Sig(B); if (B._l3 && B._l3.sig===sig) return B._l3;
+  B._l3busy = true; const keepStorm = B.stormSeen;
+  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; return res; }
+  finally { B._l3busy = false; B.stormSeen = keepStorm; }
+}
+function computeOspf(B, hears){
+  const key = (d, ios) => d.id+"|"+ios, info = {}, out = {};
+  for (const d of routersOf(B)){ const x = d.env.ospfInfo(); if (x && x.rid) info[d.id] = x; }
+  const ifs = []; for (const id in info) for (const f of info[id].ifaces) if (f.up) ifs.push({d:B.devs[id], f, x:info[id], k:key(B.devs[id], f.ios)});
+  const byKey = new Map(ifs.map(e=>[e.k, e]));
+  const heard = e => { if (!hears.has(e.k)) hears.set(e.k, new Set(l3Hear(B, e.d, e.f.ios).map(h=>key(h.dev, h.ios)))); return hears.get(e.k); };
+  // neighbours: both ends hear each other's hellos and every hello check passes
+  const nbrOf = new Map(ifs.map(e=>[e.k, []]));
+  for (const e of ifs){ if (e.f.passive || e.f.loop) continue;
+    for (const k2 of heard(e)){ const e2 = byKey.get(k2); if (!e2 || e2.f.passive || e2.f.loop || !heard(e2).has(e.k)) continue;
+      if (e2.f.area!==e.f.area){ syslog(B, e.d, e.f.area===0 || e2.f.area===0 ? `%OSPF-4-ERRRCV: Received invalid packet: mismatched area ID, from backbone area must be virtual-link but not found from ${e2.f.ip}, ${e.f.ios}` : `%OSPF-4-ERRRCV: Received invalid packet: mismatched area ID from ${e2.f.ip}, ${e.f.ios}`); continue; }
+      if (e2.x.rid===e.x.rid){ syslog(B, e.d, `%OSPF-4-DUP_RTRID_NBR: OSPF detected duplicate router-id ${e.x.rid} from ${e2.f.ip} on interface ${e.f.ios}`); continue; }
+      if (netStr(e.f.ip, e.f.len)!==netStr(e2.f.ip, e.f.len) || (e.f.len!==e2.f.len && !(e.f.net==="POINT_TO_POINT" && e2.f.net==="POINT_TO_POINT"))) continue;   // different subnet or mask: hellos ignored
+      if (e.f.hello!==e2.f.hello || e.f.dead!==e2.f.dead) continue;                                                                                            // timer mismatch: hellos ignored
+      nbrOf.get(e.k).push(e2); } }
+  // segments = groups of neighbouring interfaces; DR/BDR election (non-preemptive: a sitting DR keeps the job)
+  B._ospfSeg = B._ospfSeg || {}; const segOf = new Map(), segs = [];
+  for (const e of ifs){ if (segOf.has(e.k)) continue; const mem = [], q = [e]; segOf.set(e.k, null);
+    while (q.length){ const m = q.shift(); mem.push(m); for (const n of nbrOf.get(m.k)) if (!segOf.has(n.k)){ segOf.set(n.k, null); q.push(n); } }
+    const sg = {id: netStr(e.f.ip, e.f.len)+"/"+e.f.len+"@"+mem.map(m=>m.k).sort()[0], mem, area:e.f.area, p2p: mem.every(m=>m.f.net==="POINT_TO_POINT"), net: netStr(e.f.ip, e.f.len), len: e.f.len};
+    mem.forEach(m=>segOf.set(m.k, sg)); segs.push(sg); }
+  const rank = (a,b) => b.f.prio - a.f.prio || ipInt(b.x.rid) - ipInt(a.x.rid);
+  for (const sg of segs){ if (sg.p2p || sg.mem.some(m=>m.f.loop || m.f.passive) && sg.mem.length===1){ sg.dr = sg.bdr = null; if (!sg.p2p && !sg.mem[0].f.loop){ sg.dr = sg.mem[0].k; } continue; }
+    const sk = sg.mem.map(m=>m.k).sort().join(","), prevAll = Object.values(B._ospfSeg).find(v=>v.members && v.members.some(k=>sg.mem.some(m=>m.k===k))) || {};
+    const elig = sg.mem.filter(m=>m.f.prio>0), valid = k => k && elig.some(m=>m.k===k) && (prevAll.resets||{})[k]===byKey.get(k).x.resets;
+    let dr = valid(prevAll.dr) ? prevAll.dr : null, bdr = valid(prevAll.bdr) && prevAll.bdr!==dr ? prevAll.bdr : null;
+    if (!dr && bdr){ dr = bdr; bdr = null; }
+    if (!dr){ const c = elig.slice().sort(rank)[0]; dr = c ? c.k : null; }
+    if (!bdr){ const c = elig.filter(m=>m.k!==dr).sort(rank)[0]; bdr = c ? c.k : null; }
+    sg.dr = dr; sg.bdr = bdr;
+    for (const k of Object.keys(B._ospfSeg)) if ((B._ospfSeg[k].members||[]).some(x=>sg.mem.some(m=>m.k===x))) delete B._ospfSeg[k];
+    B._ospfSeg[sk] = {members: sg.mem.map(m=>m.k), dr, bdr, resets: Object.fromEntries(sg.mem.map(m=>[m.k, m.x.resets]))}; }
+  // neighbour states and adjacency logging
+  const prevAdj = B._ospfAdj || {}, nowAdj = {};
+  const roleOf = (sg, k) => sg.p2p ? "-" : k===sg.dr ? "DR" : k===sg.bdr ? "BDR" : "DROTHER";
+  for (const id in info) out[id] = {nbrs:[], ifs:{}, routes:[], abr:false, lsdb:{areas:{}, ext:[]}, spfRuns:3};
+  for (const e of ifs){ const sg = segOf.get(e.k); const me = roleOf(sg, e.k); const nb = [];
+    for (const n of nbrOf.get(e.k)){ const them = roleOf(sg, n.k); const full = sg.p2p || me==="DR" || me==="BDR" || them==="DR" || them==="BDR";
+      const state = sg.p2p ? "FULL/  -" : `${full?"FULL":"2WAY"}/${them}`; nb.push({rid:n.x.rid, prio:n.f.prio, state, dead:e.f.dead, ip:n.f.ip, ios:e.f.ios, full});
+      if (full) nowAdj[e.k+"|"+n.x.rid] = {d:e.d, ios:e.f.ios, rid:n.x.rid, pid:e.x.pid}; }
+    const dre = sg.dr && byKey.get(sg.dr), bdre = sg.bdr && byKey.get(sg.bdr);
+    out[e.d.id].ifs[e.f.ios] = {state: e.f.loop && e.f.net==="LOOPBACK" ? "LOOP" : sg.p2p ? "P2P" : (sg.dr ? me : "DROTHER"), dr: dre ? {rid:dre.x.rid, ip:dre.f.ip} : null, bdr: bdre ? {rid:bdre.x.rid, ip:bdre.f.ip} : null, nbrs:nb, adj: nb.filter(x=>x.full).length};
+    out[e.d.id].nbrs.push(...nb); }
+  for (const [k, a] of Object.entries(nowAdj)) if (!prevAdj[k]) syslog(B, a.d, `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from LOADING to FULL, Loading Done`);
+  for (const [k, a] of Object.entries(prevAdj)) if (!nowAdj[k] && B.devs[a.d.id]) syslog(B, B.devs[a.d.id], `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from FULL to DOWN, Neighbor Down: ${B.devs[a.d.id].env.isUp(a.ios) ? "Dead timer expired" : "Interface down or detached"}`);
+  B._ospfAdj = nowAdj;
+  // the link-state database of each area: router nodes, transit networks (with a DR) and stub networks
+  const areas = [...new Set(ifs.map(e=>e.f.area))];
+  const graph = {}, stubs = {};   // per area
+  for (const A of areas){ const G = graph[A] = new Map(), add = (u, v, c, via) => { if (!G.has(u)) G.set(u, []); G.get(u).push({v, c, via}); }; stubs[A] = [];
+    for (const sg of segs.filter(x=>x.area===A)){
+      const fullToDr = sg.dr && sg.mem.length>1 && !sg.p2p;
+      if (sg.p2p && sg.mem.length===2){ const [a, b] = sg.mem; add(a.d.id, b.d.id, a.f.cost, {ios:a.f.ios, nh:b.f.ip}); add(b.d.id, a.d.id, b.f.cost, {ios:b.f.ios, nh:a.f.ip}); sg.mem.forEach(m=>stubs[A].push({rt:m.d.id, net:sg.net, len:sg.len, cost:m.f.cost})); }
+      else if (fullToDr){ const N = "N:"+sg.id; for (const m of sg.mem){ add(m.d.id, N, m.f.cost, {ios:m.f.ios, net:true}); add(N, m.d.id, 0, {nh:m.f.ip}); } stubs[A].push({transit:N, net:sg.net, len:sg.len, dr:byKey.get(sg.dr)}); }
+      else for (const m of sg.mem) stubs[A].push({rt:m.d.id, net: m.f.loop && m.f.net==="LOOPBACK" ? m.f.ip : sg.net, len: m.f.loop && m.f.net==="LOOPBACK" ? 32 : sg.len, cost:m.f.cost}); }
+    out.__db = out.__db || {}; out.__db[A] = {routers:[...new Set(ifs.filter(e=>e.f.area===A).map(e=>e.d.id))].map(id=>({rid:info[id].rid, links: ifs.filter(e=>e.d.id===id && e.f.area===A).length + segs.filter(x=>x.area===A && x.p2p && x.mem.some(m=>m.d.id===id)).length})),
+      nets: segs.filter(x=>x.area===A && x.dr && x.mem.length>1 && !x.p2p).map(x=>({ip:byKey.get(x.dr).f.ip, rid:byKey.get(x.dr).x.rid})), sums:[]}; }
+  // Dijkstra with equal-cost first hops
+  function spf(A, src){ const G = graph[A], dist = new Map([[src, 0]]), fh = new Map([[src, []]]), done = new Set();
+    while (true){ let u = null; for (const [n, dd] of dist) if (!done.has(n) && (u===null || dd < dist.get(u))) u = n; if (u===null) break; done.add(u);
+      for (const ed of (G.get(u)||[])){ const nd = dist.get(u) + ed.c;
+        let hops = u===src ? [ed.via.net ? {ios:ed.via.ios, pend:true} : {ios:ed.via.ios, nh:ed.via.nh}] : fh.get(u).map(h=>h.pend ? {ios:h.ios, nh:ed.via.nh} : h);
+        if (!dist.has(ed.v) || nd < dist.get(ed.v)){ dist.set(ed.v, nd); fh.set(ed.v, hops); }
+        else if (nd===dist.get(ed.v) && !done.has(ed.v)){ const cur = fh.get(ed.v); for (const h of hops) if (!cur.some(x=>x.ios===h.ios && x.nh===h.nh)) cur.push(h); } } }
+    return {dist, fh}; }
+  const inArea = (id, A) => ifs.some(e=>e.d.id===id && e.f.area===A);
+  const intra = {};   // id -> area -> prefix -> {cost, nhs, from}
+  const sp = {};      // id -> area -> spf result
+  for (const id in info){ intra[id] = {}; sp[id] = {};
+    for (const A of areas){ if (!inArea(id, A)) continue; const r = sp[id][A] = spf(A, id), T = intra[id][A] = {};
+      const offer = (pfx, cost, nhs, from) => { const c = T[pfx]; if (!c || cost < c.cost) T[pfx] = {cost, nhs:nhs.map(h=>Object.assign({}, h, {from})), from}; else if (cost===c.cost) for (const h of nhs) if (!c.nhs.some(x=>x.ios===h.ios && x.nh===h.nh)) c.nhs.push(Object.assign({}, h, {from})); };
+      for (const st of stubs[A]){
+        if (st.transit){ if (!r.dist.has(st.transit) || st.dr && st.dr.d.id===id) continue; const nhs = r.fh.get(st.transit).filter(h=>!h.pend); if (!nhs.length) continue; offer(st.net+"/"+st.len, r.dist.get(st.transit), nhs, st.dr.x.rid); continue; }
+        if (st.rt===id || !r.dist.has(st.rt)) continue; offer(st.net+"/"+st.len, r.dist.get(st.rt) + st.cost, r.fh.get(st.rt), info[st.rt].rid); } } }
+  // own transit networks are connected; drop prefixes the router has as connected
+  // inter-area: ABRs (an interface in area 0 and in another area) summarise into the areas they touch
+  const abrs = Object.keys(info).filter(id=>inArea(id, 0) && areas.some(A=>A!==0 && inArea(id, A)));
+  for (const id of abrs) out[id].abr = true;
+  const ia = {};   // id -> prefix -> {cost, nhs}
+  const ownPfx = id => new Set(ifs.filter(e=>e.d.id===id).map(e=>netStr(e.f.ip, e.f.len)+"/"+e.f.len).concat(ifs.filter(e=>e.d.id===id && e.f.loop).map(e=>e.f.ip+"/32")));
+  const abrKnows = (z, exceptArea) => { const m = {}; for (const A of Object.keys(intra[z])) if (+A!==exceptArea) for (const [pfx, v] of Object.entries(intra[z][A])) if (!m[pfx] || v.cost < m[pfx]) m[pfx] = v.cost;
+    for (const e of ifs.filter(e=>e.d.id===z && e.f.area!==exceptArea)) { const pfx = e.f.loop && e.f.net==="LOOPBACK" ? e.f.ip+"/32" : netStr(e.f.ip, e.f.len)+"/"+e.f.len; if (m[pfx]==null || e.f.cost < m[pfx]) m[pfx] = e.f.cost; } return m; };
+  // backbone first: ABRs inject their non-backbone networks into area 0; then every area gets what its ABRs know beyond it
+  const sums = {};   // area -> [{z, pfx, cost}]
+  for (const A of areas) sums[A] = [];
+  for (const z of abrs){ const k0 = {}; for (const A of Object.keys(intra[z])) if (+A!==0) Object.assign(k0, Object.fromEntries(Object.entries(intra[z][A]).map(([p,v])=>[p, v.cost])));
+    for (const e of ifs.filter(e=>e.d.id===z && e.f.area!==0)) k0[e.f.loop && e.f.net==="LOOPBACK" ? e.f.ip+"/32" : netStr(e.f.ip,e.f.len)+"/"+e.f.len] = Math.min(k0[netStr(e.f.ip,e.f.len)+"/"+e.f.len] ?? Infinity, e.f.cost);
+    for (const [pfx, c] of Object.entries(k0)) sums[0].push({z, pfx, cost:c}); }
+  for (const z of abrs) for (const A of areas){ if (A===0 || !inArea(z, A)) continue;
+    const k = abrKnows(z, A); for (const sm of sums[0]) if (sm.z!==z){ const c = (sp[z][0] && sp[z][0].dist.get(sm.z)); if (c!=null && (k[sm.pfx]==null || c + sm.cost < k[sm.pfx])) k[sm.pfx] = c + sm.cost; }
+    for (const [pfx, c] of Object.entries(k)) sums[A].push({z, pfx, cost:c}); }
+  for (const A of areas){ const seen = new Set(); for (const sm of sums[A]) if (!seen.has(sm.pfx+"|"+sm.z)){ seen.add(sm.pfx+"|"+sm.z); out.__db[A].sums.push({net:sm.pfx.split("/")[0], rid:info[sm.z].rid}); } }
+  for (const id in info){ ia[id] = {}; const own = ownPfx(id);
+    for (const A of Object.keys(sp[id])){ const r = sp[id][A];
+      for (const sm of sums[+A]){ if (sm.z===id || own.has(sm.pfx) || !r.dist.has(sm.z)) continue; if (Object.values(intra[id]).some(T=>T[sm.pfx])) continue;   // intra-area always wins
+        const cost = r.dist.get(sm.z) + sm.cost, c = ia[id][sm.pfx], nhs = r.fh.get(sm.z).map(h=>Object.assign({}, h, {from:info[sm.z].rid}));
+        if (!c || cost < c.cost) ia[id][sm.pfx] = {cost, nhs}; else if (cost===c.cost) for (const h of nhs) if (!c.nhs.some(x=>x.ios===h.ios && x.nh===h.nh)) c.nhs.push(h); } } }
+  // external default route (default-information originate): an E2 route with metric 1, forwarded towards the nearest ASBR
+  const asbrs = Object.keys(info).filter(id=>info[id].defOrig && (info[id].defAlways || info[id].hasDefault));
+  for (const z of asbrs) out.__ext = (out.__ext||[]).concat([{net:"0.0.0.0", rid:info[z].rid}]);
+  for (const id in info){ const own = ownPfx(id); const rt = [];
+    const pick = {}; for (const A of Object.keys(intra[id])) for (const [pfx, v] of Object.entries(intra[id][A])){ if (own.has(pfx)) continue; const c = pick[pfx]; if (!c || v.cost < c.cost) pick[pfx] = {cost:v.cost, nhs:v.nhs, type:"O"}; }
+    for (const [pfx, v] of Object.entries(ia[id])) if (!pick[pfx] && !own.has(pfx)) pick[pfx] = {cost:v.cost, nhs:v.nhs, type:"O IA"};
+    if (!asbrs.includes(id)){ let best = null;
+      for (const z of asbrs){ let fwd = null, nhs = null;
+        for (const A of Object.keys(sp[id])){ const r = sp[id][A]; if (r.dist.has(z)){ const c = r.dist.get(z); if (fwd==null || c < fwd){ fwd = c; nhs = r.fh.get(z); } } }
+        if (fwd==null) for (const zb of abrs){ for (const A of Object.keys(sp[id])){ const r = sp[id][A]; if (!r.dist.has(zb) || !sp[zb]) continue; for (const B0 of Object.keys(sp[zb])){ const r2 = sp[zb][B0]; if (r2.dist.has(z)){ const c = r.dist.get(zb) + r2.dist.get(z); if (fwd==null || c < fwd){ fwd = c; nhs = r.fh.get(zb); } } } } }
+        if (fwd!=null && (!best || fwd < best.fwd)) best = {fwd, nhs: nhs.map(h=>Object.assign({}, h, {from:info[z].rid}))}; }
+      if (best) pick["0.0.0.0/0"] = {cost:1, nhs:best.nhs, type:"O*E2", fwd:best.fwd}; }
+    for (const [pfx, v] of Object.entries(pick)){ const [net, len] = pfx.split("/"); const nhs = v.nhs.filter(h=>h.nh && !h.pend); if (nhs.length) rt.push({net, len:+len, cost:v.cost, type:v.type, fwd:v.fwd, nhs:nhs.map(h=>({ios:h.ios, nh:h.nh, from:h.from}))}); }
+    out[id].routes = rt; out[id].lsdb = {areas: out.__db || {}, ext: out.__ext || []}; }
+  delete out.__db; delete out.__ext;
+  return out;
+}
+const hsrpVmacOf = (g, ver) => ver===2 ? `0000.0c9f.f${g.toString(16).padStart(3,"0")}` : `0000.0c07.ac${g.toString(16).padStart(2,"0")}`;
+function computeHsrp(B, hears){
+  const key = (d, ios) => d.id+"|"+ios, mem = [];
+  for (const d of routersOf(B)) for (const g of d.env.hsrpGroups()) if (g.up) mem.push(Object.assign({d, k:key(d, g.ios)}, g));
+  const heard = m => { if (!hears.has(m.k)) hears.set(m.k, new Set(l3Hear(B, m.d, m.ios).map(h=>key(h.dev, h.ios)))); return hears.get(m.k); };
+  const out = {}, seen = new Set(); B._hsrpSeg = B._hsrpSeg || {}; B._hsrpSt = B._hsrpSt || {};
+  for (const m of mem){ if (seen.has(m.k+"#"+m.grp)) continue;
+    const grp = mem.filter(o=>o.grp===m.grp && (o===m || (heard(m).has(o.k) && heard(o).has(m.k)))); grp.forEach(o=>seen.add(o.k+"#"+o.grp));
+    const better = (a, b) => a.prio!==b.prio ? a.prio > b.prio : ipInt(a.ip) > ipInt(b.ip);
+    const sk = m.grp + "@" + grp.map(o=>o.k).sort().join(","), prev = Object.entries(B._hsrpSeg).find(([k,v])=>v.grp===m.grp && grp.some(o=>o.k===v.active || o.k===v.standby));
+    let act = prev && grp.find(o=>o.k===prev[1].active) || null;
+    if (act){ const ch = grp.filter(o=>o!==act && o.preempt && o.prio > act.prio).sort((a,b)=>better(a,b)?-1:1)[0]; if (ch) act = ch; }
+    if (!act) act = grp.slice().sort((a,b)=>better(a,b)?-1:1)[0];
+    const sby = grp.filter(o=>o!==act).sort((a,b)=>better(a,b)?-1:1)[0] || null;
+    if (prev) delete B._hsrpSeg[prev[0]]; B._hsrpSeg[sk] = {grp:m.grp, active:act.k, standby: sby ? sby.k : null};
+    if (prev && prev[1].active!==act.k){ const vm = hsrpVmacOf(m.grp, act.ver); for (const id of B.order) if (B.mac[id]) for (const [mk, e] of Object.entries(B.mac[id])) if (e.mac===vm) delete B.mac[id][mk]; }   // the new active router's gratuitous ARP moves the virtual MAC
+    for (const o of grp){ const state = o===act ? "Active" : o===sby ? "Standby" : "Listen", was = B._hsrpSt[o.k+"#"+o.grp];
+      if (was!==state){ const from = was || "Speak"; if (!was && state==="Active") syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state Speak -> Standby`);
+        if (!(was==null && state==="Listen")) syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state ${!was && state==="Active" ? "Standby" : from} -> ${state}`); B._hsrpSt[o.k+"#"+o.grp] = state; }
+      out[o.k+"#"+o.grp] = {state, active: o===act ? "local" : act.ip, standby: o===sby ? "local" : sby ? sby.ip : "unknown", activePrio: act.prio, standbyPrio: sby ? sby.prio : null, vmac: hsrpVmacOf(o.grp, o.ver), vip:o.vip, changes: 2}; } }
+  for (const k of Object.keys(B._hsrpSt)) if (!out[k]){ const [dk] = k.split("#"); const [did, ios] = dk.split("|"); const d = B.devs[did]; if (d && B._hsrpSt[k]!=="Init"){ syslog(B, d, `%HSRP-5-STATECHANGE: ${ios} Grp ${k.split("#")[1]} state ${B._hsrpSt[k]} -> Init`); } B._hsrpSt[k] = "Init"; }
+  return out;
+}
+// is this router interface the active HSRP gateway for ip / the owner of a virtual MAC?
+function hsrpFor(B, d, ios){ const H = (B._l3 && B._l3.hsrp) || {}; return Object.entries(H).filter(([k,v])=>k.startsWith(d.id+"|"+ios+"#") && v.state==="Active").map(([,v])=>v); }
+const hsrpOwnsIp = (B, d, ios, ip) => hsrpFor(B, d, ios).some(v=>v.vip===ip);
+const hsrpOwnsMac = (B, d, ios, mac) => hsrpFor(B, d, ios).some(v=>v.vmac===mac);
+// traceroute: the routers a probe passes, by the address of the interface it arrived on
+function trace(B, node, dstIp){
+  B_ctx.B = B; B.step = 0; computeL3(B);
+  if (isRouterDev(node.dev) && !node.ip && !node.svi){ const r = routeLookup(node.dev, dstIp); if (r) node = {dev:node.dev, ip:node.dev.env.intfs[r.ios].ip}; }
+  const go = sendIp(B, node, dstIp, "Traceroute probe");
+  B.frames = go.frames; B.log = go.log;
+  return {hops: go.path || [], ok: go.ok, kind: go.kind, unreachFrom: go.unreachFrom};
+}
+function iosTraceText(t, dst){
+  const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"];
+  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1} ${h} !N  !N  !N`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
+  if (!t.ok && t.kind!=="netunreach") for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
+  return L.join("\n");
+}
+function winTraceText(t, dst){
+  const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""];
+  t.hops.forEach((h,k)=>{ if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination net unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  if (!t.ok && t.kind!=="netunreach") for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
+  L.push("", "Trace complete."); return L.join("\n");
+}
+
 /* ---- hooks the IOS engine calls ---- */
 function makeHooks(B, d){
+  const l3 = () => computeL3(B), os = () => l3().ospf[d.id] || null;
   return {
+    ospfRoutes: () => (os() || {}).routes || [],
+    ospfNbrs: () => (os() || {}).nbrs || [],
+    ospfIf: ios => ((os() || {}).ifs || {})[ios] || null,
+    ospfSelf: () => { const o = os(); return o ? {abr:o.abr, spfRuns:o.spfRuns} : null; },
+    ospfLsdb: () => (os() || {}).lsdb || null,
+    hsrp: (ios, g) => l3().hsrp[d.id+"|"+ios+"#"+g] || null,
+    trace: ip => { const node = (d.kind==="router" || d.env.ipRouting) ? {dev:d} : (()=>{ const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut); return svi ? sviNode(d, svi) : null; })();
+      if (!node) return iosTraceText({hops:[], ok:false, kind:"timeout"}, ip); const t = trace(B, node, ip); B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: t.ok}); return iosTraceText(t, ip); },
     linkUp: name => { if (name.startsWith("Port-channel")){ const S = l2State(B); const G = (S.bundles[d.id]||{})[+name.slice(12)]; return !!(G && G.up); } const ref = refOfIos(d, name); return !!(ref && linkUpAt(B, ref)); },
     ping: ip => {
       if (d.kind==="router" || d.env.ipRouting) return ping(B, {dev:d}, ip);
@@ -596,7 +787,7 @@ function pcExec(B, d, line){
   const raw = line.trim(), l = raw.toLowerCase(), t = raw.split(/\s+/);
   const media = linkUpAt(B, hostNode(d).ref);
   if (!raw) return "";
-  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ping <ip> · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
+  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ping <ip> · tracert <ip> · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
   if (l==="cls") return {clear:true};
   if (l==="ipconfig" || l==="ipconfig /all"){
     const all = l.endsWith("/all");
@@ -613,6 +804,13 @@ function pcExec(B, d, line){
     return `\nInterface: ${d.ip} --- 0x4\n  Internet Address      Physical Address      Type\n` + rows.join("\n");
   }
   if (/^arp\s+-d/.test(l)){ B.arp[d.id] = {}; return ""; }
+  if (t[0].toLowerCase()==="tracert"){
+    const ip = t[t.length-1]; if (t.length<2 || ipToInt(ip)==null) return `Unable to resolve target system name ${t[1]||""}.`;
+    if (!media || !d.ip) return "\nTransmit error: code 1231.";   // no link / no address
+    const r = trace(B, hostNode(d), ip); B.pinged[d.id+">"+ip] = r.ok; B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: r.ok});
+    if (r.kind==="unreach" && !r.hops.length) return `\nTracing route to ${ip} over a maximum of 30 hops\n\n  1  ${d.ip}  reports: Destination host unreachable.\n\nTrace complete.`;
+    return winTraceText(r, ip);
+  }
   if (t[0].toLowerCase()==="ping"){
     const ip = t[1]; if (!ip || ipToInt(ip)==null) return "Ping request could not find host "+(ip||"")+". Please check the name and try again.";
     let res;
@@ -679,6 +877,7 @@ function act(B, a){
   else r = {ok:false, msg:"Unknown action "+op};
   B.events.push({a, ok:r.ok});
   if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}   // link-up events log when they happen, like real switches
+  if (B.order.some(id=>B.devs[id].env)) try { computeL3(B); } catch(e){}
   return r;
 }
 function openConsole(B, laptopId, s){
@@ -1032,6 +1231,15 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   cableType: (B, ref) => { const c = cableAt(B, ref); return c ? c.type : null; },
   consoleOk: (B, dev) => !!(B.console && B.console.good && (!dev || B.console.target===dev)),
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
+  // Layer 3 (Module 5+): OSPF adjacency, routes in the RIB, HSRP role, a completed traceroute
+  ospfNbr: (B, r, rid, state) => { const o = computeL3(B).ospf[r]; return !!(o && o.nbrs.some(n=>n.rid===rid && (state ? n.state.startsWith(state) : /^FULL/.test(n.state)))); },
+  ospfNbrCount: (B, r) => { const o = computeL3(B).ospf[r]; return o ? o.nbrs.filter(n=>/^FULL/.test(n.state)).length : 0; },
+  ospfDr: (B, r, ios) => { const o = computeL3(B).ospf[r]; const x = o && o.ifs[ios]; return x && x.dr ? x.dr.rid : null; },
+  route: (B, r, prefix, code) => { const d = B.devs[r]; if (!d || !d.env || !d.env.rib) return null; computeL3(B); const [net, len] = prefix.split("/"); const e = d.env.rib().find(x=>x.net===net && x.len===+len);
+    if (!e || (code && e.code!==code && !(code==="O" && /^O/.test(e.code)))) return null; return {code:e.code, ad:e.ad, metric:e.metric, via: e.nhs.map(h=>h.cfgNh || h.nh || h.ios)}; },
+  routeVia: (B, r, dst) => { const d = B.devs[r]; if (!d || !d.env || !d.env.lookup) return null; computeL3(B); const x = d.env.lookup(dst); return x ? x.nh : null; },
+  traced: (B, from, ip) => !!(B.traced && B.traced[from+">"+ip]),
+  hsrpState: (B, r, ios, grp) => { const x = computeL3(B).hsrp[r+"|"+ios+"#"+(grp||0)]; return x ? x.state : null; },
   macKnown: (B, sw, mac, vlan) => Object.values(B.mac[sw]||{}).some(e=>e.mac===mac && (vlan==null || e.vlan===+vlan)),
   macPort: (B, sw, mac, vlan) => { const e = Object.values(B.mac[sw]||{}).find(e=>e.mac===mac && (vlan==null || e.vlan===+vlan)); if (!e) return null; const d = B.devs[sw]; return e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios); },
   macCount: (B, sw) => Object.keys(B.mac[sw]||{}).length,

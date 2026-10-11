@@ -201,9 +201,33 @@ green = forwarding, amber = STP blocking or err-disabled. Helpers: `Bench.trunki
 `Bench.bundled(B,sw,group)`, `Bench.errdis(B,sw,port)`, `Bench.stormed(B)`, `Bench.logged(B,sw,/regex/)`.
 IOS show commands: `show interfaces trunk`, `show interfaces <if> switchport`, `show spanning-tree [vlan N|summary]`,
 `show etherchannel summary`, `show vtp status`, `show logging`. Cisco 9000 default STP mode here is rapid-pvst (say so;
-older 2960s default to pvst).
+older 2960s default to pvst). (Root guard shows as `Desg BKN*` / `*ROOT_Inc`, a native-VLAN mismatch as `BKN*` / `*PVID_Inc`.)
 
-**PC Command Prompt:** `ipconfig`, `ipconfig /all`, `ping`, `arp -a`, `arp -d`, `ssh -l <user> <ip>` / `ssh user@ip`,
+**Layer 3 (Module 5+):** every router (and `ip routing` switch) keeps one RIB: connected (AD 0), local /32s, static (AD 1,
+or the distance you give — floating statics), OSPF (110). Per prefix the lowest AD wins; forwarding is **longest match**.
+Statics: `ip route NET MASK <next-hop>`, `<exit-if>`, `<exit-if> <next-hop>`, plus `[distance]`; a next-hop static is
+installed only if the next hop resolves (recursively) and an exit-interface static only if the interface is up.
+`show ip route [connected|static|ospf|<ip>]` prints the full IOS code legend, classful headings ("is subnetted" rows
+drop the length, "variably subnetted" rows keep it), `[AD/metric]`, ECMP paths on continuation lines.
+**OSPF (single process):** `router ospf N`, `network A W area X` (most specific match wins) or `ip ospf N area X`,
+`router-id` (needs `clear ip ospf process` once a RID is in use — IOS prints the message), `passive-interface [default]`,
+`default-information originate [always]`, `auto-cost reference-bandwidth`, interface `ip ospf cost|priority|hello-interval|
+dead-interval|network point-to-point`, `bandwidth`. Neighbours form over the real Layer 2 path (switches, VLANs, trunks
+all matter) only when area, subnet/mask, hello/dead and unique RIDs match — area mismatch and duplicate RID are logged
+(`%OSPF-4-ERRRCV`, `%OSPF-4-DUP_RTRID_NBR`); adjacency changes log `%OSPF-5-ADJCHG`. DR/BDR on broadcast segments:
+priority then RID, **non-preemptive** (a sitting DR keeps the job until `clear ip ospf process`/reload); DROTHER pairs
+stay `2WAY/DROTHER`; priority 0 never DR; point-to-point = `FULL/  -`. Cost = ref-bw (100 Mb/s) ÷ bandwidth, min 1.
+SPF per area with ECMP; loopbacks advertised as /32; ABRs give `O IA`; `default-information originate` gives `O*E2
+0.0.0.0/0 [110/1]`. Shows: `show ip ospf neighbor`, `show ip ospf interface [brief|<if>]`, `show ip protocols`,
+`show ip ospf`, `show ip ospf database`. **HSRP:** `standby G ip VIP`, `standby G priority P`, `standby G preempt`,
+`standby version 2`; Active = highest priority then IP (preempt needed to take over), hosts ARP the virtual MAC
+(`0000.0c07.acXX` v1), failover logs `%HSRP-5-STATECHANGE`, `show standby [brief]`. **Traceroute:** IOS `traceroute`
+and Windows `tracert` list each router by the interface the probe arrived on (`!N` / "Destination net unreachable"
+where routing stops). Helpers: `Bench.ospfNbr(B,r,rid[,state])`, `Bench.ospfNbrCount(B,r)`, `Bench.ospfDr(B,r,ios)`,
+`Bench.route(B,r,"10.1.0.0/24"[,code])` → {code, ad, metric, via}, `Bench.routeVia(B,r,dstIp)`, `Bench.traced(B,from,ip)`,
+`Bench.hsrpState(B,r,ios,grp)`. Routers have three ports by default (G0/0–G0/2). Tests: `node tools/routing_test.js`.
+
+**PC Command Prompt:** `ipconfig`, `ipconfig /all`, `ping`, `tracert`, `arp -a`, `arp -d`, `ssh -l <user> <ip>` / `ssh user@ip`,
 `telnet <ip>`, `cls`. SSH/Telnet open a real session on the device (needs a reachable management IP and the right VTY,
 user, domain-name and RSA key config); `exit` closes it.
 
