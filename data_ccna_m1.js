@@ -201,7 +201,7 @@ ${K.term({env:"ios", title:"look inside an office router", opts:{host:"OFFICE-RT
   intro:"The prompt ending in <code>&gt;</code> means you can look but not change much. <code>enable</code> moves you to privileged mode (<code>#</code>).",
   tasks:[
     {text:"Type <code>enable</code> to get to privileged mode — the prompt changes from <code>&gt;</code> to <code>#</code>", done:e=>e.mode!=="user" || e.history.some(h=>/^\s*en/i.test(h))},
-    {text:"Type <code>show ip interface brief</code> — find the LAN interface (192.168.1.1, the default gateway) and the ISP interface", done:e=>e.history.some(h=>/^\s*sh(ow)?\s+ip\s+int/i.test(h))},
+    {text:"Type <code>show ip interface brief</code> — it lists every interface with its IP address and whether it is up. Find the LAN interface (192.168.1.1, the default gateway) and the ISP interface", done:e=>e.history.some(h=>/^\s*sh(ow)?\s+ip\s+int/i.test(h))},
     {text:"Type <code>ping 8.8.8.8</code> — test reaching a server on the internet (Google's DNS server)", done:e=>!!(e.pinged&&e.pinged["8.8.8.8"])},
   ],
   win:"You just logged into a router, read its interfaces and tested the internet path — the same first three moves engineers make on a real device.",
@@ -563,7 +563,7 @@ ${K.term({env:"ios", title:"inspect a floor switch", opts:{host:"FLOOR2-SW", kin
     {text:"Type <code>show version</code> — what is the software version and the uptime?", done:e=>{ const i=e.history.findIndex(h=>/^\s*en(a(b(le?)?)?)?\s*$/i.test(h)); return i>-1 && e.history.slice(i+1).some(h=>/^\s*(do\s+)?sh(o(w)?)?\s+ver/i.test(h)); }},
     {text:"Type <code>show ip interface brief</code> — which interface holds the switch's own IP address?", done:e=>{ const i=e.history.findIndex(h=>/^\s*en(a(b(le?)?)?)?\s*$/i.test(h)); return i>-1 && e.history.slice(i+1).some(h=>/^\s*(do\s+)?sh(o(w)?)?\s+ip\s+int/i.test(h)); }},
     {text:"Type <code>show mac address-table</code> — which port has the printer's MAC, <code>0050.7966.6801</code>?", done:e=>{ const i=e.history.findIndex(h=>/^\s*en(a(b(le?)?)?)?\s*$/i.test(h)); return i>-1 && e.history.slice(i+1).some(h=>/^\s*(do\s+)?sh(o(w)?)?\s+mac/i.test(h)); }},
-    {text:"Label the printer's port: <code>configure terminal</code>, <code>interface g0/2</code>, <code>description FLOOR2-PRINTER</code>, <code>end</code>", done:e=>/print/i.test((e.intfs["GigabitEthernet0/2"]||{}).desc||"")},
+    {text:"Label the printer's port: <code>configure terminal</code> (enter configuration mode, where changes are made), <code>interface g0/2</code> (choose the port), <code>description FLOOR2-PRINTER</code> (a label for humans), <code>end</code> (back to privileged mode). Lesson 8 covers these modes properly", done:e=>/print/i.test((e.intfs["GigabitEthernet0/2"]||{}).desc||"")},
   ],
   win:"You identified the switch, read its interfaces, found a device by its MAC address and labelled its port — an engineer's first visit to a site.",
   solve:["enable","show version","show ip interface brief","show mac address-table","configure terminal","interface g0/2","description FLOOR2-PRINTER","end"]})}
@@ -906,7 +906,7 @@ ${K.term({env:"ios", title:"enable a new desk port", opts:{host:"SW-FLOOR3", kin
     {text:"<code>configure terminal</code>, <code>interface g0/1</code>, then <code>description DESK-3.22 FINANCE</code>", done:e=>!!(e.intfs["GigabitEthernet0/1"].desc && e.intfs["GigabitEthernet0/1"].desc.trim())},
     {text:"Bring it up with <code>no shutdown</code> — watch for <i>changed state to up</i>", done:e=>e.intfs["GigabitEthernet0/1"].shut===false},
     {text:"Verify with <code>do show ip interface brief</code> — Gi0/1 should be up / up", done:e=>{ const h=e.history; let ns=-1, sh=-1; h.forEach((x,i)=>{ if(/^\s*no\s+sh/i.test(x)) ns=i; if(/^\s*(do\s+)?sh(ow)?\s+ip\s+int/i.test(x)) sh=i; }); return e.intfs["GigabitEthernet0/1"].shut===false && ns>-1 && sh>ns; }},
-    {text:"<code>end</code>, then save with <code>copy running-config startup-config</code>", done:e=>!!e.savedOnce},
+    {text:"<code>end</code> (leave configuration mode), then save with <code>copy running-config startup-config</code> — the live settings are copied to the ones the device loads after a restart", done:e=>!!e.savedOnce},
   ],
   win:"Labelled, enabled, verified and saved. Had it stayed down/down, you'd head to the patch panel, not the PC.",
   solve:["enable","show ip interface brief","configure terminal","interface g0/1","description DESK-3.22 FINANCE","no shutdown","do show ip interface brief","end","copy running-config startup-config"]})}

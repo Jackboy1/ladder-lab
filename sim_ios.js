@@ -885,6 +885,12 @@ function ios2Env(opts){
     }
     return {text: ban + "Press RETURN to get started."};
   };
+  // for tools/labs_ready.js: the canonical keyword form(s) of a command line in any mode — "no shut" → "no shutdown",
+  // "sh ip int br" → "show ip interface brief", "ip add 10.1.1.1 255.255.255.0" → "ip address * *"
+  st.canonAll = line => { let t = joinIfTokens(tokens(String(line||""))); if (!t.length) return [];
+    if (t[0] && "do".startsWith(t[0].toLowerCase()) && t[0].length>=2 && t.length>1) t = t.slice(1);
+    const out = new Set(); for (const mode of Object.keys(T)){ const m = match(T[mode], t); if (!m.err) out.add(m.def.p.map(p=>isArg(p) ? "*" : p).join(" ")); }
+    return [...out]; };
   st.baseline = () => { st.startup = snapshot(); };
   st.exportConfig = () => snapshot();                                   // the whole config, for saving a topology
   st.importConfig = snap => { restore(snap); st.startup = snapshot(); };   // load it back as the saved startup-config

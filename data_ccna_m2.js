@@ -317,7 +317,7 @@ ${K.term({env:"ios2", title:"find a switch's own MAC addresses", opts:{kind:"swi
     {text:"Run <code>show interfaces vlan 1</code> — the management interface has a MAC of its own", done:e=>e.history.some(h=>/^\s*(do\s+)?sh\w*\s+int\w*\s+v\w*\s*1\s*$/i.test(h))},
     {text:"Run <code>show mac address-table</code> — which two STATIC entries are there, and why are both group addresses?", done:e=>e.history.some(h=>/^\s*(do\s+)?sh\w*\s+mac/i.test(h))},
   ],
-  win:"You found the base MAC, a port MAC with its BIA, the SVI MAC and the switch's own CPU entries. Base 0000.0c3a.0000 is a Cisco OUI (00-00-0C); each port adds a small number to it.",
+  win:"You found the base MAC, a port MAC with its BIA, the MAC of the SVI (switch virtual interface — the switch's own management interface; lesson 5 sets one up) and the switch's own CPU entries. Base 0000.0c3a.0000 is a Cisco OUI (00-00-0C); each port adds a small number to it.",
   solve:["enable","show version","show interfaces g0/1","show interfaces vlan 1","show mac address-table"]})}
 <p>You should have spotted: base MAC <code>0000.0c3a.0000</code> (Cisco OUI); <code>Gi0/1</code> is base plus one, "address is" matching "bia"; Vlan1 has another address from the block. Real Catalysts number ports from the base too, varying by model (and a real C9200L names its ports Gi1/0/1 onwards; this simulator uses the shorter Gi0/1 style).</p>
 

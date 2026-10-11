@@ -24,7 +24,7 @@ const COMMON = new Set(`I A OK PC IT TV CEO CV FAQ HR UK US USA EU UN AM PM GB M
 // brands, organisations, places, products and cert names — named, not taught
 const NAMES = new Set(`MTN GLO AIRTEL NEPA PHCN UCLA SRI ARPANET IBM HP HPE DELL ISR ASA ASR JUNIPER GTB GTBANK UBA FCMB NIBSS CBN NCC
   UNILAG FUTA OAU ABU NHS NASA BBC CNN IEEE IETF IANA ICANN RIPE ARIN APNIC AFRINIC LACNIC ISO ANSI TIA EIA IEC NIST CIS SANS
-  CCNA CCNP CCIE CCENT CCT CCST COMPTIA ITIL ISACA PMP RHCSA RHCE LPI LPIC MCSA II III IV PuTTY VMware SecureCRT PCS PARC LO HQ AWS JPEG GHz RA RB RC ACCOUNTS CON IKJ SALES FF FILESRV TeraTerm MobaXterm`.split(/\s+/).filter(Boolean));
+  CCNA CCNP CCIE CCENT CCT CCST COMPTIA ITIL ISACA PMP RHCSA RHCE LPI LPIC MCSA II III IV PuTTY VMware SecureCRT PCS PARC LO HQ AWS JPEG GHz RA RB RC ACCOUNTS CON IKJ SALES FF FILESRV AMAKA BOLA CHIDI TUNDE TeraTerm MobaXterm`.split(/\s+/).filter(Boolean));
 
 const strip = s => String(s||"")
   .replace(/<span class="gl-tip"[^>]*>[\s\S]*?<\/span>/g, " ")            // tooltip text is the definition itself
@@ -53,7 +53,11 @@ function expansions(text){
     if (initialsFit(m[1], m[3]) || /short for|stands for/.test(m[2])) out.push({ term: norm(m[1]), pos: m.index });
   return out;
 }
-const lessonHtml = l => [l.html,
+// a lab's task lines, hints and win message are read where the lab sits in the lesson (they aren't in the lesson HTML itself)
+const LABS = Object.assign({}, ctx.K._terms(), ctx.K._benches());
+const withLabText = h => String(h||"").replace(/(<div class="mt(?: bench)?" data-(?:mt|bench)="([tb]\d+)">)/g, (m, tag, id) => { const c = LABS[id]; if (!c) return m;
+  return tag + `<p>${[...(c.tasks||c.objectives||[]).flatMap(t=>[t.text, t.hint]), c.win].filter(Boolean).join(" · ")}</p>`; });
+const lessonHtml = l => [withLabText(l.html),
   ...(l.quiz||[]).map(q=>`<p>${q.q||""} ${(q.o||q.items||[]).join(" ")} ${(q.pairs||[]).flat().join(" ")} ${q.why||q.e||""}</p>`),
   ...(l.cards||[]).map(c=>`<p>${Array.isArray(c)?c.join(" "):`${c.f||c.q||""} ${c.b||c.a||""}`}</p>`)].join("\n");
 

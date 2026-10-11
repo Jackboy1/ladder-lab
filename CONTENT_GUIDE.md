@@ -294,6 +294,14 @@ has taught it — "never defined" (no earlier lesson and this lesson never expla
 after first use). Fix each with a `K.g` at the first use (expansion + plain meaning; say which later module covers it if it's a
 forward reference). Brands, places and formats everyone knows go in the `NAMES`/`COMMON` lists in tools/terms.js. A module
 doesn't ship until this prints 0 for it. `--jargon` additionally checks multi-word glossary terms (noisier; review by hand).
+Lab text (task lines, hints, win messages) is checked where the lab sits in the lesson.
+
+**Lab readiness (non-negotiable):** `node tools/labs_ready.js --track <id> --mod <module id>` (or `--lesson` fragments) checks
+every command in each lab's / terminal's `solve` against what was taught before the learner reaches it (code and command
+output earlier in the lesson or in earlier lessons; abbreviations count, arguments don't). "NOT TAUGHT" must be 0. "lab-only"
+means the lab's own task introduces the command: fine only if the task says what the command does, in plain words, with a
+pointer to where it's covered properly. Aim for understanding, not memorising: teach the logic (how the device decides) so a
+learner can reason through a scenario the lesson never showed — end each section with a "same logic, new situation" practice.
 
 When you release, bump the `?v=` stamp on the script tags in `index.html` (e.g. `?v=20261012a`) so browsers fetch the
 new files instead of mixing cached old ones with new ones. Then open the site with `#selftest` on the end of the URL.

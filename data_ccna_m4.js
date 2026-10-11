@@ -172,7 +172,7 @@ ${K.term({env:"ios2", title:"VLANs and access ports on SW-IKJ-2F", opts:{kind:"s
   intro:"Start with <code>enable</code> and <code>show vlan brief</code> to see what's there before you change anything.",
   tasks:[
     {text:"Create VLAN 10 named <code>STAFF</code>, VLAN 20 named <code>VOICE</code> and VLAN 30 named <code>PRINTERS</code>", done:e=>/^staff$/i.test(e.vlans[10]||"") && /^voice$/i.test(e.vlans[20]||"") && /^printers$/i.test(e.vlans[30]||"")},
-    {text:"Desk ports Gi0/1–Gi0/6: <code>switchport mode access</code>, access VLAN 10, and <code>switchport voice vlan 20</code> for the phones", done:e=>[1,2,3,4,5,6].every(n=>{ const i = e.intfs["GigabitEthernet0/"+n]; return i.mode==="access" && i.vlan===10 && i.voiceVlan===20; })},
+    {text:"Desk ports Gi0/1–Gi0/6: <code>switchport mode access</code>, access VLAN 10, and <code>switchport voice vlan 20</code> for the phones (a second VLAN on the same port just for IP-phone traffic — the voice VLAN section below explains how the phone and the PC share one cable)", done:e=>[1,2,3,4,5,6].every(n=>{ const i = e.intfs["GigabitEthernet0/"+n]; return i.mode==="access" && i.vlan===10 && i.voiceVlan===20; })},
     {text:"Delete the contractor's VLAN 40 with <code>no vlan 40</code>, then run <code>show interfaces g0/7 switchport</code> and find <code>Access Mode VLAN: 40 (Inactive)</code>", done:e=>!e.vlans[40] && e.log.some(l=>/Access Mode VLAN: 40 \(Inactive\)/.test(l.out))},
     {text:"Gi0/7 is the floor printer: move it to VLAN 30 (access)", done:e=>{ const i = e.intfs["GigabitEthernet0/7"]; return i.mode==="access" && i.vlan===30; }},
     {text:"Park the spare port: create VLAN 999 named <code>PARKING</code>, make Gi0/8 an access port in VLAN 999, and <code>shutdown</code> it", done:e=>{ const i = e.intfs["GigabitEthernet0/8"]; return /^parking$/i.test(e.vlans[999]||"") && i.mode==="access" && i.vlan===999 && i.shut; }},
@@ -605,7 +605,7 @@ ${K.term({env:"ios2", title:"build and repair a trunk on SW-DIST1", opts:{kind:"
     {text:"Silence DTP on the trunk: <code>switchport nonegotiate</code>", done:e=>e.intfs["GigabitEthernet0/1"].nonegotiate===true},
     {text:"Make desk port <code>g0/5</code> a hard-coded access port in VLAN 10", done:e=>e.intfs["GigabitEthernet0/5"].mode==="access" && e.intfs["GigabitEthernet0/5"].vlan===10},
     {text:"Try to create extended VLAN 2001 with <code>vlan 2001</code> — VTP server mode refuses it. Read the message", done:e=>e.history.some(h=>/^\s*vl\S*\s+2001\s*$/i.test(h))},
-    {text:"Take the switch out of VTP's reach: <code>vtp mode transparent</code>, then <code>do show vtp status</code>", done:e=>e.vtpMode==="transparent" && e.history.some(h=>/sh\S*\s+vtp/i.test(h))},
+    {text:"Take the switch out of VTP's reach: <code>vtp mode transparent</code> (VTP, covered later in this lesson, can copy VLAN lists between switches — and wipe them; transparent mode stops this switch taking part), then <code>do show vtp status</code>", done:e=>e.vtpMode==="transparent" && e.history.some(h=>/sh\S*\s+vtp/i.test(h))},
     {text:"Now <code>vlan 2001</code> works: name it <code>LAB-EXT</code>", done:e=>e.vlans[2001]==="LAB-EXT"},
     {text:"In privileged EXEC, <code>show interfaces g0/1 switchport</code> — find <i>Negotiation of Trunking: Off</i>", done:e=>e.history.some(h=>/^\s*(do\s+)?sh\S*\s+int\S*\s+g\S*0\/1\s+sw/i.test(h))},
     {text:"Save: <code>copy running-config startup-config</code>", done:e=>e.savedOnce},
@@ -1635,7 +1635,7 @@ ${K.term({env:"ios2", title:"read PVST+ on AS1-3F", opts:{kind:"switch", host:"A
   },
   intro:"A Catalyst access switch in a four-switch square running Rapid PVST+. Everything here is read-only: you're investigating, not changing.",
   tasks:[
-    {text:"<code>enable</code>, then <code>show spanning-tree vlan 1</code>: note the root's MAC (DS1), the root cost (8) and the Altn BLK port", done:e=>e.seen.some(o=>/VLAN0001[\s\S]*Root ID[\s\S]*Altn BLK/.test(o))},
+    {text:"<code>enable</code>, then <code>show spanning-tree vlan 1</code> (the tree for just one VLAN): note the root's MAC (DS1), the root cost (8) and the Altn BLK port", done:e=>e.seen.some(o=>/VLAN0001[\s\S]*Root ID[\s\S]*Altn BLK/.test(o))},
     {text:"<code>show spanning-tree vlan 10</code>: the same tree as VLAN 1, plus desk port Gi0/5 as a designated port. Note priority 32778 (32768 + 10)", done:e=>e.seen.some(o=>/VLAN0010[\s\S]*Gi0\/5/.test(o))},
     {text:"<code>show spanning-tree vlan 20</code>: a different root (DS2, 0050.0f20.0000), cost 4, and Gi0/2 now forwards", done:e=>e.seen.some(o=>/VLAN0020[\s\S]*Root ID[\s\S]*0050\.0f20/.test(o))},
     {text:"<code>show interfaces trunk</code>: the last block shows Gi0/2 forwarding only VLAN 20", done:e=>e.seen.some(o=>/forwarding state and not pruned/.test(o))},
