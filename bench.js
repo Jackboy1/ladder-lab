@@ -34,7 +34,7 @@ const shortIf = n => n.replace("GigabitEthernet","Gi").replace("FastEthernet","F
 
 /* ---------------- model ---------------- */
 function create(cfg){
-  const B = { cfg, devs:{}, order:[], cables:[], pinged:{}, console:null, events:[], mac:{}, arp:{}, nd:{}, frames:[], log:[], remote:{}, syslog:{} };
+  const B = { cfg, devs:{}, order:[], cables:[], pinged:{}, console:null, events:[], mac:{}, arp:{}, nd:{}, frames:[], log:[], remote:{}, syslog:{}, now: cfg.now || Date.UTC(2026, 9, 12, 8, 30, 0) };
   for (const d0 of cfg.devices) addDevice(B, d0);
   for (const c of (cfg.cables||[])){ const r = plug(B, c.type, c.a, c.b, true); if (r.ok && c.swapped) r.cable.swapped = true; }
   if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}
@@ -55,7 +55,8 @@ function addDevice(B, d0){
       B.mac[d.id] = {}; B.arp[d.id] = {};
     } else if (d.kind!=="hub"){
       d.mac = d0.mac || macFor(d.id); B.arp[d.id] = {};
-      d.ip6 = Object.assign({auto:true}, d0.ip6 || {});   // Windows default: "Obtain an IPv6 address automatically" (SLAAC from router advertisements)
+      d.ip6 = Object.assign({auto:true}, d0.ip6 || {});
+      if (d0.dhcp){ d.dhcp = true; d.ip = null; d.mask = null; d.gw = null; } d.dns = d0.dns ? [].concat(d0.dns) : [];   // Windows default: "Obtain an IPv6 address automatically" (SLAAC from router advertisements)
     }
     if (d0.snap && d.env) d.env.importConfig(d0.snap);   // a saved topology: restore the device's config
     if (d0.setup) d0.setup(d);
@@ -71,7 +72,7 @@ function removeDevice(B, id){
 function exportTopology(B){
   return { v:1, devices: B.order.map(id=>{ const d = B.devs[id]; const o = {id, kind:d.kind, label:d.label, x:Math.round(d.x), y:Math.round(d.y)};
       if (d.model) o.model = d.model; if (d.platform) o.platform = d.platform;
-      if (d.env) o.snap = d.env.exportConfig(); else if (d.kind!=="hub"){ if (d.ip) o.ip = d.ip; if (d.mask) o.mask = d.mask; if (d.gw) o.gw = d.gw; }
+      if (d.env) o.snap = d.env.exportConfig(); else if (d.kind!=="hub"){ if (d.dhcp) o.dhcp = true; else { if (d.ip) o.ip = d.ip; if (d.mask) o.mask = d.mask; if (d.gw) o.gw = d.gw; if (d.dns && d.dns.length) o.dns = d.dns.slice(); } }
       const sf = d.ports.filter(p=>p.sfp); if (sf.length) o.sfp = Object.fromEntries(sf.map(p=>[p.id,p.sfp]));
       if (d.ports && JSON.stringify(d.ports.map(p=>p.id))!==JSON.stringify(defaultPorts(d.kind).map(p=>p.id))) o.ports = d.ports.map(p=>({id:p.id, type:p.type, label:p.label, ios:p.ios}));
       return o; }),
@@ -539,14 +540,14 @@ function l3Hear(B, d, ios){
   return (r.recv||[]).filter(x=>x.dev!==d && x.dev.env).map(x=>({dev:x.dev, ios: x.svi || x.ios}));
 }
 function l3Sig(B){
-  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask, d.ip6]; }),
+  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask, d.ip6, !!d.dhcp, !!d.released]; }),
     B.cables.map(c=>[c.a, c.b, c.type])]);
 }
 function computeL3(B){
   if (B._l3busy) return B._l3 || {ospf:{}, hsrp:{}};
   const sig = l3Sig(B); if (B._l3 && B._l3.sig===sig) return B._l3;
   B._l3busy = true; const keepStorm = B.stormSeen;
-  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; res.ra = computeRa(B); return res; }
+  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; res.ra = computeRa(B); autoDhcp(B); return res; }
   finally { B._l3busy = false; B.stormSeen = keepStorm; }
 }
 function computeOspf(B, hears){
@@ -876,6 +877,74 @@ function trace6(B, d, dst){
   return {hops, ok: go.ok && !silent.has(hops.length-1), kind: go.kind === "unreach" ? "netunreach" : go.kind, silent, v6:true};
 }
 
+/* ---- DHCP (IPv4): Discover → Offer → Request → Ack; the relay hop (ip helper-address); the server's ping check; APIPA ---- */
+const mbits = m => (ipToInt(m)>>>0).toString(2).split("1").length - 1;
+const leaseText = ms => ms==null ? "infinite" : ms % 86400000===0 ? `${ms/86400000} day${ms===86400000?"":"s"}` : ms % 3600000===0 ? `${ms/3600000} hour${ms===3600000?"":"s"}` : `${ms/60000} minutes`;
+function dlog(B, frames, log, r, text){ frames.push(...r.hops); log.push(text, ...r.notes.map(n=>"&nbsp;&nbsp;· "+n)); B.step += Math.max(1, ...r.hops.map(h=>h.step+1-B.step)); }
+const fromOf = n => n.svi ? {svi:n.dev.id, vlan:n.vlan} : (n.tag!=null ? {ref:n.ref, tag:n.tag} : n.ref);
+function dora(B, d){
+  B_ctx.B = B; B.step = 0; const frames = [], log = [], D = window.DHCP, ref = hostNode(d).ref;
+  if (!ref || !linkUpAt(B, ref)) return {ok:false, frames, log:["No link — Windows can't send a DHCP Discover"], why:"media"};
+  const disc = deliver(B, ref, {src:d.mac, dst:BCAST, kind:"dhcp", label:"Discover"}, B.step);
+  dlog(B, frames, log, disc, `<b>DHCP Discover</b> (broadcast: 0.0.0.0 → 255.255.255.255, UDP 68 → 67) from ${d.label} (${d.mac}): "is there a DHCP server?"`);
+  let found = null;
+  for (const x of (disc.recv||[])){
+    const rd = x.dev, ifn = x.svi || x.ios; if (!rd.env || !rd.env.dhcp || !ifn) continue;
+    const i = rd.env.intfs[ifn]; if (!i || !i.ip || i.shut) continue;
+    if (rd.env.serviceDhcp===false){ log.push(`&nbsp;&nbsp;· ${rd.label} heard it, but <b>no service dhcp</b> switches off both its DHCP server and its relay`); continue; }
+    if (D.poolFor(rd.env.dhcp, i.ip)){ found = {srv:rd, srvIp:i.ip, via:i.ip, relay:null, iface:ifn, near:routerNodeFor(rd, ifn)}; break; }
+    if (!i.helpers || !i.helpers.length){ log.push(`&nbsp;&nbsp;· ${rd.label} ${shortIf(ifn)} heard the broadcast, but it has no DHCP pool for ${netOf(i.ip, i.mask)}/${mbits(i.mask)} and no <b>ip helper-address</b> — routers don't forward broadcasts, so the Discover stops here`); continue; }
+    for (const h of i.helpers){
+      const go = sendIp(B, {dev:rd, ip:i.ip}, h, "DHCP Discover (relayed)"); frames.push(...go.frames);
+      log.push(`<b>Relay:</b> ${rd.label} ${shortIf(ifn)} has <b>ip helper-address ${h}</b> — it turns the broadcast into a unicast from ${i.ip} to ${h} and writes giaddr = ${i.ip}, so the server knows which subnet the client is on`, ...go.log);
+      if (!go.ok){ log.push(`&nbsp;&nbsp;· the relayed Discover never reached ${h} — check the route from ${rd.label} to the server`); continue; }
+      const sv = go.final.dev, sIf = go.final.ios || go.final.svi;
+      if (!sv.env || !sv.env.dhcp || !sIf){ log.push(`&nbsp;&nbsp;· ${h} answered, but it isn't running a DHCP server`); continue; }
+      if (sv.env.serviceDhcp===false){ log.push(`&nbsp;&nbsp;· ${sv.label} has <b>no service dhcp</b> — it ignores the request`); continue; }
+      if (!D.poolFor(sv.env.dhcp, i.ip)){ log.push(`&nbsp;&nbsp;· ${sv.label} got the relayed Discover, but none of its pools covers giaddr ${i.ip} — no Offer`); continue; }
+      const back = sendIp(B, nodeFromFinal(B, go.final), i.ip, "DHCP Offer (to the relay)"); frames.push(...back.frames); log.push(...back.log);
+      if (!back.ok){ log.push(`&nbsp;&nbsp;· ${sv.label} has no route back to the relay address ${i.ip} — its Offer never arrives`); continue; }
+      found = {srv:sv, srvIp:sv.env.intfs[sIf].ip, via:i.ip, relay:rd, iface:"Unknown", near:routerNodeFor(rd, ifn)}; break; }
+    if (found) break;
+  }
+  if (!found){ log.push("No DHCP Offer came back. Windows keeps trying and meanwhile gives itself an <b>APIPA</b> address (169.254.x.x, mask 255.255.0.0) — usable only with other APIPA hosts on the same link"); return {ok:false, frames, log, why:"nooffer"}; }
+  const st = found.srv.env.dhcp, pool = D.poolFor(st, found.via);
+  const q = {mac:d.mac, via:found.via, iface:found.iface, now:B.now, want:d.lastIp || null,
+    own: ip => Object.values(found.srv.env.intfs).some(x=>x.ip===ip),
+    inUse: ip => { const o = ipOwner(B, ip); return !!o && o.dev!==d; }};
+  const o = D.offer(st, q);
+  for (const m of (o.logs||[])){ syslog(B, found.srv, m, true); log.push(`&nbsp;&nbsp;· ${found.srv.label} pings each address before offering it — this one answered, so it logs <code>${m}</code>, sets it aside as a conflict and tries the next`); }
+  if (o.err){ log.push(o.err==="exhausted" ? `${found.srv.label}: pool <b>${pool.name}</b> has no free address left (every one is leased, excluded or in conflict) — no Offer` : "No Offer"); return {ok:false, frames, log, why:o.err}; }
+  const nf = fromOf(found.near), nm = found.near.mac, by = found.relay ? `${found.relay.label} (relaying for ${found.srv.label})` : found.srv.label;
+  dlog(B, frames, log, deliver(B, nf, {src:nm, dst:d.mac, kind:"dhcp", label:"Offer"}, B.step), `<b>DHCP Offer</b> from ${by}: "you can have ${o.ip} ${o.mask}${o.routers[0] ? ", gateway " + o.routers[0] : ", no default gateway"}${o.dns.length ? ", DNS " + o.dns.join(", ") : ""}, lease ${leaseText(o.leaseMs)}" (pool ${pool.name})`);
+  dlog(B, frames, log, deliver(B, ref, {src:d.mac, dst:BCAST, kind:"dhcp", label:"Request"}, B.step), `<b>DHCP Request</b> (broadcast again) from ${d.label}: "I'll take ${o.ip} from server ${found.srvIp}" — broadcast, so any other server that made an offer knows it wasn't chosen`);
+  if (found.relay) log.push(`&nbsp;&nbsp;· ${found.relay.label} relays the Request to the server too`);
+  D.bind(st, q, o);
+  dlog(B, frames, log, deliver(B, nf, {src:nm, dst:d.mac, kind:"dhcp", label:"Ack"}, B.step), `<b>DHCP Ack</b> from ${by}: lease confirmed — ${d.label} now uses ${o.ip}`);
+  d.ip = o.ip; d.mask = o.mask; d.gw = o.routers[0] || null; d.dns = o.dns.slice(); d.domain = o.domain || null; d.lastIp = o.ip;
+  d.lease = {server:found.srvIp, srvId:found.srv.id, obtained:B.now, expires: o.leaseMs==null ? null : B.now + o.leaseMs};
+  B.arp[d.id] = {};
+  return {ok:true, frames, log, ip:o.ip, server:found.srvIp};
+}
+function dhcpRelease(B, d){
+  const frames = [], log = [];
+  if (d.lease && d.ip){ B_ctx.B = B; B.step = 0; const go = sendIp(B, hostNode(d), d.lease.server, "DHCP Release"); frames.push(...go.frames);
+    log.push(`<b>DHCP Release</b> (unicast) from ${d.label} to ${d.lease.server}: "I'm giving back ${d.ip}"`, ...go.log);
+    const sv = B.devs[d.lease.srvId]; if (go.ok && sv && sv.env && sv.env.dhcp) window.DHCP.release(sv.env.dhcp, d.mac); }
+  d.ip = null; d.mask = null; d.gw = null; d.dns = []; d.domain = null; d.lease = null; B.arp[d.id] = {};
+  return {frames, log};
+}
+// a PC set to "obtain automatically" asks again whenever the network changes (real Windows retries every few minutes)
+function autoDhcp(B){
+  if (!window.DHCP) return;
+  for (const id of B.order){ const d = B.devs[id]; if (d.env || d.kind==="hub" || !d.dhcp || d.ip || d.released || d.on===false) continue;
+    if (d._dhcpTried===B._l3.sig) continue; d._dhcpTried = B._l3.sig;
+    const keep = [B.frames, B.log, B.step]; try { dora(B, d); } finally { [B.frames, B.log, B.step] = keep; } }
+}
+const WDAY = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"], WMON = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const winTime = ms => { const t = new Date(ms); let h = t.getUTCHours(); const ap = h<12 ? "AM" : "PM"; h = h%12 || 12;
+  return `${WDAY[t.getUTCDay()]}, ${WMON[t.getUTCMonth()]} ${t.getUTCDate()}, ${t.getUTCFullYear()} ${h}:${String(t.getUTCMinutes()).padStart(2,"0")}:${String(t.getUTCSeconds()).padStart(2,"0")} ${ap}`; };
+
 /* ---- hooks the IOS engine calls ---- */
 function makeHooks(B, d){
   const l3 = () => computeL3(B), os = () => l3().ospf[d.id] || null;
@@ -959,17 +1028,32 @@ function pcExec(B, d, line){
   const l = raw.toLowerCase(), t = raw.split(/\s+/);
   const media = linkUpAt(B, hostNode(d).ref);
   if (!raw) return "";
-  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ping <ip> · tracert <ip> · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
+  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ping <ip> · tracert <ip> · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
   if (l==="cls") return {clear:true};
+  if (l==="ipconfig /release" || l==="ipconfig /renew"){
+    const head = "\nWindows IP Configuration\n\n";
+    if (!d.dhcp) return head + "The operation failed as no adapter is in the state permissible for this operation.";
+    if (!media) return head + "No operation can be performed on Ethernet while it has its media disconnected.";
+    if (l.endsWith("release")){ const r = dhcpRelease(B, d); d.released = true; B.frames = r.frames; B.log = r.log; return pcExec(B, d, "ipconfig").replace(/^\nWindows IP Configuration\n\n/, head); }
+    d.released = false; const r = dora(B, d); B.frames = r.frames; B.log = r.log;
+    if (!r.ok) return head + "An error occurred while renewing interface Ethernet : unable to contact your DHCP server. Request has timed out.";
+    return pcExec(B, d, "ipconfig").replace(/^\nWindows IP Configuration\n\n/, head);
+  }
   if (l==="ipconfig" || l==="ipconfig /all"){
-    const all = l.endsWith("/all");
-    let o = `\nWindows IP Configuration\n\nEthernet adapter Ethernet:\n\n`;
-    if (!media) return o + `   Media State . . . . . . . . . . . : Media disconnected\n   Connection-specific DNS Suffix  . :`+(all?`\n   Physical Address. . . . . . . . . : ${winMac(d.mac)}`:"");
-    if (all) o += `   Description . . . . . . . . . . . : Intel(R) Ethernet Connection I219-LM\n   Physical Address. . . . . . . . . : ${winMac(d.mac)}\n   DHCP Enabled. . . . . . . . . . . : No\n`;
-    if (!d.ip) return o + `   Autoconfiguration IPv4 Address. . : 169.254.${(d.id.length*37)%250+1}.${(d.id.length*91)%250+2}\n   Subnet Mask . . . . . . . . . . . : 255.255.0.0\n   Default Gateway . . . . . . . . . :`;
-    computeL3(B); const h6 = host6(B, d), v6 = [...h6.globals.map(g=>`   IPv6 Address. . . . . . . . . . . : ${g.addr}`), `   Link-local IPv6 Address . . . . . : ${h6.ll}%4`].join("\n") + "\n";
-    const gws = [h6.gw ? h6.gw + (I6().isLL(h6.gw) ? "%4" : "") : null, d.gw].filter(Boolean);
-    return o + v6 + `   IPv4 Address. . . . . . . . . . . : ${d.ip}\n   Subnet Mask . . . . . . . . . . . : ${d.mask}\n   Default Gateway . . . . . . . . . : ${gws[0]||""}${gws.slice(1).map(g=>"\n                                       "+g).join("")}`;
+    const all = l.endsWith("/all"), sfx = `   Connection-specific DNS Suffix  . : ${d.domain||""}`.trimEnd() + "\n";
+    let o = `\nWindows IP Configuration\n\n` + (all ? `   Host Name . . . . . . . . . . . . : ${d.label.replace(/\s+/g, "-")}\n   Primary Dns Suffix  . . . . . . . :\n   Node Type . . . . . . . . . . . . : Hybrid\n   IP Routing Enabled. . . . . . . . : No\n   WINS Proxy Enabled. . . . . . . . : No\n${d.domain ? "   DNS Suffix Search List. . . . . . : " + d.domain + "\n" : ""}\n` : "") + `Ethernet adapter Ethernet:\n\n`;
+    const pref = all ? "(Preferred)" : "";
+    const nic = all ? `   Description . . . . . . . . . . . : Intel(R) Ethernet Connection I219-LM\n   Physical Address. . . . . . . . . : ${winMac(d.mac)}\n   DHCP Enabled. . . . . . . . . . . : ${d.dhcp ? "Yes" : "No"}\n   Autoconfiguration Enabled . . . . : Yes\n` : "";
+    if (!media) return o + "   Media State . . . . . . . . . . . : Media disconnected\n" + sfx + nic.trimEnd();
+    computeL3(B); const h6 = host6(B, d), v6 = [...h6.globals.map(g=>`   IPv6 Address. . . . . . . . . . . : ${g.addr}${pref}`), `   Link-local IPv6 Address . . . . . : ${h6.ll}%4${pref}`].join("\n") + "\n";
+    const gw6 = h6.gw ? h6.gw + (I6().isLL(h6.gw) ? "%4" : "") : null, gws = [gw6, d.gw].filter(Boolean);
+    const gwLine = gl => `   Default Gateway . . . . . . . . . : ${gl[0]||""}${gl.slice(1).map(g=>"\n                                       "+g).join("")}`;
+    const dnsLines = (d.dns||[]).length ? `\n   DNS Servers . . . . . . . . . . . : ${d.dns[0]}${d.dns.slice(1).map(x=>"\n                                       "+x).join("")}` : "";
+    const tail = all ? (d.dhcp && d.ip && d.lease ? `\n   DHCP Server . . . . . . . . . . . : ${d.lease.server}` : "") + dnsLines + "\n   NetBIOS over Tcpip. . . . . . . . : Enabled" : "";
+    if (!d.ip && d.dhcp && d.released) return o + sfx + nic + v6 + gwLine(gw6 ? [gw6] : []) + tail;   // after ipconfig /release: no IPv4 address at all
+    if (!d.ip) return o + sfx + nic + v6 + `   Autoconfiguration IPv4 Address. . : 169.254.${(d.id.length*37)%250+1}.${(d.id.length*91)%250+2}${pref}\n   Subnet Mask . . . . . . . . . . . : 255.255.0.0\n` + gwLine(gw6 ? [gw6] : []) + tail;
+    const lease = all && d.dhcp && d.lease ? `   Lease Obtained. . . . . . . . . . : ${winTime(d.lease.obtained)}\n   Lease Expires . . . . . . . . . . : ${d.lease.expires==null ? "Never" : winTime(d.lease.expires)}\n` : "";
+    return o + sfx + nic + v6 + `   IPv4 Address. . . . . . . . . . . : ${d.ip}${pref}\n   Subnet Mask . . . . . . . . . . . : ${d.mask}\n` + lease + gwLine(gws) + tail;
   }
   if (/^arp\s+-a$/.test(l) || l==="arp -g"){
     if (!d.ip || !media) return "No ARP Entries Found.";
@@ -1065,9 +1149,14 @@ function act(B, a){
     else if (x[2] && !validMask(x[2])) r = {ok:false, msg:"That subnet mask isn't valid (e.g. 255.255.255.0)."};
     else if (x[3] && ipToInt(x[3])==null) r = {ok:false, msg:"The default gateway isn't a valid IP address."};
     else if (x[1] && x[2] && ipToInt(x[2]) < 0xFFFFFFFE && (x[1]===netOf(x[1],x[2]) || x[1]===bcastOf(x[1],x[2]))) r = {ok:false, msg:`Windows won't accept ${x[1]} with mask ${x[2]}: it is the subnet's ${x[1]===netOf(x[1],x[2])?"network address (all host bits are 0)":"broadcast address (all host bits are 1)"}. Pick an address between them.`};
-    else { d.ip = x[1]||null; d.mask = x[2]||null; d.gw = x[3]||null; B.arp[d.id] = {};
+    else if (x[4] && ipToInt(x[4])==null) r = {ok:false, msg:"The preferred DNS server isn't a valid IP address."};
+    else { d.dhcp = false; d.released = false; d.lease = null; d.domain = null; d.ip = x[1]||null; d.mask = x[2]||null; d.gw = x[3]||null; d.dns = x[4] ? [x[4]] : []; B.arp[d.id] = {};
       const off = d.ip && d.mask && d.gw && !sameNet(d.ip, d.gw, d.mask);
       r = {ok:true, msg: off ? `${d.label}: saved — but Windows warns: the default gateway ${d.gw} is not on the same network segment (subnet) as ${d.ip}/${d.mask}. (In this lab that gateway can't be used.)` : `${d.label}: IP settings saved.`}; } }
+  else if (op==="dhcp"){ const d = B.devs[x[0]];
+    d.dhcp = true; d.released = false; d.ip = null; d.mask = null; d.gw = null; d.dns = []; d.domain = null; d.lease = null; B.arp[d.id] = {};
+    const res = dora(B, d); B.frames = res.frames; B.log = res.log;
+    r = {ok:true, msg: res.ok ? `${d.label}: set to obtain an IP address automatically — got ${res.ip} from the DHCP server ${res.server}.` : `${d.label}: set to obtain an IP address automatically — but no DHCP server answered, so Windows uses an APIPA 169.254.x.x address. Open the frame log to see why.`}; }
   else if (op==="pc"){ B.frames = []; r = {ok:true, out: pcExec(B, B.devs[x[0]], x[1])}; }
   else if (op==="power"){ const d = B.devs[x[0]]; d.on = x[1]!==false; if (!d.on && B.mac[d.id]) B.mac[d.id] = {}; r = {ok:true, msg:`${d.label} powered ${d.on?"on":"off"}.`}; }
   else if (op==="console"){ r = openConsole(B, x[0], x[1]||{}); }
@@ -1232,7 +1321,8 @@ function mount(el, cfg, tasks, onWin){
     if (op==="remove") return `Remove the transceiver from <b>${esc(pn(x[0]))}</b>`;
     if (op==="flip") return `Click <b>${esc(pn(x[0]))}</b> → <b>Flip Tx/Rx</b> (swap the LC connector polarity)`;
     if (op==="ip6") return x[1]==="auto" ? `<b>${esc(lab(x[0]))} → IPv6 settings</b>: Obtain an IPv6 address automatically → OK` : `<b>${esc(lab(x[0]))} → IPv6 settings</b>: address <code>${esc(x[2]||"(blank)")}</code>/<code>${esc(x[3]||"64")}</code>, gateway <code>${esc(x[4]||"(blank)")}</code> → OK`;
-    if (op==="ip") return `<b>${esc(lab(x[0]))} → IP settings</b>: IP <code>${esc(x[1]||"(blank)")}</code>, mask <code>${esc(x[2]||"(blank)")}</code>, gateway <code>${esc(x[3]||"(blank)")}</code> → OK`;
+    if (op==="dhcp") return `<b>${esc(lab(x[0]))} → IP settings</b>: Obtain an IP address automatically → OK`;
+    if (op==="ip") return `<b>${esc(lab(x[0]))} → IP settings</b>: IP <code>${esc(x[1]||"(blank)")}</code>, mask <code>${esc(x[2]||"(blank)")}</code>, gateway <code>${esc(x[3]||"(blank)")}</code>${x[4] ? ", DNS <code>" + esc(x[4]) + "</code>" : ""} → OK`;
     if (op==="pc") return `<b>${esc(lab(x[0]))} → Command Prompt</b>: <code>${esc(x[1]||"(press Enter)")}</code>`;
     if (op==="console"){ const s = x[1]||{}; return `<b>${esc(lab(x[0]))} → Terminal app (PuTTY)</b>: Serial, COM3, speed <code>${esc(s.speed)}</code>, data bits <code>${esc(s.data)}</code>, parity <code>${esc(s.parity)}</code>, stop bits <code>${esc(s.stop)}</code>, flow control <code>${esc(s.flow)}</code> → Open`; }
     if (op==="term") return x[0] ? `Console: <code>${esc(x[0])}</code>` : `Console: press <b>Enter</b> (answers the prompt with its default)`;
@@ -1300,9 +1390,11 @@ function mount(el, cfg, tasks, onWin){
       <label>Default gateway<input class="txt" id="bn-gw6" value="${esc(v.gw||"")}" placeholder="e.g. fe80::1"></label></div>
       <div class="btnrow"><button class="btn sm" id="bn-ip6save">OK</button><button class="btn sm ghost" data-tool="">Cancel</button></div></div>`; }
     if (kind==="ip") return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · Internet Protocol Version 4 (TCP/IPv4) Properties</div>
-      <div class="bn-form"><label>IP address<input class="txt" id="bn-ip" value="${esc(d.ip||"")}" placeholder="e.g. 192.168.10.11"></label>
+      <div class="bn-form"><label><input type="radio" name="bn4m" value="auto" ${d.dhcp?"checked":""}> Obtain an IP address automatically</label><label><input type="radio" name="bn4m" value="static" ${d.dhcp?"":"checked"}> Use the following IP address:</label>
+      <label>IP address<input class="txt" id="bn-ip" value="${esc(d.ip||"")}" placeholder="e.g. 192.168.10.11"></label>
       <label>Subnet mask<input class="txt" id="bn-mask" value="${esc(d.mask||"")}" placeholder="e.g. 255.255.255.0"></label>
-      <label>Default gateway<input class="txt" id="bn-gw" value="${esc(d.gw||"")}" placeholder="e.g. 192.168.10.1"></label></div>
+      <label>Default gateway<input class="txt" id="bn-gw" value="${esc(d.gw||"")}" placeholder="e.g. 192.168.10.1"></label>
+      <label>Preferred DNS server<input class="txt" id="bn-dns" value="${esc(d.dhcp ? "" : (d.dns||[])[0]||"")}" placeholder="optional, e.g. 192.168.10.53"></label></div>
       <div class="btnrow"><button class="btn sm" id="bn-ipsave">OK</button><button class="btn sm ghost" data-tool="">Cancel</button></div></div>`;
     if (kind==="cmd"){ const L = pcLines[id] = pcLines[id] || [{t:"Microsoft Windows [Version 10.0.22631]\n(c) Microsoft Corporation. All rights reserved.", cls:""}];
       return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · ${B.remote[id]?`remote session to ${esc(B.remote[id].host)}`:"Command Prompt"}</div>${termBox(L, "bn-cmd", "bn-run", pcPrompt(B,d)||"(answer the prompt)", `<button class="btn sm ghost" data-tool="">Close</button>`)}</div>`; }
@@ -1417,7 +1509,8 @@ function mount(el, cfg, tasks, onWin){
     const ip6s = el.querySelector("#bn-ip6save");
     if (ip6s) ip6s.onclick = () => { const id = tool.split(":")[1]; const m = (el.querySelector('input[name="bn6m"]:checked')||{}).value || "auto"; const r = act(B, ["ip6", id, m, el.querySelector("#bn-ip6").value.trim(), el.querySelector("#bn-len6").value.trim(), el.querySelector("#bn-gw6").value.trim()]); if (r.ok) tool=null; after(r); };
     const ips = el.querySelector("#bn-ipsave");
-    if (ips) ips.onclick = () => { const id = tool.split(":")[1]; const r = act(B, ["ip", id, el.querySelector("#bn-ip").value.trim(), el.querySelector("#bn-mask").value.trim(), el.querySelector("#bn-gw").value.trim()]); if (r.ok) tool=null; after(r); };
+    if (ips) ips.onclick = () => { const id = tool.split(":")[1], m = (el.querySelector('input[name="bn4m"]:checked')||{}).value;
+      const r = m==="auto" ? act(B, ["dhcp", id]) : act(B, ["ip", id, el.querySelector("#bn-ip").value.trim(), el.querySelector("#bn-mask").value.trim(), el.querySelector("#bn-gw").value.trim(), el.querySelector("#bn-dns").value.trim()]); if (r.ok) tool=null; after(r); };
     if (el.querySelector("#bn-cmd")){ const id = tool.split(":")[1], d = B.devs[id];
       wireTerm("#bn-cmd", "#bn-run", v => { runPc(id, v); animKey++; draw(); focusSel("#bn-cmd"); }, B.remote[id] && B.remote[id].env); void d; }
     const op = el.querySelector("#bn-open");
@@ -1440,6 +1533,9 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   cableType: (B, ref) => { const c = cableAt(B, ref); return c ? c.type : null; },
   consoleOk: (B, dev) => !!(B.console && B.console.good && (!dev || B.console.target===dev)),
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
+  // IP services (Module 7+)
+  leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
+  dhcpBound: (B, r, ip) => { const d = B.devs[r]; return !!(d && d.env && d.env.dhcp && d.env.dhcp.bindings.some(b=>!ip || b.ip===ip)); },
   // Layer 3 (Module 5+): OSPF adjacency, routes in the RIB, HSRP role, a completed traceroute
   ospfNbr: (B, r, rid, state) => { const o = computeL3(B).ospf[r]; return !!(o && o.nbrs.some(n=>n.rid===rid && (state ? n.state.startsWith(state) : /^FULL/.test(n.state)))); },
   ospfNbrCount: (B, r) => { const o = computeL3(B).ospf[r]; return o ? o.nbrs.filter(n=>/^FULL/.test(n.state)).length : 0; },

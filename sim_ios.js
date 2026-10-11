@@ -52,7 +52,8 @@ function ios2Env(opts){
     return { host: opts.host || (kind==="router"?"Router":"Switch"), enableSecret:null, enablePassword:null, servicePwEnc:false, banner:null,
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
-      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[],
+      stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[], serviceDhcp:true,
+      acl: window.ACL ? window.ACL.store() : {lists:{}}, dhcp: window.DHCP ? window.DHCP.store() : {excluded:[], pools:{}, bindings:[], conflicts:[]}, nat: window.NAT ? window.NAT.store() : {pools:{}, statics:[], rules:[], table:[], hits:0, misses:0, expired:0},
       vlans: kind==="switch" ? {1:"default", 1002:"fddi-default", 1003:"token-ring-default", 1004:"fddinet-default", 1005:"trnet-default"} : {}, intfs };
   };
   const st = Object.assign(factory(), { kind, mode:"user", cur:null, curList:null, curLine:null, curVlan:null, history:[], savedOnce:false, startup:null, pending:null, noEcho:false, motd: opts.motd!=null?opts.motd:"" });
@@ -60,7 +61,12 @@ function ios2Env(opts){
   function defaultReach(ip){ for (const i of Object.values(st.intfs)) if (i.ip && !i.shut){ if (i.ip===ip) return true; if (sameNet(i.ip, ip, i.mask)){ const len = maskLen(i.mask); if (len>=31) return true; return ip!==netOf(i.ip, i.mask) && ip!==bcastOf(i.ip, i.mask); } } return false; }
   function bcastOf(ip, m){ const a = toInt(ip), b = toInt(m); const x = ((a & b) + (0xFFFFFFFF - b)) >>> 0; return [24,16,8,0].map(s=>Math.floor(x/2**s)%256).join("."); }
   const cfgKeys = Object.keys(factory());
-  const snapshot = () => JSON.parse(JSON.stringify(cfgKeys.reduce((o,k)=>(o[k]=st[k],o),{})));
+  // live state (DHCP leases, NAT translations, ACL match counters) is not configuration: a saved config and a reload never carry it
+  const stripLive = o => { if (o.dhcp){ o.dhcp.bindings = []; o.dhcp.conflicts = []; for (const p of Object.values(o.dhcp.pools||{})) delete p.index; }
+    if (o.nat){ o.nat.table = []; o.nat.hits = 0; o.nat.misses = 0; o.nat.expired = 0; for (const p of Object.values(o.nat.pools||{})){ p.used = {}; p.misses = 0; } }
+    if (o.acl) for (const l of Object.values(o.acl.lists||{})) for (const e of l.entries) if (e.hits) e.hits = 0;
+    return o; };
+  const snapshot = () => stripLive(JSON.parse(JSON.stringify(cfgKeys.reduce((o,k)=>(o[k]=st[k],o),{}))));
   // a key missing from an older save (a setting added since) falls back to the factory default
   const restore = snap => { const f = factory(); for (const k of cfgKeys) st[k] = JSON.parse(JSON.stringify(snap[k] !== undefined ? snap[k] : f[k] !== undefined ? f[k] : null)); };
   if (opts.config) Object.assign(st, opts.config);
@@ -162,6 +168,8 @@ function ios2Env(opts){
     if (!st.domainLookup) L.push("no ip domain lookup");
     if (st.domain) L.push(`ip domain name ${st.domain}`);
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
+    if (st.serviceDhcp===false) L.push("no service dhcp");
+    { const D = window.DHCP ? window.DHCP.running(st.dhcp) : []; if (D.length) L.push("!", ...D, "!"); }
     if (st.v6routing) L.push("ipv6 unicast-routing"); if (st.v6resolveDefault) L.push("ipv6 route static resolve default");
     if (!st.cdpRun) L.push("no cdp run");
     if (st.lldpRun) L.push("lldp run");
@@ -192,6 +200,7 @@ function ios2Env(opts){
       }
       if (i.bw) L.push(` bandwidth ${i.bw}`);
       if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
+      for (const h of (i.helpers||[])) L.push(` ip helper-address ${h}`);
       if (i.ll) L.push(` ipv6 address ${U(i.ll)} link-local`);
       for (const a of (i.ip6||[])) L.push(a.eui ? ` ipv6 address ${U(I6.mask(I6.parse(a.addr), 64))}/${a.len} eui-64` : ` ipv6 address ${U(a.addr)}/${a.len}${a.any ? " anycast" : ""}`);
       if (i.ip6auto) L.push(" ipv6 address autoconfig"); if (i.ip6en) L.push(" ipv6 enable");
@@ -215,6 +224,7 @@ function ios2Env(opts){
     if (st.defaultGw) L.push(`ip default-gateway ${st.defaultGw}`);
     for (const r of (st.routes6||[])) L.push(`ipv6 route ${U(r.net)}/${r.len}${r.ios?" "+r.ios:""}${r.nh?" "+U(r.nh):""}${r.ad?" "+r.ad:""}`);
     for (const r of st.routes.slice().sort((x,y)=>toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.ad?" "+r.ad:""}`);
+    { const A = window.ACL ? window.ACL.running(st.acl) : []; if (A.length) L.push("!", ...A); }
     L.push("!");
     if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
     L.push("!", "line con 0"); const c = st.lines.con;
@@ -653,6 +663,10 @@ function ios2Env(opts){
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
     X("show cdp neighbors", ()=>cdpNeighbors(false)), X("show cdp neighbors detail", ()=>cdpNeighbors(true)),
     X("show lldp neighbors", ()=>lldpNeighbors()),
+    X("show access-lists", ()=>window.ACL.show(st.acl)), X("show access-lists A:WORD", a=>window.ACL.show(st.acl, a[0])),
+    X("show ip access-lists", ()=>window.ACL.show(st.acl)), X("show ip access-lists A:WORD", a=>window.ACL.show(st.acl, a[0])),
+    X("show ip dhcp binding", ()=>window.DHCP.showBinding(st.dhcp)), X("show ip dhcp pool", ()=>window.DHCP.showPool(st.dhcp)), X("show ip dhcp pool A:WORD", a=>window.DHCP.showPool(st.dhcp, a[0])),
+    X("show ip dhcp conflict", ()=>window.DHCP.showConflict(st.dhcp)),
     X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()), X("show ip route connected", ()=>routeTable("connected")), X("show ip route static", ()=>routeTable("static")), X("show ip route ospf", ()=>routeTable("ospf")),
     X("show ip route A:IP", a=>{ if (kind==="switch" && !st.ipRouting) return routeTable(); return routeEntryFor(a[0]); }),
     X("show ip ospf neighbor", ()=>ospfNeighbors()), X("show ip ospf interface brief", ()=>ospfIntBrief()), X("show ip ospf interface", ()=>ospfIntDetail(null)),
@@ -686,6 +700,10 @@ function ios2Env(opts){
       X("reload cancel", ()=>{ if (!st.reloadIn) return "%No reload is scheduled."; st.reloadIn = null; return "\n\n***\n*** --- SHUTDOWN ABORTED ---\n***\n"; }),
       X("show reload", ()=>st.reloadIn ? `Reload scheduled in ${st.reloadIn} minutes by console\nReload reason: Reload Command` : "No reload is scheduled."),
       X("clear mac address-table dynamic", ()=>{ if (kind!=="switch") return inv(); hooks.clearMac(); return ""; }),
+      X("clear ip dhcp binding A:WORD", a=>{ if (a[0]==="*") window.DHCP.clear(st.dhcp); else st.dhcp.bindings = st.dhcp.bindings.filter(b=>b.ip!==a[0]); return ""; }),
+      X("clear ip dhcp conflict A:WORD", a=>{ if (a[0]==="*") window.DHCP.clear(st.dhcp, "conflict"); else st.dhcp.conflicts = st.dhcp.conflicts.filter(c=>c.ip!==a[0]); return ""; }),
+      X("clear access-list counters", ()=>{ window.ACL.clear(st.acl); return ""; }), X("clear access-list counters A:WORD", a=>{ window.ACL.clear(st.acl, a[0]); return ""; }),
+      X("clear ip access-list counters", ()=>{ window.ACL.clear(st.acl); return ""; }), X("clear ip access-list counters A:WORD", a=>{ window.ACL.clear(st.acl, a[0]); return ""; }),
       X("clear arp-cache", ()=>""), X("clear ip route *", ()=>""),
       X("clear ip ospf process", ()=>{ if (!st.ospf) return ""; return ask("Reset ALL OSPF processes? [no]: ", l=>{ if (!/^y/i.test(l.trim())) return ""; st.ospfRidActive = null; st.ospfResets = (st.ospfResets||0) + 1; ospfRid(); return ""; }); }), X("clear counters", ()=>ask("Clear \"show interface\" counters on all interfaces [confirm]", ()=>"")),
     ],
@@ -745,6 +763,20 @@ function ios2Env(opts){
       X("spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = true; return ""; }), X("no spanning-tree portfast bpduguard default", ()=>{ st.bpduDefault = false; return ""; }),
       X("port-channel load-balance A:WORD", a=>{ if (kind!=="switch") return inv(); const m = ["src-mac","dst-mac","src-dst-mac","src-ip","dst-ip","src-dst-ip"].find(x=>x===a[0].toLowerCase()); if (!m) return inv(); st.lbMethod = m; return ""; }),
       X("no port-channel load-balance", ()=>{ st.lbMethod = null; return ""; }),
+      // ---- access lists (numbered: access-list N …; named: ip access-list standard|extended NAME → sub-mode) ----
+      X("access-list A:LINE", a=>{ const r = window.ACL.globalCmd(st.acl, "access-list " + a[0]); return r.err || ""; }),
+      X("no access-list A:LINE", a=>{ const r = window.ACL.globalCmd(st.acl, "no access-list " + a[0]); return r.err || ""; }),
+      X("ip access-list standard A:WORD", a=>{ const r = window.ACL.enterNamed(st.acl, "standard", a[0]); if (r.err) return r.err; st.mode = r.mode; st.curAcl = r.ctx; return ""; }),
+      X("ip access-list extended A:WORD", a=>{ const r = window.ACL.enterNamed(st.acl, "extended", a[0]); if (r.err) return r.err; st.mode = r.mode; st.curAcl = r.ctx; return ""; }),
+      X("no ip access-list standard A:WORD", a=>{ const l = st.acl.lists[a[0]]; if (l && l.kind==="standard") delete st.acl.lists[a[0]]; return ""; }),
+      X("no ip access-list extended A:WORD", a=>{ const l = st.acl.lists[a[0]]; if (l && l.kind==="extended") delete st.acl.lists[a[0]]; return ""; }),
+      X("ip access-list resequence A:WORD A:NUM A:NUM", a=>{ const r = window.ACL.resequence(st.acl, a[0], a[1], a[2]); return r.err || ""; }),
+      // ---- DHCP server ----
+      X("ip dhcp excluded-address A:LINE", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "ip dhcp excluded-address " + a[0]); return r.err || ""; }),
+      X("no ip dhcp excluded-address A:LINE", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "no ip dhcp excluded-address " + a[0]); return r.err || ""; }),
+      X("ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "ip dhcp pool " + a[0]); if (r.err) return r.err; st.mode = "dhcp-config"; st.curPool = r.ctx; return ""; }),
+      X("no ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "no ip dhcp pool " + a[0]); return r.err || ""; }),
+      X("service dhcp", ()=>{ st.serviceDhcp = true; return ""; }), X("no service dhcp", ()=>{ st.serviceDhcp = false; return ""; }),
       X("ipv6 unicast-routing", ()=>{ st.v6routing = true; return ""; }), X("ipv6 route static resolve default", ()=>{ st.v6resolveDefault = true; return ""; }), X("no ipv6 route static resolve default", ()=>{ st.v6resolveDefault = false; return ""; }), X("no ipv6 unicast-routing", ()=>{ st.v6routing = false; return ""; }),
       X("ipv6 route A:WORD A:LINE", a=>{ const p = I6.parsePrefix(a[0]); if (!p) return "% Invalid input detected at '^' marker.";
         const net = I6.str(I6.mask(p.w, p.len)); if (!I6.eq(net, p.w)) return "% Invalid input detected at '^' marker.";   // IOS wants the prefix itself
@@ -809,6 +841,9 @@ function ios2Env(opts){
         return l2(i=>{ i.allowed = list; }); }),
       X("switchport trunk native vlan A:NUM", a=>l2(i=>{ i.native=+a[0]; })),
       X("switchport nonegotiate", ()=>{ if ((st.curList||[st.cur]).some(n=>st.intfs[n].mode==="dynamic")) return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."; return l2(i=>{ i.nonegotiate=true; }); }), X("switchport trunk encapsulation dot1q", ()=>""),
+      X("ip helper-address A:IP", a=>{ forCur(i=>{ i.helpers = i.helpers || []; if (!i.helpers.includes(a[0])) i.helpers.push(a[0]); }); return ""; }),
+      X("no ip helper-address", ()=>{ forCur(i=>{ delete i.helpers; }); return ""; }),
+      X("no ip helper-address A:IP", a=>{ forCur(i=>{ if (i.helpers){ i.helpers = i.helpers.filter(h=>h!==a[0]); if (!i.helpers.length) delete i.helpers; } }); return ""; }),
       X("ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=true); return ""; }), X("no ip proxy-arp", ()=>{ forCur(i=>i.proxyArp=false); return ""; }),
       X("cdp enable", ()=>{ forCur(i=>i.cdp=true); return ""; }), X("no cdp enable", ()=>{ forCur(i=>i.cdp=false); return ""; }),
       X("bandwidth A:NUM", a=>{ const b = +a[0]; if (!(b>=1 && b<=100000000)) return inv(); forCur(i=>i.bw=b); return ""; }), X("no bandwidth", ()=>{ forCur(i=>{ delete i.bw; }); return ""; }),
@@ -860,6 +895,11 @@ function ios2Env(opts){
       X("exec-timeout A:NUM A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} ${a[1]}`; return ""; }), X("exec-timeout A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} 0`; return ""; }),
       X("logging synchronous", ()=>{ st.lines[st.curLine].sync=true; return ""; }),
     ],
+    "config-std-nacl": aclMode(), "config-ext-nacl": aclMode(),
+    "dhcp-config": ["network","default-router","dns-server","domain-name","lease"].flatMap(k=>[
+      X(k + " A:LINE", a=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, k + " " + a[0]); return r.err || ""; }),
+      X("no " + k, ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }),
+      X("no " + k + " A:LINE", ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }) ]),
     "config-router": [
       X("network A:IP A:IP area A:WORD", a=>{ const area = areaParse(a[2]); if (area==null || !ipRe.test(a[0]) || !ipRe.test(a[1])) return inv();
         // current IOS converts a subnet mask typed in place of a wildcard (255.255.255.0 → 0.0.0.255); all-ones stays "match everything"
@@ -882,9 +922,12 @@ function ios2Env(opts){
   };
   const cfgDone = () => `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
-  for (const m of ["config","config-if","config-line","config-vlan","config-router"]) T[m].push(...cfgCommon);
+  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","dhcp-config"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
+  function aclMode(){ const run = (pre, a) => { const r = window.ACL.namedCmd(st.acl, st.curAcl, pre + a.join(" ")); return r.err || ""; };
+    return [ ...["permit","deny","remark"].flatMap(k=>[ X(k + " A:LINE", a=>run(k + " ", a)), X("A:NUM " + k + " A:LINE", a=>run(a[0] + " " + k + " ", [a[1]])) ]),
+      X("no A:NUM", a=>run("no " + a[0], [])), X("no permit A:LINE", a=>run("no permit ", a)), X("no deny A:LINE", a=>run("no deny ", a)), X("no remark A:LINE", a=>run("no remark ", a)) ]; }
   function forCur(fn){ for (const n of (st.curList||[st.cur])) fn(st.intfs[n], n); }
   function l2(fn){ const bad = (st.curList||[st.cur]).find(n=>st.intfs[n].mode==="routed"||st.intfs[n].mode==="svi"); if (bad || kind!=="switch") return inv(); forCur(fn);
     for (const n of (st.curList||[st.cur])) if (n.startsWith("Port-channel")){ const g = +n.slice(12); for (const m of physical){ const i = st.intfs[m]; if (i.channel && i.channel.group===g){ const keep = i.channel; fn(i, m); i.channel = keep; } } }
@@ -1015,7 +1058,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-ext-nacl":h+"(config-ext-nacl)#", "dhcp-config":h+"(dhcp-config)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;
