@@ -372,11 +372,11 @@ function ios2Env(opts){
   st.rib = () => ribAll();
   st.ospfInfo = () => st.ospf && routingOn() ? {pid:st.ospf.pid, rid:ospfRid(), ifaces:ospfIfaces(), defOrig:st.ospf.defOrig, defAlways:st.ospf.defAlways, resets:st.ospfResets||0,
     hasDefault: ribAll().some(e=>e.len===0 && e.code!=="O*E2")} : null;
-  st.hsrpGroups = () => { const out = []; for (const n of ifNames()){ const i = st.intfs[n]; if (i.hsrp) for (const [g, h] of Object.entries(i.hsrp)) if (h.ip) out.push({ios:n, grp:+g, vip:h.ip, prio: h.prio!=null ? h.prio : 100, preempt:!!h.preempt, ver: i.hsrpVer||1, ip:i.ip, up: up(n) && !!i.ip}); } return out; };
+  st.hsrpGroups = () => { const out = []; for (const n of ifNames()){ const i = st.intfs[n]; if (i.hsrp) for (const [g, h] of Object.entries(i.hsrp)) if (h.ip) out.push({ios:n, grp:+g, vip:h.ip, prio: h.prio!=null ? h.prio : 100, preempt:!!h.preempt, ver: i.hsrpVer||1, ip:i.ip, up: up(n) && !!i.ip && sameNet(i.ip, h.ip, i.mask), badVip: !!i.ip && !sameNet(i.ip, h.ip, i.mask)}); } return out; };
   const hsrpVmac = (g, ver) => ver===2 ? `0000.0c9f.f${g.toString(16).padStart(3,"0")}` : `0000.0c07.ac${g.toString(16).padStart(2,"0")}`;
 
-  function ribLine(e, noLen){   // noLen: under an "is subnetted" heading IOS prints the prefix without its length
-    const code = pad(e.code, 9), pfx = noLen ? e.net : `${e.net}/${e.len}`, ind = " ".repeat(9 + pfx.length + 1);
+  function ribLine(e, noLen, top){   // noLen: under an "is subnetted" heading IOS prints the prefix without its length; top: a route with no heading above it uses a 6-wide code column
+    const w = top ? 6 : 9, code = pad(e.code, w), pfx = noLen ? e.net : `${e.net}/${e.len}`, ind = " ".repeat(w + pfx.length + 1);
     if (e.code==="C" || e.code==="L") return `${code}${pfx} is directly connected, ${e.nhs[0].ios}`;
     if (e.code[0]==="S") return e.nhs.map((h,k)=>{ const body = h.direct ? `is directly connected, ${h.ios}` : `[${e.ad}/0] via ${h.cfgNh||h.nh}${h.full ? ", "+h.ios : ""}`; return (k ? ind : `${code}${pfx} `) + body; }).join("\n");
     return e.nhs.map((h,k)=>(k ? ind : `${code}${pfx} `) + `[110/${e.metric}] via ${h.nh}, ${ageOf(pfx)}, ${h.ios}`).join("\n");
@@ -420,7 +420,7 @@ function ios2Env(opts){
     if (only && !fs.length){ const i = st.intfs[only]; return `${only} is ${i.shut?"administratively down":up(only)?"up":"down"}, line protocol is ${up(only)?"up":"down"}\n  OSPF not enabled on this interface`; }
     return fs.map(f=>{ const i = st.intfs[f.ios], x = ospfIfState(f.ios, f), rid = ospfRid();
       const L = [`${f.ios} is ${i.shut?"administratively down":f.up?"up":"down"}, line protocol is ${f.up?"up":"down"}`,
-        `  Internet Address ${f.ip}/${f.len}, Interface ID ${ifNames().indexOf(f.ios)+1}, Area ${areaStr(f.area)}`, `  Attached via ${f.via}`,
+        `  Internet Address ${f.ip}/${f.len}, Interface ID ${ifNames().indexOf(f.ios)+1}, Area ${areaStr(f.area)}`, `  Attached via ${f.via==="Interface Configuration" ? "Interface Enable" : f.via}`,
         `  Process ID ${st.ospf.pid}, Router ID ${rid}, Network Type ${f.net}, Cost: ${f.cost}`,
         "  Topology-MTID    Cost    Disabled    Shutdown      Topology Name", `        0           ${pad(f.cost,10)}no          no            Base`];
       if (f.via==="Interface Configuration") L.push("  Enabled by interface config, including secondary ip addresses");
@@ -429,7 +429,7 @@ function ios2Env(opts){
       if (f.net==="POINT_TO_POINT") L.push("  Transmit Delay is 1 sec, State POINT_TO_POINT");
       else { L.push(`  Transmit Delay is 1 sec, State ${x.state}, Priority ${f.prio}`);
         if (x.dr) L.push(`  Designated Router (ID) ${x.dr.rid}, Interface address ${x.dr.ip}`); else L.push("  No designated router on this network");
-        if (x.bdr) L.push(`  Backup Designated router (ID) ${x.bdr.rid}, Interface address ${x.bdr.ip}`); else if (x.dr) L.push("  No backup designated router on this network"); }
+        if (x.bdr) L.push(`  Backup Designated router (ID) ${x.bdr.rid}, Interface address ${x.bdr.ip}`); else L.push("  No backup designated router on this network"); }
       L.push(`  Timer intervals configured, Hello ${f.hello}, Dead ${f.dead}, Wait ${f.dead}, Retransmit 5`, `    oob-resync timeout ${f.dead}`);
       if (f.passive) L.push("    No Hellos (Passive interface)"); else L.push(`    Hello due in 00:00:0${Math.max(1, f.hello%10 || 4)}`);
       L.push("  Supports Link-local Signaling (LLS)", "  Cisco NSF helper support enabled", "  IETF NSF helper support enabled",
@@ -506,7 +506,9 @@ function ios2Env(opts){
     for (const [key,g] of [...groups].sort((x,y)=>x[0]==="0.0.0.0"?-1:y[0]==="0.0.0.0"?1:toInt(x[1].major)-toInt(y[1].major))){
       if (g.major){ const masks = [...new Set(g.rows.map(r=>r.len))]; const sub = g.rows.length;
         if (!(masks.length===1 && masks[0]===g.p)) L.push(masks.length>1 ? `      ${g.major}/${g.p} is variably subnetted, ${sub} subnets, ${masks.length} masks` : `      ${g.major}/${masks[0]} is subnetted, ${sub} subnets`);
-        if (masks.length===1 && masks[0]!==g.p) g.rows.forEach(r=>{ r.text = ribLine(r.e, true); }); }
+        if (masks.length===1 && masks[0]!==g.p) g.rows.forEach(r=>{ r.text = ribLine(r.e, true); });
+        if (masks.length===1 && masks[0]===g.p) g.rows.forEach(r=>{ r.text = ribLine(r.e, false, true); }); }
+      else g.rows.forEach(r=>{ r.text = ribLine(r.e, false, true); });   // the default route
       const hdr = L.length; g.rows.sort((x,y)=>toInt(x.net)-toInt(y.net) || x.len-y.len).forEach(r=>{ if (r.show) L.push(r.text); });
       if (g.major && L.length===hdr && /^ {6}\S/.test(L[hdr-1]||"")) L.pop();   // nothing shown under this heading: drop it
     }
@@ -571,7 +573,7 @@ function ios2Env(opts){
     X("show clock", ()=>"*10:14:07.312 WAT Sun Oct 11 2026"),
   ];
   const execCommon = [
-    X("ping A:WORD", a=>doPing(a[0])), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("traceroute A:WORD", a=>doTrace(a[0])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
+    X("ping A:WORD", a=>doPing(a[0])), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
     X("terminal length A:NUM", ()=>""), X("terminal no monitor", ()=>""),
   ];
   const T = {
@@ -713,9 +715,12 @@ function ios2Env(opts){
         forCur(i=>i.ospfArea = {pid, area}); return ""; }),
       X("no ip ospf A:NUM area A:WORD", ()=>{ forCur(i=>{ delete i.ospfArea; }); return ""; }),
       X("standby A:NUM ip A:IP", a=>{ const g = +a[0]; if (!(g>=0 && g<=4095)) return inv(); const i = st.intfs[st.cur]; if (!i.ip) return "% Address must be configured on the interface first";
-        if (!sameNet(i.ip, a[1], i.mask)) return `% Address ${a[1]} in group ${g} does not belong to the subnet of ${st.cur}`; i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {ip:a[1]}); return ""; }),
+        i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {ip:a[1]});
+        // real IOS only warns about a virtual IP outside the interface's subnet — the group then sits in Init and never sends hellos
+        return sameNet(i.ip, a[1], i.mask) ? "" : "% Warning: address is not within a subnet on this interface"; }),
       X("standby A:NUM priority A:NUM", a=>{ const g = +a[0], p = +a[1]; if (!(p>=0 && p<=255)) return inv(); const i = st.intfs[st.cur]; i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {prio:p}); return ""; }),
       X("standby A:NUM preempt", a=>{ const g = +a[0], i = st.intfs[st.cur]; i.hsrp = i.hsrp || {}; i.hsrp[g] = Object.assign(i.hsrp[g]||{}, {preempt:true}); return ""; }),
+      X("no standby A:NUM priority", a=>{ const i = st.intfs[st.cur]; if (i.hsrp && i.hsrp[+a[0]]) delete i.hsrp[+a[0]].prio; return ""; }),
       X("no standby A:NUM preempt", a=>{ const i = st.intfs[st.cur]; if (i.hsrp && i.hsrp[+a[0]]) i.hsrp[+a[0]].preempt = false; return ""; }),
       X("no standby A:NUM", a=>{ const i = st.intfs[st.cur]; if (i.hsrp) delete i.hsrp[+a[0]]; return ""; }),
       X("standby version A:NUM", a=>{ if (!/^[12]$/.test(a[0])) return inv(); forCur(i=>i.hsrpVer = +a[0]); return ""; }),
@@ -731,7 +736,11 @@ function ios2Env(opts){
     ],
     "config-router": [
       X("network A:IP A:IP area A:WORD", a=>{ const area = areaParse(a[2]); if (area==null || !ipRe.test(a[0]) || !ipRe.test(a[1])) return inv();
-        const o = st.ospf; if (!o.networks.some(w=>w.net===a[0] && w.wild===a[1])) o.networks.push({net:a[0], wild:a[1], area}); else o.networks.find(w=>w.net===a[0] && w.wild===a[1]).area = area; return ""; }),
+        // current IOS converts a subnet mask typed in place of a wildcard (255.255.255.0 → 0.0.0.255); all-ones stays "match everything"
+        const wild = maskOk(a[1]) && a[1]!=="255.255.255.255" ? a[1].split(".").map(o=>255-(+o)).join(".") : a[1];
+        const o = st.ospf; if (!o.networks.some(w=>w.net===a[0] && w.wild===wild)) o.networks.push({net:a[0], wild, area}); else o.networks.find(w=>w.net===a[0] && w.wild===wild).area = area;
+        // IOS lists overlapping statements most specific first (fewest wildcard bits), keeping typed order otherwise
+        const bits = w => ones32(toInt(w.wild)); o.networks = o.networks.map((w,k)=>({w,k})).sort((x,y)=>bits(x.w)-bits(y.w) || x.k-y.k).map(x=>x.w); return ""; }),
       X("no network A:IP A:IP area A:WORD", a=>{ st.ospf.networks = st.ospf.networks.filter(w=>!(w.net===a[0] && w.wild===a[1])); return ""; }),
       X("router-id A:IP", a=>{ if (!ipRe.test(a[0])) return inv(); st.ospf.rid = a[0]; if (st.ospfRidActive && st.ospfRidActive!==a[0]) return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; st.ospfRidActive = a[0]; return ""; }),
       X("no router-id", ()=>{ st.ospf.rid = null; return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; }),
@@ -795,7 +804,10 @@ function ios2Env(opts){
     const n = (bar.match(/!/g)||[]).length;
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
-  function doTrace(ip){ if (hooks.trace) return hooks.trace(ip); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
+  function doTrace(ip, srcArg){
+    let src = null; if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
+      if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
+    if (hooks.trace) return hooks.trace(ip, src); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
 
   /* ---------- parser ---------- */
   const isArg = p => p.startsWith("A:");

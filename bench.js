@@ -558,7 +558,7 @@ function computeOspf(B, hears){
   const nbrOf = new Map(ifs.map(e=>[e.k, []]));
   for (const e of ifs){ if (e.f.passive || e.f.loop) continue;
     for (const k2 of heard(e)){ const e2 = byKey.get(k2); if (!e2 || e2.f.passive || e2.f.loop || !heard(e2).has(e.k)) continue;
-      if (e2.f.area!==e.f.area){ syslog(B, e.d, e.f.area===0 || e2.f.area===0 ? `%OSPF-4-ERRRCV: Received invalid packet: mismatched area ID, from backbone area must be virtual-link but not found from ${e2.f.ip}, ${e.f.ios}` : `%OSPF-4-ERRRCV: Received invalid packet: mismatched area ID from ${e2.f.ip}, ${e.f.ios}`); continue; }
+      if (e2.f.area!==e.f.area){ syslog(B, e.d, e2.f.area===0 && e.f.area!==0 ? `%OSPF-4-ERRRCV: Received invalid packet: mismatched area ID, from backbone area must be virtual-link but not found from ${e2.f.ip}, ${e.f.ios}` : `%OSPF-4-ERRRCV: Received invalid packet: mismatched area ID from ${e2.f.ip}, ${e.f.ios}`); continue; }
       if (e2.x.rid===e.x.rid){ syslog(B, e.d, `%OSPF-4-DUP_RTRID_NBR: OSPF detected duplicate router-id ${e.x.rid} from ${e2.f.ip} on interface ${e.f.ios}`); continue; }
       if (netStr(e.f.ip, e.f.len)!==netStr(e2.f.ip, e.f.len) || (e.f.len!==e2.f.len && !(e.f.net==="POINT_TO_POINT" && e2.f.net==="POINT_TO_POINT"))) continue;   // different subnet or mask: hellos ignored
       if (e.f.hello!==e2.f.hello || e.f.dead!==e2.f.dead) continue;                                                                                            // timer mismatch: hellos ignored
@@ -567,13 +567,16 @@ function computeOspf(B, hears){
   B._ospfSeg = B._ospfSeg || {}; const segOf = new Map(), segs = [];
   for (const e of ifs){ if (segOf.has(e.k)) continue; const mem = [], q = [e]; segOf.set(e.k, null);
     while (q.length){ const m = q.shift(); mem.push(m); for (const n of nbrOf.get(m.k)) if (!segOf.has(n.k)){ segOf.set(n.k, null); q.push(n); } }
-    const sg = {id: netStr(e.f.ip, e.f.len)+"/"+e.f.len+"@"+mem.map(m=>m.k).sort()[0], mem, area:e.f.area, p2p: mem.every(m=>m.f.net==="POINT_TO_POINT"), net: netStr(e.f.ip, e.f.len), len: e.f.len};
+    const sg = {id: netStr(e.f.ip, e.f.len)+"/"+e.f.len+"@"+mem.map(m=>m.k).sort()[0], mem, area:e.f.area, p2p: mem.every(m=>m.f.net==="POINT_TO_POINT"), mixed: mem.some(m=>m.f.net==="POINT_TO_POINT") && !mem.every(m=>m.f.net==="POINT_TO_POINT"), net: netStr(e.f.ip, e.f.len), len: e.f.len};
     mem.forEach(m=>segOf.set(m.k, sg)); segs.push(sg); }
   const rank = (a,b) => b.f.prio - a.f.prio || ipInt(b.x.rid) - ipInt(a.x.rid);
   for (const sg of segs){ if (sg.p2p || sg.mem.some(m=>m.f.loop || m.f.passive) && sg.mem.length===1){ sg.dr = sg.bdr = null; if (!sg.p2p && !sg.mem[0].f.loop){ sg.dr = sg.mem[0].k; } continue; }
-    const sk = sg.mem.map(m=>m.k).sort().join(","), prevAll = Object.values(B._ospfSeg).find(v=>v.members && v.members.some(k=>sg.mem.some(m=>m.k===k))) || {};
-    const elig = sg.mem.filter(m=>m.f.prio>0), valid = k => k && elig.some(m=>m.k===k) && (prevAll.resets||{})[k]===byKey.get(k).x.resets;
-    let dr = valid(prevAll.dr) ? prevAll.dr : null, bdr = valid(prevAll.bdr) && prevAll.bdr!==dr ? prevAll.bdr : null;
+    const sk = sg.mem.map(m=>m.k).sort().join(","), prevs = Object.values(B._ospfSeg).filter(v=>v.members && v.members.some(k=>sg.mem.some(m=>m.k===k)));
+    const resetsOf = Object.assign({}, ...prevs.map(v=>v.resets||{}));
+    const elig = sg.mem.filter(m=>m.f.prio>0 && m.f.net!=="POINT_TO_POINT"), valid = k => k && elig.some(m=>m.k===k) && resetsOf[k]===byKey.get(k).x.resets;
+    const ranked = ks => [...new Set(ks)].filter(valid).map(k=>byKey.get(k)).sort(rank).map(m=>m.k);
+    const oldDrs = ranked(prevs.map(v=>v.dr));
+    let dr = oldDrs[0] || null, bdr = ranked([...prevs.map(v=>v.bdr), ...oldDrs.slice(1)]).filter(k=>k!==dr)[0] || null;
     if (!dr && bdr){ dr = bdr; bdr = null; }
     if (!dr){ const c = elig.slice().sort(rank)[0]; dr = c ? c.k : null; }
     if (!bdr){ const c = elig.filter(m=>m.k!==dr).sort(rank)[0]; bdr = c ? c.k : null; }
@@ -585,21 +588,26 @@ function computeOspf(B, hears){
   const roleOf = (sg, k) => sg.p2p ? "-" : k===sg.dr ? "DR" : k===sg.bdr ? "BDR" : "DROTHER";
   for (const id in info) out[id] = {nbrs:[], ifs:{}, routes:[], abr:false, lsdb:{areas:{}, ext:[]}, spfRuns:3};
   for (const e of ifs){ const sg = segOf.get(e.k); const me = roleOf(sg, e.k); const nb = [];
-    for (const n of nbrOf.get(e.k)){ const them = roleOf(sg, n.k); const full = sg.p2p || me==="DR" || me==="BDR" || them==="DR" || them==="BDR";
-      const state = sg.p2p ? "FULL/  -" : `${full?"FULL":"2WAY"}/${them}`; nb.push({rid:n.x.rid, prio:n.f.prio, state, dead:e.f.dead, ip:n.f.ip, ios:e.f.ios, full});
+    const meP2p = sg.p2p || (sg.mixed && e.f.net==="POINT_TO_POINT");
+    for (const n of nbrOf.get(e.k)){ const them = roleOf(sg, n.k); const full = meP2p || sg.mixed || me==="DR" || me==="BDR" || them==="DR" || them==="BDR";
+      const state = meP2p ? "FULL/  -" : `${full?"FULL":"2WAY"}/${them}`; nb.push({rid:n.x.rid, prio: meP2p ? 0 : n.f.prio, state, dead:e.f.dead, ip:n.f.ip, ios:e.f.ios, full});
       if (full) nowAdj[e.k+"|"+n.x.rid] = {d:e.d, ios:e.f.ios, rid:n.x.rid, pid:e.x.pid}; }
     const dre = sg.dr && byKey.get(sg.dr), bdre = sg.bdr && byKey.get(sg.bdr);
-    out[e.d.id].ifs[e.f.ios] = {state: e.f.loop && e.f.net==="LOOPBACK" ? "LOOP" : sg.p2p ? "P2P" : (sg.dr ? me : "DROTHER"), dr: dre ? {rid:dre.x.rid, ip:dre.f.ip} : null, bdr: bdre ? {rid:bdre.x.rid, ip:bdre.f.ip} : null, nbrs:nb, adj: nb.filter(x=>x.full).length};
+    out[e.d.id].ifs[e.f.ios] = {state: e.f.loop && e.f.net==="LOOPBACK" ? "LOOP" : meP2p ? "P2P" : (sg.dr ? me : "DROTHER"), dr: dre ? {rid:dre.x.rid, ip:dre.f.ip} : null, bdr: bdre ? {rid:bdre.x.rid, ip:bdre.f.ip} : null, nbrs:nb, adj: nb.filter(x=>x.full).length};
     out[e.d.id].nbrs.push(...nb); }
   for (const [k, a] of Object.entries(nowAdj)) if (!prevAdj[k]) syslog(B, a.d, `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from LOADING to FULL, Loading Done`, true);
   for (const [k, a] of Object.entries(prevAdj)) if (!nowAdj[k] && B.devs[a.d.id]) syslog(B, B.devs[a.d.id], `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from FULL to DOWN, Neighbor Down: ${(()=>{ const me = byKey.get(a.d.id+"|"+a.ios); return me && !me.f.passive ? "Dead timer expired" : "Interface down or detached"; })()}`, true);
+  B._ospfResetSeen = B._ospfResetSeen || {};
+  for (const id in info){ const was = B._ospfResetSeen[id]; if (was!=null && was!==info[id].resets)
+    for (const [k, a] of Object.entries(nowAdj)) if (a.d.id===id && prevAdj[k]){ syslog(B, a.d, `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from FULL to DOWN, Neighbor Down: Interface down or detached`, true); syslog(B, a.d, `%OSPF-5-ADJCHG: Process ${a.pid}, Nbr ${a.rid} on ${a.ios} from LOADING to FULL, Loading Done`, true); }
+    B._ospfResetSeen[id] = info[id].resets; }
   B._ospfAdj = nowAdj;
   // the link-state database of each area: router nodes, transit networks (with a DR) and stub networks
   const areas = [...new Set(ifs.map(e=>e.f.area))];
   const graph = {}, stubs = {};   // per area
   for (const A of areas){ const G = graph[A] = new Map(), add = (u, v, c, via) => { if (!G.has(u)) G.set(u, []); G.get(u).push({v, c, via}); }; stubs[A] = [];
     for (const sg of segs.filter(x=>x.area===A)){
-      const fullToDr = sg.dr && sg.mem.length>1 && !sg.p2p;
+      const fullToDr = sg.dr && sg.mem.length>1 && !sg.p2p && !sg.mixed;
       if (sg.p2p && sg.mem.length===2){ const [a, b] = sg.mem; add(a.d.id, b.d.id, a.f.cost, {ios:a.f.ios, nh:b.f.ip}); add(b.d.id, a.d.id, b.f.cost, {ios:b.f.ios, nh:a.f.ip}); sg.mem.forEach(m=>stubs[A].push({rt:m.d.id, net:sg.net, len:sg.len, cost:m.f.cost})); }
       else if (fullToDr){ const N = "N:"+sg.id; for (const m of sg.mem){ add(m.d.id, N, m.f.cost, {ios:m.f.ios, net:true}); add(N, m.d.id, 0, {nh:m.f.ip}); } stubs[A].push({transit:N, net:sg.net, len:sg.len, dr:byKey.get(sg.dr)}); }
       else for (const m of sg.mem) stubs[A].push({rt:m.d.id, net: m.f.loop && m.f.net==="LOOPBACK" ? m.f.ip : sg.net, len: m.f.loop && m.f.net==="LOOPBACK" ? 32 : sg.len, cost:m.f.cost}); }
@@ -641,7 +649,7 @@ function computeOspf(B, hears){
     for (const [pfx, c] of Object.entries(k)) sums[A].push({z, pfx, cost:c}); }
   for (const A of areas){ const seen = new Set(); for (const sm of sums[A]) if (!seen.has(sm.pfx+"|"+sm.z)){ seen.add(sm.pfx+"|"+sm.z); out.__db[A].sums.push({net:sm.pfx.split("/")[0], rid:info[sm.z].rid}); } }
   for (const id in info){ ia[id] = {}; const own = ownPfx(id);
-    for (const A of Object.keys(sp[id])){ const r = sp[id][A];
+    for (const A of Object.keys(sp[id])){ const r = sp[id][A]; if (abrs.includes(id) && +A!==0) continue;
       for (const sm of sums[+A]){ if (sm.z===id || own.has(sm.pfx) || !r.dist.has(sm.z)) continue; if (Object.values(intra[id]).some(T=>T[sm.pfx])) continue;   // intra-area always wins
         const cost = r.dist.get(sm.z) + sm.cost, c = ia[id][sm.pfx], nhs = r.fh.get(sm.z).map(h=>Object.assign({}, h, {from:info[sm.z].rid}));
         if (!c || cost < c.cost) ia[id][sm.pfx] = {cost, nhs}; else if (cost===c.cost) for (const h of nhs) if (!c.nhs.some(x=>x.ios===h.ios && x.nh===h.nh)) c.nhs.push(h); } } }
@@ -679,8 +687,10 @@ function computeHsrp(B, hears){
     if (prev) delete B._hsrpSeg[prev[0]]; B._hsrpSeg[sk] = {grp:m.grp, active:act.k, standby: sby ? sby.k : null};
     if (prev && prev[1].active!==act.k){ const vm = hsrpVmacOf(m.grp, act.ver); for (const id of B.order) if (B.mac[id]) for (const [mk, e] of Object.entries(B.mac[id])) if (e.mac===vm) delete B.mac[id][mk]; }   // the new active router's gratuitous ARP moves the virtual MAC
     for (const o of grp){ const state = o===act ? "Active" : o===sby ? "Standby" : "Listen", was = B._hsrpSt[o.k+"#"+o.grp];
-      if (was!==state){ const from = was || "Speak"; if (!was && state==="Active") syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state Speak -> Standby`, true);
-        if (!(was==null && state==="Listen")) syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state ${!was && state==="Active" ? "Standby" : from} -> ${state}`, true); B._hsrpSt[o.k+"#"+o.grp] = state; }
+      if (was!==state){   // the real HSRP state sequence: from Init a router goes Listen → Speak → Standby (→ Active); a pre-empted Active steps back through Speak
+        const steps = (!was || was==="Init") ? (state==="Active" ? [["Speak","Standby"],["Standby","Active"]] : state==="Standby" ? [["Speak","Standby"]] : [])
+          : (was==="Active" && state==="Standby") ? [["Active","Speak"],["Speak","Standby"]] : (was==="Listen" && state==="Standby") ? [["Listen","Speak"],["Speak","Standby"]] : [[was, state]];
+        for (const [f, t] of steps) syslog(B, o.d, `%HSRP-5-STATECHANGE: ${o.ios} Grp ${o.grp} state ${f} -> ${t}`, true); B._hsrpSt[o.k+"#"+o.grp] = state; }
       out[o.k+"#"+o.grp] = {state, active: o===act ? "local" : act.ip, standby: o===sby ? "local" : sby ? sby.ip : "unknown", activePrio: act.prio, standbyPrio: sby ? sby.prio : null, vmac: hsrpVmacOf(o.grp, o.ver), vip:o.vip, changes: 2}; } }
   for (const k of Object.keys(B._hsrpSt)) if (!out[k]){ const [dk] = k.split("#"); const [did, ios] = dk.split("|"); const d = B.devs[did]; if (d && B._hsrpSt[k]!=="Init"){ syslog(B, d, `%HSRP-5-STATECHANGE: ${ios} Grp ${k.split("#")[1]} state ${B._hsrpSt[k]} -> Init`, true); } B._hsrpSt[k] = "Init"; }
   return out;
@@ -728,7 +738,7 @@ function makeHooks(B, d){
     ospfSelf: () => { const o = os(); return o ? {abr:o.abr, spfRuns:o.spfRuns} : null; },
     ospfLsdb: () => (os() || {}).lsdb || null,
     hsrp: (ios, g) => l3().hsrp[d.id+"|"+ios+"#"+g] || null,
-    trace: ip => { const node = (d.kind==="router" || d.env.ipRouting) ? {dev:d} : (()=>{ const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut); return svi ? sviNode(d, svi) : null; })();
+    trace: (ip, src) => { const node = (d.kind==="router" || d.env.ipRouting) ? (src ? {dev:d, ip:src} : {dev:d}) : (()=>{ const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut); return svi ? sviNode(d, svi) : null; })();
       if (!node) return iosTraceText({hops:[], ok:false, kind:"timeout"}, ip); const t = trace(B, node, ip); B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: t.ok}); return iosTraceText(t, ip); },
     linkUp: name => { if (name.startsWith("Port-channel")){ const S = l2State(B); const G = (S.bundles[d.id]||{})[+name.slice(12)]; return !!(G && G.up); } const ref = refOfIos(d, name); return !!(ref && linkUpAt(B, ref)); },
     ping: (ip, src) => {

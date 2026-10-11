@@ -99,7 +99,7 @@ const pair = (a, b) => Bench.create({ devices: [ R("x", "RX", ["int g0/0","ip ad
   B = pair(["int g0/0","ip ospf network point-to-point",...base("1.1.1.1"),"network 10.5.0.0 0.0.0.3 area 0"], ["int g0/0","ip ospf network point-to-point",...base("2.2.2.2"),"network 10.5.0.0 0.0.0.3 area 0"]);
   ok(/2\.2\.2\.2\s+0\s+FULL\/  -/.test(cli(B, "x", "show ip ospf neighbor")) || /2\.2\.2\.2\s+1\s+FULL\/  -/.test(cli(B, "x", "show ip ospf neighbor")), "point-to-point network type: FULL/  - (no DR)", cli(B, "x", "show ip ospf neighbor"));
   B = pair(["int g0/0","ip ospf 1 area 0","router ospf 1","router-id 1.1.1.1"], ["int g0/0","ip ospf 1 area 0","router ospf 1","router-id 2.2.2.2"]);
-  ok(/FULL/.test(cli(B, "x", "show ip ospf neighbor")) && /Attached via Interface Configuration/.test(cli(B, "x", "show ip ospf interface g0/0")), "interface method (ip ospf 1 area 0) forms an adjacency");
+  ok(/FULL/.test(cli(B, "x", "show ip ospf neighbor")) && /Attached via Interface Enable/.test(cli(B, "x", "show ip ospf interface g0/0")), "interface method (ip ospf 1 area 0) forms an adjacency");
   // router-id change needs a restart
   B = pair(["router ospf 1","network 10.5.0.0 0.0.0.3 area 0"], ["router ospf 1","network 10.5.0.0 0.0.0.3 area 0"]);
   const rid0 = (cli(B, "x", "show ip protocols").match(/Router ID (\S+)/)||[])[1];
@@ -168,6 +168,23 @@ const pair = (a, b) => Bench.create({ devices: [ R("x", "RX", ["int g0/0","ip ad
   cli(B, "b", "conf t"); cli(B, "b", "ip route 10.1.0.0 255.255.255.0 10.0.12.1"); cli(B, "b", "end");
   ok(/!!!!!/.test(cli(B, "a", "ping 10.2.0.10 source g0/0")) && /2\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.0\.12\.2\n\s+3\s+<1 ms\s+<1 ms\s+<1 ms\s+10\.2\.0\.10/.test(pc(B, "p1", "tracert 10.2.0.10")), "add the return route: sourced ping and tracert both complete");
   ok(/BW 10000 Kbit/.test((cli(B, "a", "conf t"), cli(B, "a", "int g0/1"), cli(B, "a", "bandwidth 10000"), cli(B, "a", "end"), cli(B, "a", "show interfaces g0/1"))), "show interfaces reports the configured bandwidth"); }
+// ---------- 7c. real-IOS details found by the Module 5 fact-checks ----------
+{ const base = rid => ["router ospf 1",`router-id ${rid}`];
+  let B = pair([...base("1.1.1.1"),"network 10.5.0.0 0.0.0.3 area 0"], [...base("2.2.2.2"),"network 10.5.0.0 0.0.0.3 area 1"]);
+  ok(Bench.logged(B, "x", /mismatched area ID from 10\.5\.0\.2, GigabitEthernet0\/0/) && !Bench.logged(B, "x", /virtual-link/) && Bench.logged(B, "y", /mismatched area ID, from backbone area must be virtual-link but not found from 10\.5\.0\.1/), "ERRRCV: plain on the backbone end, 'must be virtual-link' on the non-backbone end");
+  B = pair(["int g0/0","ip ospf network point-to-point",...base("1.1.1.1"),"network 10.5.0.0 0.0.0.3 area 0"], [...base("2.2.2.2"),"network 10.5.0.0 0.0.0.3 area 0","int lo0","ip address 2.2.2.2 255.255.255.255","router ospf 1","network 2.2.2.2 0.0.0.0 area 0"]);
+  ok(/2\.2\.2\.2\s+0\s+FULL\/  -/.test(cli(B, "x", "show ip ospf neighbor")) && /FULL\/(DR|BDR)/.test(cli(B, "y", "show ip ospf neighbor")) && !/2\.2\.2\.2/.test(cli(B, "x", "show ip route ospf").split("\n").slice(10).join("\n")), "p2p on one end only: FULL both sides (p2p end FULL/  -, Pri 0) but routes across it go missing");
+  B = pair([...base("1.1.1.1"),"network 10.5.0.0 0.0.0.3 area 0"], [...base("2.2.2.2"),"network 10.5.0.0 0.0.0.3 area 0"]);
+  cli(B, "x", "clear ip ospf process"); cli(B, "x", "yes");
+  ok(Bench.logged(B, "x", /Nbr 2\.2\.2\.2 on GigabitEthernet0\/0 from FULL to DOWN, Neighbor Down: Interface down or detached/), "clear ip ospf process logs the adjacency going down and coming back");
+  ok(/No backup designated router on this network/.test(cli(B, "x", "show ip ospf interface g0/0")) || /Backup Designated router/.test(cli(B, "x", "show ip ospf interface g0/0")), "DR/BDR lines present in show ip ospf interface");
+  const e = SIM.ios2Env({kind:"router"}); for (const c of ["en","conf t","int g0/0","ip address 10.1.1.1 255.255.255.0","no shut","router ospf 1","network 10.0.0.0 0.255.255.255 area 0","network 10.1.1.0 255.255.255.0 area 1","end"]) e.exec(c);
+  ok(/ network 10\.1\.1\.0 0\.0\.0\.255 area 1\n network 10\.0\.0\.0 0\.255\.255\.255 area 0/.test(e.exec("show running-config")), "a mask typed as the wildcard is converted, and the most specific statement is listed first", e.exec("show running-config | section ospf"));
+  e.exec("conf t"); e.exec("int g0/1"); e.exec("ip address 10.2.2.1 255.255.255.0"); e.exec("standby 1 ip 10.9.9.1"); e.exec("end");
+  ok(/Init/.test(e.exec("show standby brief")), "HSRP: a virtual IP outside the subnet is accepted with a warning and the group stays in Init", e.exec("show standby brief")); }
+{ const B = tri(); const t = cli(B, "r1", "traceroute 10.3.0.10 source g0/0");
+  ok(/1 10\.0\.13\.2/.test(t) && /2 10\.3\.0\.10/.test(t), "traceroute … source g0/0 works", t);
+  ok(/Attached via Interface Enable/.test((cli(B,"r1","conf t"), cli(B,"r1","int g0/0"), cli(B,"r1","ip ospf 1 area 0"), cli(B,"r1","end"), cli(B,"r1","show ip ospf interface g0/0"))), "interface method prints 'Attached via Interface Enable'"); }
 // ---------- 8. task helpers for lesson benches ----------
 { const B = tri(); pc(B, "pc1", "tracert 10.3.0.10"); cli(B, "r1", "traceroute 10.2.0.10");
   ok(Bench.ospfNbr(B, "r1", "2.2.2.2") && Bench.ospfNbr(B, "r1", "3.3.3.3", "FULL") && Bench.ospfNbrCount(B, "r1")===2, "helpers: ospfNbr / ospfNbrCount");
