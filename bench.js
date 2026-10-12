@@ -332,6 +332,21 @@ function stpStateOf(S, d, lp, v){ const x = S.stp[d.id] && S.stp[d.id][v]; if (!
 
 /* ---- frame delivery on the wire: tags, DTP trunks, STP blocking, bundles, hubs, routers, hosts ---- */
 // from: a port ref string (untagged), {ref, tag} (e.g. a router subinterface), or {svi:devId, vlan} (a switch's own SVI)
+// port security: a port accepts frames only from its secure MAC addresses (learned up to the maximum, or configured);
+// one more source MAC is a violation — shutdown (err-disable), restrict (drop + log + count) or protect (drop silently)
+function psecCheck(B, sw, ios, i, mac, vlan, note){
+  i.psecMacs = i.psecMacs || []; const max = i.psecMax || 1, sh = shortIf(ios);
+  if (i.psecMacs.some(m=>m.mac===mac)){ i.psecLast = {mac, vlan}; return true; }
+  if (i.psecMacs.length < max){ const type = i.psecSticky ? "sticky" : "dynamic"; i.psecMacs.push({mac, type, vlan}); i.psecLast = {mac, vlan};
+    note(`${sw.label} ${sh} port security: learned ${mac} as a secure ${type} address (${i.psecMacs.length} of ${max})${type==="sticky" ? " — written into the running-config" : ""}`); return true; }
+  const mode = i.psecViol || "shutdown"; if (mode!=="protect") i.psecViolCount = (i.psecViolCount||0) + 1; i.psecLast = {mac, vlan};   // protect mode doesn't count
+  if (mode==="shutdown" && !i.errdis){ i.errdis = "psecure-violation";
+    syslog(B, sw, `%PM-4-ERR_DISABLE: psecure-violation error detected on ${sh}, putting ${sh} in err-disable state`, true);
+    syslog(B, sw, `%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address ${mac} on port ${ios}.`, true); }
+  else if (mode==="restrict") syslog(B, sw, `%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address ${mac} on port ${ios}.`, true);
+  note(`${sw.label} ${sh} port security: ${mac} is not one of its ${max} secure address${max>1?"es":""} → violation (${mode}): ${mode==="shutdown" ? "the port is err-disabled — shutdown / no shutdown brings it back once the cause is gone" : mode==="restrict" ? "the frame is dropped, logged and counted" : "the frame is dropped silently"}`);
+  return false;
+}
 function deliver(B, from, frame, step0){
   const S = l2State(B);
   const hops = [], recv = [], notes = [];
@@ -388,6 +403,7 @@ function deliver(B, from, frame, step0){
       else { if (tag!=null && tag!==li.voiceVlan){ pushNote(`${d.label} ${shortIf(x.port.ios)} is an access port and dropped a frame tagged for VLAN ${tag} — is the other end a trunk while this one isn't?`); return; } v = tag!=null ? tag : li.vlan; }
       if (!d.env.vlans[v]){ pushNote(`${d.label} has no VLAN ${v} — frame dropped`); return; }
       if (stpStateOf(S, d, lp, v)!=="FWD"){ pushNote(`${d.label} ${lp.startsWith("po")?"Po"+lp.slice(2):shortIf(x.port.ios)} is blocking for VLAN ${v} (Spanning Tree) — frame discarded, no loop`); return; }
+      if (i.psec && !lp.startsWith("po")){ const ok = psecCheck(B, d, x.port.ios, i, frame.src, v, pushNote); if (!ok) return; }
       switchIn(d, lp, v, step); return;
     }
     if (d.kind==="hub"){ const key = d.id+"|"+tag; if (seen.has(key)){ storm = storm || {sw:d, vlan:tag}; return; } seen.add(key); pushNote(`${d.label} (hub) repeated the frame out every other port — every device on it sees it`); for (const p of d.ports) if (p.id!==x.port.id) sendPhys(d.id+":"+p.id, tag, step); return; }
@@ -1218,7 +1234,7 @@ function makeHooks(B, d){
       if (!svi) return {ok:false};
       return ping(B, sviNode(d, svi), ip);
     },
-    mac: () => Object.values(B.mac[d.id]||{}).filter(e=>e.port.startsWith("po") || linkUpAt(B, d.id+":"+e.port)).map(e=>({vlan:e.vlan, mac:e.mac, type:"DYNAMIC", port: e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios)})).sort((a,b)=>a.vlan-b.vlan||a.port.localeCompare(b.port)),
+    mac: () => Object.values(B.mac[d.id]||{}).filter(e=>e.port.startsWith("po") || linkUpAt(B, d.id+":"+e.port)).map(e=>({vlan:e.vlan, mac:e.mac, type: (()=>{ const pp = !e.port.startsWith("po") && d.ports.find(q=>q.id===e.port), ii = pp && d.env.intfs[pp.ios]; return ii && ii.psec && (ii.psecMacs||[]).some(m=>m.mac===e.mac) ? "STATIC" : "DYNAMIC"; })(), port: e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios)})).sort((a,b)=>a.vlan-b.vlan||a.port.localeCompare(b.port)),
     clearMac: () => { B.mac[d.id] = {}; },
     arp: () => Object.entries(B.arp[d.id]||{}).map(([ip,e])=>({ip, mac:e.mac, intf:e.intf, age:"0"})),
     cdp: () => {
@@ -1834,6 +1850,8 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
   // IP services (Module 7+)
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
+  psecViolations: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i ? (i.psecViolCount||0) : 0; },
+  secureMacs: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i && i.psecMacs ? i.psecMacs.map(m=>m.mac + ":" + m.type) : []; },
   aclHits: (B, r, name, seq) => { const d = B.devs[r]; const l = d && d.env && d.env.acl.lists[name]; const e = l && l.entries.find(x=>!x.remark && x.seq===seq); return e ? e.hits : 0; },
   blocked: (B, pc, ip) => B.events.some(e=>e.a[0]==="pc" && e.a[1]===pc && new RegExp("^(ping|tracert|curl)\\b.*" + ip.replace(/\./g, "\\.")).test(e.a[2]||"")) && !B.pinged[pc+">"+ip],
   fetched: (B, pc, host) => !!(B.fetched && B.fetched[pc+">"+host]),

@@ -84,5 +84,51 @@ const mk = (r1x, r2x) => { const B = Bench.create({ devices: [
   const B3 = mk(["int g0/0", "ip access-group NOT-DEFINED in", "end"]);
   ok(/Reply from 192\.168\.50\.20/.test(pc(B3, "p1", "ping 192.168.50.20")), "an ACL that doesn't exist permits everything"); }
 
+// ---- Stage B: port security ----
+const mkSw = (swx, extra, cables) => Bench.create({ devices: [
+    { id:"r1", kind:"router", label:"R1", x:0, y:0, config: cfg(["int g0/0","ip address 192.168.10.1 255.255.255.0","no shut"]) },
+    { id:"sw", kind:"switch", label:"SW1", x:0, y:200, config: cfg(swx||[]) },
+    { id:"p1", kind:"pc", label:"PC1", x:0, y:350, ip:"192.168.10.10", mask:"255.255.255.0", gw:"192.168.10.1" },
+    { id:"lap", kind:"laptop", label:"VISITOR", x:150, y:350, ip:"192.168.10.66", mask:"255.255.255.0", gw:"192.168.10.1" }, ...(extra||[]) ],
+  cables: [{type:"cat6",a:"r1:g0",b:"sw:g1"},{type:"cat6",a:"p1:eth",b:"sw:g2"}, ...(cables||[])] });
+{ const B = mkSw();
+  ok(/^Command rejected: GigabitEthernet0\/2 is a dynamic port\.$/.test((cfg(["int g0/2"])(B.devs.sw.env), B.devs.sw.env.exec("conf t"), B.devs.sw.env.exec("int g0/2"), B.devs.sw.env.exec("switchport port-security"))), "port security on a dynamic (DTP) port is refused");
+  cfg(["int g0/2", "switchport mode access", "switchport port-security", "switchport port-security mac-address sticky"])(B.devs.sw.env);
+  ok(/Reply from 192\.168\.10\.1/.test(pc(B, "p1", "ping 192.168.10.1")), "sticky port security: PC1 still works");
+  const mac1 = B.devs.p1.mac;
+  ok(new RegExp("switchport port-security mac-address sticky " + mac1.replace(/\./g, "\\.")).test(cli(B, "sw", "show running-config")), "PC1's MAC is written into the running-config as a sticky address", cli(B, "sw", "show running-config"));
+  const pi = cli(B, "sw", "show port-security interface g0/2");
+  ok(/Port Security              : Enabled\nPort Status                : Secure-up\nViolation Mode             : Shutdown/.test(pi) && /Maximum MAC Addresses      : 1\nTotal MAC Addresses        : 1\nConfigured MAC Addresses   : 0\nSticky MAC Addresses       : 1/.test(pi) && /Security Violation Count   : 0/.test(pi), "show port-security interface", pi);
+  ok(new RegExp("1\\s+" + mac1.replace(/\./g, "\\.") + "\\s+STATIC\\s+Gi0/2").test(cli(B, "sw", "show mac address-table")), "a secure address shows as STATIC in the MAC table", cli(B, "sw", "show mac address-table"));
+  // a visitor unplugs PC1 and plugs a laptop into the same socket
+  Bench.act(B, ["unplug", "p1:eth"]); Bench.act(B, ["plug", "cat6", "lap:eth", "sw:g2"]);
+  const r = pc(B, "lap", "ping 192.168.10.1");
+  ok(!/Reply from 192\.168\.10\.1/.test(r) && Bench.errdis(B, "sw", "g2")==="psecure-violation", "the laptop's MAC is a violation: the port is err-disabled", r);
+  const lg = cli(B, "sw", "show logging");
+  ok(/%PM-4-ERR_DISABLE: psecure-violation error detected on Gi0\/2, putting Gi0\/2 in err-disable state/.test(lg) && new RegExp("%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address " + B.devs.lap.mac.replace(/\./g, "\\.") + " on port GigabitEthernet0/2\\.").test(lg), "syslog: ERR_DISABLE and PSECURE_VIOLATION", lg);
+  ok(/Gi0\/2\s+\S*\s*err-disabled/.test(cli(B, "sw", "show interfaces status")), "show interfaces status: err-disabled", cli(B, "sw", "show interfaces status"));
+  ok(/      Gi0\/2              1            1                  1         Shutdown/.test(cli(B, "sw", "show port-security")), "show port-security: one violation, action Shutdown", cli(B, "sw", "show port-security"));
+  ok(/Port Status                : Secure-shutdown/.test(cli(B, "sw", "show port-security interface g0/2")), "Port Status: Secure-shutdown");
+  // put PC1 back and recover the port
+  Bench.act(B, ["unplug", "lap:eth"]); Bench.act(B, ["plug", "cat6", "p1:eth", "sw:g2"]); cfg(["int g0/2", "shutdown", "no shutdown"])(B.devs.sw.env);
+  ok(/Reply from 192\.168\.10\.1/.test(pc(B, "p1", "ping 192.168.10.1")) && !Bench.errdis(B, "sw", "g2"), "PC1 back + shutdown/no shutdown: the port recovers (the sticky address is still PC1's)"); }
+{ // restrict and protect with two devices behind a hub; maximum 2
+  const hub = [{ id:"hub", kind:"hub", label:"HUB", x:200, y:300 }, { id:"p2", kind:"pc", label:"PC2", x:300, y:350, ip:"192.168.10.11", mask:"255.255.255.0", gw:"192.168.10.1" }];
+  const cab = [{type:"cat6",a:"hub:p1",b:"sw:g3"},{type:"cat6",a:"lap:eth",b:"hub:p2"},{type:"cat6",a:"p2:eth",b:"hub:p3"}];
+  const B = mkSw(["int g0/3", "switchport mode access", "switchport port-security", "switchport port-security violation restrict"], hub, cab);
+  pc(B, "p2", "ping 192.168.10.1"); const r = pc(B, "lap", "ping 192.168.10.1");
+  ok(/Reply from 192\.168\.10\.1/.test(pc(B, "p2", "ping 192.168.10.1")) && !/Reply from 192\.168\.10\.1/.test(r) && !Bench.errdis(B, "sw", "g3") && Bench.psecViolations(B, "sw", "g3") > 0, "restrict: the second MAC is dropped and counted, the port stays up for the first", Bench.psecViolations(B, "sw", "g3"));
+  ok(/%PORT_SECURITY-2-PSECURE_VIOLATION/.test(cli(B, "sw", "show logging")), "restrict logs the violation");
+  const B2 = mkSw(["int g0/3", "switchport mode access", "switchport port-security", "switchport port-security violation protect"], hub, cab);
+  pc(B2, "p2", "ping 192.168.10.1"); pc(B2, "lap", "ping 192.168.10.1");
+  ok(Bench.psecViolations(B2, "sw", "g3")===0 && !/PSECURE_VIOLATION/.test(cli(B2, "sw", "show logging")) && !Bench.errdis(B2, "sw", "g3"), "protect: dropped silently — no log, no count");
+  const B3 = mkSw(["int g0/3", "switchport mode access", "switchport port-security", "switchport port-security maximum 2"], hub, cab);
+  ok(/Reply from 192\.168\.10\.1/.test(pc(B3, "p2", "ping 192.168.10.1")) && /Reply from 192\.168\.10\.1/.test(pc(B3, "lap", "ping 192.168.10.1")), "maximum 2: both devices behind the hub work");
+  ok(/SecureDynamic/.test(cli(B3, "sw", "show port-security address")) && / switchport port-security maximum 2\n switchport port-security\n/.test(cli(B3, "sw", "show running-config")), "show port-security address; running-config maximum 2", cli(B3, "sw", "show port-security address")); }
+{ // a static secure MAC that doesn't match the PC
+  const B = mkSw(["int g0/2", "switchport mode access", "switchport port-security", "switchport port-security mac-address 0050.0000.beef"]);
+  ok(!/Reply from 192\.168\.10\.1:/.test(pc(B, "p1", "ping 192.168.10.1")) && Bench.errdis(B, "sw", "g2")==="psecure-violation", "a configured (static) secure MAC that isn't PC1's: PC1 is a violation");
+  ok(/0050\.0000\.beef\s+SecureConfigured\s+Gi0\/2/.test(cli(B, "sw", "show port-security address")), "show port-security address: SecureConfigured", cli(B, "sw", "show port-security address")); }
+
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

@@ -69,6 +69,7 @@ function ios2Env(opts){
   const stripLive = o => { if (o.dhcp){ o.dhcp.bindings = []; o.dhcp.conflicts = []; for (const p of Object.values(o.dhcp.pools||{})) delete p.index; }
     if (o.nat){ o.nat.table = []; o.nat.hits = 0; o.nat.misses = 0; o.nat.expired = 0; for (const p of Object.values(o.nat.pools||{})){ p.used = {}; p.misses = 0; } }
     if (o.acl) for (const l of Object.values(o.acl.lists||{})) for (const e of l.entries) if (e.hits) e.hits = 0;
+    for (const i of Object.values(o.intfs||{})){ if (i.psecMacs) i.psecMacs = i.psecMacs.filter(m=>m.type!=="dynamic"); delete i.psecViolCount; delete i.psecLast; }
     for (const i of Object.values(o.intfs||{})) if (i.dhcpClient){ i.ip = null; i.mask = null; delete i.dhcpGw; delete i.dhcpLease; }
     return o; };
   st.resolveName = n => resolveName(n); st.sevOf = w => sevOf(w); st.clockText = () => clockText();
@@ -188,6 +189,7 @@ function ios2Env(opts){
     if (st.nameServers.length) L.push(`ip name-server ${st.nameServers.join(" ")}`);
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
     if (st.serviceDhcp===false) L.push("no service dhcp");
+    for (const c of (st.errRecovery||[])) L.push(`errdisable recovery cause ${c}`); if (st.errRecoveryInt) L.push(`errdisable recovery interval ${st.errRecoveryInt}`);
     { const D = window.DHCP ? window.DHCP.running(st.dhcp) : []; if (D.length) L.push("!", ...D, "!"); }
     if (st.v6routing) L.push("ipv6 unicast-routing"); if (st.v6resolveDefault) L.push("ipv6 route static resolve default");
     if (!st.cdpRun) L.push("no cdp run");
@@ -211,6 +213,10 @@ function ios2Env(opts){
           if (i.mode==="access") L.push(" switchport mode access"); else if (i.mode==="trunk") L.push(" switchport mode trunk"); else if (i.dtp==="desirable") L.push(" switchport mode dynamic desirable");
           if (i.nonegotiate) L.push(" switchport nonegotiate");
           if (i.voiceVlan) L.push(` switchport voice vlan ${i.voiceVlan}`);
+          if (i.psec){ if (i.psecMax && i.psecMax!==1) L.push(` switchport port-security maximum ${i.psecMax}`); if (i.psecViol && i.psecViol!=="shutdown") L.push(` switchport port-security violation ${i.psecViol}`);
+            for (const m of (i.psecMacs||[])) if (m.type==="static") L.push(` switchport port-security mac-address ${m.mac}`);
+            if (i.psecSticky) L.push(" switchport port-security mac-address sticky"); for (const m of (i.psecMacs||[])) if (m.type==="sticky") L.push(` switchport port-security mac-address sticky ${m.mac}`);
+            L.push(" switchport port-security"); }
           if (i.channel) L.push(` channel-group ${i.channel.group} mode ${i.channel.mode}`);
           const t = i.stp||{};
           if (t.portfast) L.push(" spanning-tree portfast"); if (t.bpduguard===true) L.push(" spanning-tree bpduguard enable"); if (t.bpduguard===false) L.push(" spanning-tree bpduguard disable");
@@ -700,6 +706,9 @@ function ios2Env(opts){
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
     X("show cdp neighbors", ()=>cdpNeighbors(false)), X("show cdp neighbors detail", ()=>cdpNeighbors(true)),
     X("show lldp neighbors", ()=>lldpNeighbors()),
+    X("show port-security", ()=>kind==="switch" ? psecShow() : inv()),
+    X("show port-security interface A:IF", a=>{ const n = parseIf(a[0]); if (kind!=="switch" || !n || !st.intfs[n]) return inv(); return psecIf(n); }),
+    X("show port-security address", ()=>kind==="switch" ? psecAddr() : inv()),
     X("show access-lists", ()=>window.ACL.show(st.acl)), X("show access-lists A:WORD", a=>window.ACL.show(st.acl, a[0])),
     X("show ip access-lists", ()=>window.ACL.show(st.acl)), X("show ip access-lists A:WORD", a=>window.ACL.show(st.acl, a[0])),
     X("show ip nat translations", ()=>window.NAT.show(st.nat, natCtx())), X("show ip nat translations verbose", ()=>window.NAT.show(st.nat, Object.assign(natCtx(), {verbose:true}))),
@@ -865,6 +874,9 @@ function ios2Env(opts){
       // ---- NAT/PAT ----
       X("ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "ip nat " + a[0], {ifName: n=>parseIf(n), ifAddr: n => (st.intfs[n]||{}).ip || null}); return r.err || ""; }),
       X("no ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "no ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
+      X("errdisable recovery cause A:WORD", a=>{ st.errRecovery = st.errRecovery || []; if (!st.errRecovery.includes(a[0])) st.errRecovery.push(a[0]); return ""; }),
+      X("no errdisable recovery cause A:WORD", a=>{ st.errRecovery = (st.errRecovery||[]).filter(x=>x!==a[0]); return ""; }),
+      X("errdisable recovery interval A:NUM", a=>{ st.errRecoveryInt = +a[0]; return ""; }),
       X("service dhcp", ()=>{ st.serviceDhcp = true; return ""; }), X("no service dhcp", ()=>{ st.serviceDhcp = false; return ""; }),
       X("ipv6 unicast-routing", ()=>{ st.v6routing = true; return ""; }), X("ipv6 route static resolve default", ()=>{ st.v6resolveDefault = true; return ""; }), X("no ipv6 route static resolve default", ()=>{ st.v6resolveDefault = false; return ""; }), X("no ipv6 unicast-routing", ()=>{ st.v6routing = false; return ""; }),
       X("ipv6 route A:WORD A:LINE", a=>{ const p = I6.parsePrefix(a[0]); if (!p) return "% Invalid input detected at '^' marker.";
@@ -937,6 +949,18 @@ function ios2Env(opts){
         let list; const m = s.match(/^(add|remove|except)\s+(.+)$/); if (s==="all") list=null; else if (s==="none") list=[]; else if (m){ const set = parse(m[2]); const base = cur || [...Array(4094)].map((_,k)=>k+1); list = m[1]==="add" ? (cur ? [...new Set([...cur, ...set])].sort((x,y)=>x-y) : null) : m[1]==="remove" ? base.filter(x=>!set.includes(x)) : [...Array(4094)].map((_,k)=>k+1).filter(x=>!set.includes(x)); if (list && list.length===4094) list=null; } else list = parse(s);
         return l2(i=>{ i.allowed = list; }); }),
       X("switchport trunk native vlan A:NUM", a=>l2(i=>{ i.native=+a[0]; })),
+      X("switchport port-security", ()=>psec(i=>{ i.psec = true; })),
+      X("no switchport port-security", ()=>psec(i=>{ delete i.psec; }, true)),
+      X("switchport port-security maximum A:NUM", a=>{ const n = +a[0]; if (!(n>=1 && n<=4096)) return inv(); return psec(i=>{ i.psecMax = n; }, true); }),
+      X("no switchport port-security maximum", ()=>psec(i=>{ delete i.psecMax; }, true)),
+      X("switchport port-security violation A:WORD", a=>{ const m = ["shutdown","restrict","protect"].find(x=>x.startsWith(a[0].toLowerCase())); if (!m) return inv(); return psec(i=>{ i.psecViol = m; }, true); }),
+      X("no switchport port-security violation", ()=>psec(i=>{ delete i.psecViol; }, true)),
+      X("switchport port-security mac-address sticky", ()=>psec(i=>{ i.psecSticky = true; for (const m of (i.psecMacs||[])) if (m.type==="dynamic") m.type = "sticky"; }, true)),
+      X("no switchport port-security mac-address sticky", ()=>psec(i=>{ delete i.psecSticky; i.psecMacs = (i.psecMacs||[]).filter(m=>m.type!=="sticky"); }, true)),
+      X("switchport port-security mac-address sticky A:WORD", a=>{ const m = normMac(a[0]); if (!m) return inv(); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>x.mac!==m); i.psecMacs.push({mac:m, type:"sticky", vlan:i.vlan}); }, true); }),
+      X("switchport port-security mac-address A:WORD", a=>{ const m = normMac(a[0]); if (!m) return inv(); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>x.mac!==m); i.psecMacs.push({mac:m, type:"static", vlan:i.vlan}); }, true); }),
+      X("no switchport port-security mac-address A:WORD", a=>{ const m = normMac(a[0]); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>x.mac!==m); }, true); }),
+      X("switchport port-security aging time A:NUM", a=>psec(i=>{ i.psecAging = +a[0]; }, true)), X("switchport port-security aging type A:WORD", ()=>psec(()=>{}, true)),
       X("switchport nonegotiate", ()=>{ if ((st.curList||[st.cur]).some(n=>st.intfs[n].mode==="dynamic")) return "Command rejected: Conflict between 'nonegotiate' and 'dynamic' status."; return l2(i=>{ i.nonegotiate=true; }); }), X("switchport trunk encapsulation dot1q", ()=>""),
       X("ip helper-address A:IP", a=>{ forCur(i=>{ i.helpers = i.helpers || []; if (!i.helpers.includes(a[0])) i.helpers.push(a[0]); }); return ""; }),
       X("no ip helper-address", ()=>{ forCur(i=>{ delete i.helpers; }); return ""; }),
@@ -1024,6 +1048,27 @@ function ios2Env(opts){
   for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
+  const normMac = m => { const h = String(m).toLowerCase().replace(/[^0-9a-f]/g, ""); return h.length===12 ? h.match(/.{4}/g).join(".") : null; };
+  // port security works on static access (or trunk) ports only — a dynamic (DTP) port refuses it, like IOS
+  function psec(fn, sub){ if (kind!=="switch") return inv();
+    for (const n of (st.curList||[st.cur])){ const i = st.intfs[n]; if (i.mode==="routed" || i.mode==="svi") return inv();
+      if (!sub && i.mode==="dynamic") return `Command rejected: ${n} is a dynamic port.`; }
+    forCur(fn); return ""; }
+  const PSV = {shutdown:"Shutdown", restrict:"Restrict", protect:"Protect"};
+  function psecShow(){ const L = ["Secure Port  MaxSecureAddr  CurrentAddr  SecurityViolation  Security Action", "                (Count)       (Count)          (Count)", "---------------------------------------------------------------------------"];
+    for (const n of physical){ const i = st.intfs[n]; if (!i.psec) continue; L.push(`${short(n).padStart(11)}${String(i.psecMax||1).padStart(15)}${String((i.psecMacs||[]).length).padStart(13)}${String(i.psecViolCount||0).padStart(19)}${(PSV[i.psecViol||"shutdown"]).padStart(17)}`); }
+    L.push("---------------------------------------------------------------------------", `Total Addresses in System (excluding one mac per port)     : ${Math.max(0, physical.reduce((a,n)=>a + (st.intfs[n].psec ? Math.max(0, (st.intfs[n].psecMacs||[]).length - 1) : 0), 0))}`, "Max Addresses limit in System (excluding one mac per port) : 4096");
+    return L.join("\n"); }
+  function psecIf(n){ const i = st.intfs[n]; const M = i.psecMacs||[], last = i.psecLast;
+    const status = !i.psec ? "Secure-down" : i.errdis==="psecure-violation" ? "Secure-shutdown" : up(n) ? "Secure-up" : "Secure-down";
+    return [`Port Security              : ${i.psec ? "Enabled" : "Disabled"}`, `Port Status                : ${status}`, `Violation Mode             : ${PSV[i.psecViol||"shutdown"]}`,
+      `Aging Time                 : ${i.psecAging||0} mins`, "Aging Type                 : Absolute", "SecureStatic Address Aging : Disabled",
+      `Maximum MAC Addresses      : ${i.psecMax||1}`, `Total MAC Addresses        : ${M.length}`, `Configured MAC Addresses   : ${M.filter(m=>m.type==="static").length}`, `Sticky MAC Addresses       : ${M.filter(m=>m.type==="sticky").length}`,
+      `Last Source Address:Vlan   : ${last ? last.mac + ":" + last.vlan : "0000.0000.0000:0"}`, `Security Violation Count   : ${i.psecViolCount||0}`].join("\n"); }
+  function psecAddr(){ const T = {static:"SecureConfigured", sticky:"SecureSticky", dynamic:"SecureDynamic"}, rows = [];
+    for (const n of physical){ const i = st.intfs[n]; if (!i.psec) continue; for (const m of (i.psecMacs||[])) rows.push(`${String(m.vlan||i.vlan).padStart(4)}    ${pad(m.mac, 18)}${pad(T[m.type], 30)}${pad(short(n), 8)}${"-".padStart(9)}`); }
+    return ["               Secure Mac Address Table", "-----------------------------------------------------------------------------", "Vlan    Mac Address       Type                          Ports   Remaining Age", "                                                                   (mins)", "----    -----------       ----                          -----   -------------",
+      ...rows, "-----------------------------------------------------------------------------", `Total Addresses in System (excluding one mac per port)     : ${Math.max(0, rows.length - physical.filter(n=>st.intfs[n].psec && (st.intfs[n].psecMacs||[]).length).length)}`, "Max Addresses limit in System (excluding one mac per port) : 4096"].join("\n"); }
   const SEV = ["emergencies","alerts","critical","errors","warnings","notifications","informational","debugging"];
   const sevOf = w => { if (/^[0-7]$/.test(w)) return +w; const k = SEV.findIndex(x=>x.startsWith(String(w).toLowerCase()) && String(w).length>=2); return k; };
   const MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"], DAY3 = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
