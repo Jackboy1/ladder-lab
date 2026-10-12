@@ -275,6 +275,24 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   for (let k = 0; k < 4; k++){ pc(L2, "p2", "ssh -l netops 192.168.50.1"); pc(L2, "p2", "x"); pc(L2, "p2", "y"); pc(L2, "p2", "z"); if (Bench.quietMode(L2, "r2")) break; }
   ok(Bench.quietMode(L2, "r2") && /Denying logins from all sources\./.test(cli(L2, "r2", "show login")) && (cli(L2, "r2", "show logging").match(/LOGIN_FAILED/g)||[]).length===Math.floor(Bench.loginFailures(L2, "r2")/2), "quiet mode with no access-class: Denying logins from all sources; every 2nd failure logged", cli(L2, "r2", "show login")); }
 
+{ // small fixes: real type 7, password 0, enc7 kept, groups, console failures, privilege 15, show users *, banner line break
+  const B = mk(null, ["line vty 0 4", "password 7 0822455D0A16", "exit", "username tech password Tech-Pa55", "username boss privilege 15 secret Boss-Secret1", "banner login #Staff only#"]);
+  ok(B.devs.r2.env.lines.vty.password==="cisco", "a pasted type 7 (0822455D0A16) decodes to cisco like on a real router");
+  let rc = cli(B, "r2", "show running-config");
+  ok(/username tech password 0 Tech-Pa55/.test(rc), "username … password 0 … for a clear-text user password", rc);
+  cfg(["service password-encryption"])(B.devs.r2.env); rc = cli(B, "r2", "show running-config");
+  const t7 = (rc.match(/username tech password 7 (\S+)/)||[])[1] || "";
+  ok(/^\d\d[0-9A-F]+$/.test(t7) && t7.length===2 + 2*"Tech-Pa55".length, "type 7 has the real shape: 2-digit salt + 2 hex digits per character", t7);
+  cfg(["no service password-encryption"])(B.devs.r2.env);
+  ok(/username tech password 7 /.test(cli(B, "r2", "show running-config")), "no service password-encryption leaves existing type 7 strings encrypted");
+  { const G = mk(); cli(G, "r2", "conf t"); ok(/Invalid input/.test(cli(G, "r2", "aaa new-model") + cli(G, "r2", "aaa authentication login X group foo local")), "aaa authentication login … group foo is rejected (radius / tacacs+ only)"); }
+  const r = pc(B, "p1", "ssh -l boss 192.168.50.1");
+  ok(/^Staff only\n\(boss@192\.168\.50\.1\) Password: $/.test(r), "SSH: the login banner ends with a line break before the password prompt", JSON.stringify(r));
+  pc(B, "p1", "Boss-Secret1"); ok(Bench.sessionPrompt(B, "p1")==="R2#", "a privilege 15 user (login local, no AAA) lands at #", Bench.sessionPrompt(B, "p1"));
+  const su = pc(B, "p1", "show users");
+  ok(/^\s+0 con 0 /m.test(su) && /^\*\s+1\s+vty 0\s+boss/m.test(su), "show users: the * marks the VTY line you're on", su); pc(B, "p1", "exit");
+  const C = mk(null, ["login block-for 60 attempts 2 within 60", "line con 0", "login local", "exit"]), e = C.devs.r2.env; e.connect("con"); e.exec("netops"); e.exec("bad"); e.exec("netops"); e.exec("bad");
+  ok(!Bench.quietMode(C, "r2"), "console failures don't trigger quiet mode"); }
 { // show ip arp inspection vlan N = configuration tables only; enable at # is accepted silently
   const B = mkSnoop(["ip arp inspection vlan 1"]); const v = cli(B, "sw", "show ip arp inspection vlan 1");
   ok(/ Vlan     Configuration    Operation/.test(v) && !/Forwarded/.test(v) && /Forwarded/.test(cli(B, "sw", "show ip arp inspection")), "show ip arp inspection vlan 1: no statistics tables", v);

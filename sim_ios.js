@@ -14,7 +14,11 @@ const netOf = (ip,m) => { const a = toInt(ip), b = toInt(m); return [24,16,8,0].
 const sameNet = (a,b,m) => netOf(a,m)===netOf(b,m);
 const pad = (s,n) => String(s).padEnd(n);
 const HASHREV = {};   // every hash this engine prints → the secret it came from (so a restored backup still logs in)
-const fakeHash = (s, t) => t==="7" ? [...String(s)].map((c,i)=>((c.charCodeAt(0)^(0x1F+i))&255).toString(16).toUpperCase().padStart(2,"0")).join("").slice(0,22).padEnd(14,"0")
+const XLAT7 = "dsfd;kfoA,.iyewrkldJKDHSUBsgvca69834ncxv9873254k;fg87";
+const type7 = (p, salt) => String(salt).padStart(2, "0") + [...String(p)].map((c,i)=>(c.charCodeAt(0) ^ XLAT7.charCodeAt((salt + i) % 53)).toString(16).toUpperCase().padStart(2, "0")).join("");
+const untype7 = h => { const m = String(h).match(/^(\d\d)((?:[0-9A-Fa-f]{2})+)$/); if (!m) return null; const salt = +m[1]; if (salt > 52) return null;
+  return m[2].match(/../g).map((x,i)=>String.fromCharCode(parseInt(x, 16) ^ XLAT7.charCodeAt((salt + i) % 53))).join(""); };
+const fakeHash = (s, t) => t==="7" ? type7(s, [...String(s)].reduce((a,c)=>a + c.charCodeAt(0), 0) % 16)   // real IOS picks the salt at random; the lab derives it so output is stable
   : t==="5" ? "$1$" + [...String(s)+"salt"].map((c,i)=>"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./"[(c.charCodeAt(0)*5+i*11)%64]).join("").slice(0,4) + "$" + [...String(s)].map((c,i)=>"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./"[(c.charCodeAt(0)*29+i*19)%64]).join("").padEnd(22,"x").slice(0,22)
   : (t==="8" ? "$8$" : "$9$") + [...String(s)+(t==="8" ? "pbkdf" : "salt")].map((c,i)=>"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./"[(c.charCodeAt(0)*7+i*13)%64]).join("").slice(0,14) + "$" + [...String(s)].map((c,i)=>"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(c.charCodeAt(0)*31+i*17)%62]).join("").padEnd(43,"x").slice(0,43);
 
@@ -132,8 +136,9 @@ function ios2Env(opts){
   const tooShort = v => { const plain = !/^[05789] \S+$/.test(String(v)); const pwd = String(v).replace(/^0 /, ""); return plain && st.secMinLen && pwd.length < st.secMinLen ? `% Password too short - must be at least ${st.secMinLen} characters. Password configuration failed` : null; };
   const ALG = {md5:"5", sha256:"8", scrypt:"9"};
   const hashType = v => { const m = String(v).match(/^([589]) \S+$/); return m ? m[1] : null; };   // a pasted hash keeps its type; plain text → the default (9)
-  const unhash = v => { const m = String(v).match(/^([05789]) (\S+)$/); return m ? (HASHREV[m[2]]!=null ? HASHREV[m[2]] : m[2]) : v; };
-  const pw = (p, type7) => p==null ? null : st.servicePwEnc ? `7 ${hashOf(p,"7")}` : p;
+  const unhash = v => { const m = String(v).match(/^([05789]) (\S+)$/); if (!m) return v; if (HASHREV[m[2]]!=null) return HASHREV[m[2]]; if (m[1]==="7"){ const d = untype7(m[2]); if (d!=null) return d; } return m[1]==="0" ? m[2] : m[2]; };
+  // service password-encryption turns every stored password into type 7 at once; "no service password-encryption" doesn't turn them back
+  const pw = p => p==null ? null : (st.servicePwEnc || (st.enc7||[]).includes(p)) ? `7 ${hashOf(p,"7")}` : p;
 
   const compactList = arr => { const a = [...arr].sort((x,y)=>x-y), out = []; for (let k=0;k<a.length;k++){ let j = k; while (j+1<a.length && a[j+1]===a[j]+1) j++; out.push(j>k ? `${a[k]}-${a[j]}` : `${a[k]}`); k = j; } return out.join(","); };
   const activeVlans = () => Object.keys(st.vlans).map(Number).filter(v=>v<1002||v>1005).sort((a,b)=>a-b);
@@ -193,7 +198,7 @@ function ios2Env(opts){
     if (st.tz) L.push(`clock timezone ${st.tz.name} ${st.tz.h} ${st.tz.m}`);
     if (!st.domainLookup) L.push("no ip domain lookup");
     if (st.domain) L.push(`ip domain name ${st.domain}`);
-    { const U = Object.entries(st.users).map(([u,v])=>`username ${u}${v.priv!=null ? " privilege " + v.priv : ""} ${v.secret ? `secret ${v.alg||"9"} ${hashOf(v.secret, v.alg||"9")}` : `password ${pw(v.password)}`}`); if (U.length) L.push("!", ...U, "!"); }
+    { const U = Object.entries(st.users).map(([u,v])=>`username ${u}${v.priv!=null ? " privilege " + v.priv : ""} ${v.secret ? `secret ${v.alg||"9"} ${hashOf(v.secret, v.alg||"9")}` : `password ${/^7 /.test(pw(v.password)) ? pw(v.password) : "0 " + v.password}`}`); if (U.length) L.push("!", ...U, "!"); }
     for (const [n, ip] of Object.entries(st.iosHosts)) L.push(`ip host ${n} ${ip}`);
     if (st.nameServers.length) L.push(`ip name-server ${st.nameServers.join(" ")}`);
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
@@ -795,7 +800,7 @@ function ios2Env(opts){
     X("terminal length A:NUM", ()=>""), X("terminal no monitor", ()=>""),
   ];
   const T = {
-    user: [ X("enable", ()=>goEnable()), ...execCommon, X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()), X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show clock", ()=>clockText()) ],
+    user: [ X("enable", ()=>goEnable()), ...execCommon, ...execShow.filter(d=>["show users","show ip arp","show arp"].includes(d.p.join(" "))), X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()), X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show clock", ()=>clockText()) ],
     priv: [ X("enable", ()=>""), X("disable", ()=>{ st.mode="user"; return ""; }), X("configure terminal", ()=>{ st.mode="config"; return "Enter configuration commands, one per line.  End with CNTL/Z."; }),
       ...execShow, ...execCommon,
       X("copy running-config startup-config", ()=>ask("Destination filename [startup-config]? ", ()=>save())),
@@ -827,7 +832,7 @@ function ios2Env(opts){
       X("enable algorithm-type A:WORD secret A:LINE", a=>{ const t = ALG[a[0].toLowerCase()]; if (!t) return inv(); const e = tooShort(a[1]); if (e) return e; st.enableSecret = unhash(a[1]); st.enableAlg = t; return ""; }),
       X("enable password A:LINE", a=>{ const e = tooShort(a[0]); if (e) return e; st.enablePassword = unhash(a[0]); return st.enableSecret ? "% The enable password you have chosen is the same as your enable secret.\n% This is not recommended.  Re-enter the enable password.".replace(/.*/s, m=> a[0]===st.enableSecret?m:"") : ""; }),
       X("no enable secret", ()=>{ st.enableSecret=null; return ""; }), X("no enable password", ()=>{ st.enablePassword=null; return ""; }),
-      X("service password-encryption", ()=>{ st.servicePwEnc=true; return ""; }), X("no service password-encryption", ()=>{ st.servicePwEnc=false; return ""; }),
+      X("service password-encryption", ()=>{ st.servicePwEnc=true; const E = new Set(st.enc7||[]); for (const v of [st.enablePassword, ...Object.values(st.lines).map(l=>l.password), ...Object.values(st.users).map(u=>u.password), ...Object.values(st.aaa.radius).map(x=>x.key), ...Object.values(st.aaa.tacacs).map(x=>x.key)]) if (v!=null) E.add(v); st.enc7 = [...E]; return ""; }), X("no service password-encryption", ()=>{ st.servicePwEnc=false; return ""; }),
       X("banner motd A:LINE", a=>{ const s = a[0]; const d = s[0]; const end = s.indexOf(d,1); if (end<0) return ask(`Enter TEXT message.  End with the character '${d}'.`, l=>{ st.banner = (s.slice(1)+"\n"+l).replace(new RegExp("\\"+d+".*$"),""); return ""; }); st.banner = s.slice(1,end); return ""; }),
       X("no banner motd", ()=>{ st.banner=null; return ""; }),
       X("interface range A:LINE", a=>{ const list = parseRange(a[0]); if (!list) return "% Invalid input detected — try: interface range g0/1 - 4"; st.mode="config-if"; st.cur=list[0]; st.curList=list; return ""; }),
@@ -935,7 +940,7 @@ function ios2Env(opts){
       X("banner login A:LINE", a=>{ const s = a[0]; const d = s[0]; const end = s.indexOf(d,1); if (end<0) return ask(`Enter TEXT message.  End with the character '${d}'.`, l=>{ st.bannerLogin = (s.slice(1)+"\n"+l).replace(new RegExp("\\"+d+".*$"),""); return ""; }); st.bannerLogin = s.slice(1,end); return ""; }), X("no banner login", ()=>{ st.bannerLogin = null; return ""; }),
       X("aaa new-model", ()=>{ st.aaa.on = true; return ""; }), X("no aaa new-model", ()=>{ st.aaa.on = false; return ""; }),
       X("aaa authentication login A:WORD A:LINE", a=>{ if (!st.aaa.on) return inv(); const m = a[1].trim().split(/\s+/), out = [];
-        for (let k = 0; k < m.length; k++){ if (m[k]==="group"){ if (!m[k+1]) return "% Incomplete command."; out.push("group " + m[++k]); } else if (["local","enable","none","line"].includes(m[k])) out.push(m[k]); else return inv(); }
+        for (let k = 0; k < m.length; k++){ if (m[k]==="group"){ if (!m[k+1]) return "% Incomplete command."; if (!["radius","tacacs+"].includes(m[k+1])) return inv(); out.push("group " + m[++k]); } else if (["local","enable","none","line"].includes(m[k])) out.push(m[k]); else return inv(); }
         st.aaa.lists[a[0]] = out; return ""; }),
       X("no aaa authentication login A:WORD", a=>{ delete st.aaa.lists[a[0]]; return ""; }),
       X("radius server A:WORD", a=>{ if (!st.aaa.on) return inv(); st.aaa.radius[a[0]] = st.aaa.radius[a[0]] || {}; st.mode = "config-radius-server"; st.curAaaSrv = a[0]; return ""; }),
@@ -1410,6 +1415,7 @@ function ios2Env(opts){
     const tags = `[user: ${user||""}] [Source: ${(ctx&&ctx.src)||"0.0.0.0"}] [localport: ${(ctx&&ctx.port)||0}]`;
     if (ok){ st.loginOkN = (st.loginOkN||0) + 1; if (st.loginLogOk && st.loginOkN % st.loginLogOk === 0) hooks.emit(`%SEC_LOGIN-5-LOGIN_SUCCESS: Login Success ${tags} at ${stamp()}`); return true; }
     st.loginFailN = (st.loginFailN||0) + 1; if (st.loginLogFail && st.loginFailN % st.loginLogFail === 0) hooks.emit(`%SEC_LOGIN-4-LOGIN_FAILED: Login failed ${tags} [Reason: ${why}] at ${stamp()}`);
+    if ((lineName||"vty")==="con") return false;
     st.loginFails = (st.loginFails||[]).filter(t=>st.loginBlock && hooks.now() - t < st.loginBlock.within*1000); st.loginFails.push(hooks.now()); st.loginTotalFails = (st.loginTotalFails||0) + 1;
     const b = st.loginBlock; if (b && !st.quietUntil && st.loginFails.length >= b.attempts){ st.quietUntil = hooks.now() + b.for*1000; const left = Math.max(1, b.within - Math.round((hooks.now() - st.loginFails[0])/1000));
       hooks.emit(`%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is ${left} secs, ${tags} [Reason: ${why}] [ACL: ${st.loginQuietAcl || "sl_def_acl"}] at ${stamp()}`); st.loginFails = []; }
@@ -1420,7 +1426,7 @@ function ios2Env(opts){
     const ban0 = st.bannerLogin!=null ? st.bannerLogin + "\n\n" : "", vty = (lineName||"con")==="vty"; let fails = 0;
     if (st.aaa.on || (L.login && (L.loginLocal ? Object.keys(st.users).length : L.password))){
       if (st.aaa.on && st.loginMethods(lineName)[0]==="none") return {text: ban + "Press RETURN to get started."};
-      if (st.aaa.on || L.loginLocal){ let user = null; const askUser = () => ask("Username: ", u=>{ user=u.trim(); st.noEcho=true; return ask("Password: ", p=>{ st.noEcho=false; if (st.loginCheck(lineName, user, p, st.loginCtx)) return ""; const msg = st.aaa.on ? "% Authentication failed" : "% Login invalid"; if (vty && ++fails >= 3) return {logout:true, text:msg};
+      if (st.aaa.on || L.loginLocal){ let user = null; const askUser = () => ask("Username: ", u=>{ user=u.trim(); st.noEcho=true; return ask("Password: ", p=>{ st.noEcho=false; if (st.loginCheck(lineName, user, p, st.loginCtx)){ if (!st.aaa.on && (st.users[user]||{}).priv===15) st.mode = "priv"; return ""; } const msg = st.aaa.on ? "% Authentication failed" : "% Login invalid"; if (vty && ++fails >= 3) return {logout:true, text:msg};
           askUser(); return {text:"\n" + msg + "\n\n", ask:"Username: "}; }); });
         askUser(); return {text: ban+ban0+"User Access Verification\n\n", ask: "Username: "}; }
       if (L.loginLocal){ let user = null; const askUser = () => ask("Username: ", u=>{ user=u.trim(); st.noEcho=true; return ask("Password: ", p=>{ st.noEcho=false; const rec = st.users[user]; if (rec && (rec.secret===p || rec.password===p)) return ""; askUser(); return {text:"% Login invalid\n", ask:"Username: "}; }); });

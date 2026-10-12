@@ -541,7 +541,7 @@ function aclGate(B, res, dev, ifn, dir, pkt, dst, arrIf){
   if (r.entry){ (res.aclHits = res.aclHits || []).push(r.entry); if (r.entry.log) syslog(B, dev, aclLogLine(name, L, r.entry.action, pkt, dst), true); }
   const lineTxt = r.entry ? `line ${r.entry.seq} (${window.ACL.entryText(L, r.entry, false)})` : "";
   if (r.permit){ res.log.push(`&nbsp;&nbsp;· ACL <b>${name}</b> ${dir} on ${dev.label} ${shortIf(ifn)}: ${pktText(pkt, dst)} matches ${lineTxt} → permitted`); return null; }
-  const ai = E.intfs[arrIf || ifn], from = ai && ai.ip, quiet = ai && ai.noUnreach;
+  const ai = E.intfs[arrIf || ifn], from = ai && ai.ip, quiet = (ai && ai.noUnreach) || dst==="255.255.255.255" || pkt.src==="0.0.0.0";
   res.kind = quiet ? "timeout" : "prohib"; res.unreachFrom = from; res.prohibBy = dev;
   if (!quiet && from && dir==="in") res.path.push(from), res.srcAt.push(pkt.src), res.portAt.push(pkt.sport);   // (an outbound deny: the router is already the last hop)
   res.log.push(`<b>ACL ${name} ${dir}</b> on ${dev.label} ${shortIf(ifn)} denies ${pktText(pkt, dst)} — ${r.implicit ? "no line matched, so the implicit <b>deny any</b> at the end drops it" : lineTxt + " drops it"}; ${quiet ? "<b>no ip unreachables</b> on that interface, so the sender hears nothing" : "the router sends ICMP Destination Unreachable (type 3, code 13 'administratively prohibited') back from " + from}`);
@@ -1291,7 +1291,7 @@ function makeHooks(B, d){
       }
       return out;
     },
-    sessions: () => Object.entries(B.remote).filter(([,r])=>r.env===d.env && !r.pendingAuth).map(([pc,r])=>({user:r.user||"", from:r.from, proto:r.proto, me:false})),
+    sessions: () => Object.entries(B.remote).filter(([,r])=>r.env===d.env && !r.pendingAuth).map(([pc,r])=>({user:r.user||"", from:r.from, proto:r.proto, me: !!(d.env.viaVty && d.env.viaVty.ip===r.from && (d.env.viaVty.user||"")===(r.user||""))})),
     peer: name => { const ref = refOfIos(d, name); if (!ref) return null; const c = cableAt(B, ref); if (!c || CABLES[c.type].kind==="console") return null; const st = linkState(B, c); if (!st.up) return null;
       const f = P(B, otherEnd(c, ref)); if (!f.dev.env) return {kind:f.dev.kind}; const fi = f.dev.env.intfs[f.port.ios]; return {kind:f.dev.kind, mode: fi.mode, dtp: fi.dtp, nonegotiate: fi.nonegotiate}; },
     stp: v => { const S = l2State(B), x = S.stp[d.id] && S.stp[d.id][+v]; if (!x || !x.on) return null;
@@ -1469,11 +1469,11 @@ function pcExec(B, d, line){
       B.remote[d.id] = {env, host:ip, proto:"ssh", user, from:d.ip, pendingAuth:true}; env.loginCtx = {src:tcp.src || d.ip, port:22};
       let tries = 0; const prompt = `(${user}@${ip}) Password: `;
       const handle = pw => { env.noEcho = false;
-        if (env.loginCheck("vty", user, pw, env.loginCtx)){ env.mode = "user"; if (B.remote[d.id]) B.remote[d.id].pendingAuth = false; return env.banner!=null ? env.banner : ""; }
+        if (env.loginCheck("vty", user, pw, env.loginCtx)){ env.mode = !(env.aaa && env.aaa.on) && (env.users[user]||{}).priv===15 ? "priv" : "user"; if (B.remote[d.id]) B.remote[d.id].pendingAuth = false; return env.banner!=null ? env.banner : ""; }
         if (++tries < 3){ env.noEcho = true; env.pending = {prompt, handle}; return {text:"", ask:prompt}; }
         delete B.remote[d.id]; return `${user}@${ip}: Permission denied (publickey,keyboard-interactive,password).`; };
       openSession(B, d.id, e => { e.pending = {prompt, handle}; e.noEcho = true; });
-      return {ask:prompt, text: env.bannerLogin!=null ? env.bannerLogin : ""};
+      return {ask:prompt, text: env.bannerLogin!=null ? env.bannerLogin + "\n" : ""};
     }
     if (!/telnet|all/.test(vty.transport)) return `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`;
     const aaaOn = env.aaa && env.aaa.on; env.loginCtx = {src:tcp.src || d.ip, port:23};
