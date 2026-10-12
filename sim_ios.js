@@ -55,6 +55,7 @@ function ios2Env(opts){
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
       stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[], serviceDhcp:true,
+      snoop:{on:false, vlans:[], opt82:true}, dai:{vlans:[], validate:[], filters:{}}, arpAcls:{}, relayTrustAll:false,
       logHosts:[], logTrap:6, logBuffered:null, logConsole:null, ntpServers:[], ntpMaster:null, tz:null, iosHosts:{}, nameServers:[], dnsServer:false,
       snmp:{communities:{}, location:null, contact:null, hosts:[], traps:false},
       acl: window.ACL ? window.ACL.store() : {lists:{}}, dhcp: window.DHCP ? window.DHCP.store() : {excluded:[], pools:{}, bindings:[], conflicts:[]}, nat: window.NAT ? window.NAT.store() : {pools:{}, statics:[], rules:[], table:[], hits:0, misses:0, expired:0},
@@ -69,6 +70,7 @@ function ios2Env(opts){
   const stripLive = o => { if (o.dhcp){ o.dhcp.bindings = []; o.dhcp.conflicts = []; for (const p of Object.values(o.dhcp.pools||{})) delete p.index; }
     if (o.nat){ o.nat.table = []; o.nat.hits = 0; o.nat.misses = 0; o.nat.expired = 0; for (const p of Object.values(o.nat.pools||{})){ p.used = {}; p.misses = 0; } }
     if (o.acl) for (const l of Object.values(o.acl.lists||{})) for (const e of l.entries) if (e.hits) e.hits = 0;
+    delete o.snoopBind; delete o.daiStats;
     for (const i of Object.values(o.intfs||{})){ if (i.psecMacs) i.psecMacs = i.psecMacs.filter(m=>m.type!=="dynamic"); delete i.psecViolCount; delete i.psecLast; }
     for (const i of Object.values(o.intfs||{})) if (i.dhcpClient){ i.ip = null; i.mask = null; delete i.dhcpGw; delete i.dhcpLease; }
     return o; };
@@ -189,6 +191,10 @@ function ios2Env(opts){
     if (st.nameServers.length) L.push(`ip name-server ${st.nameServers.join(" ")}`);
     if (st.sshVer) L.push(`ip ssh version ${st.sshVer}`);
     if (st.serviceDhcp===false) L.push("no service dhcp");
+    if (st.snoop.vlans.length) L.push(`ip dhcp snooping vlan ${compactList(st.snoop.vlans)}`); if (!st.snoop.opt82) L.push("no ip dhcp snooping information option"); if (st.snoop.on) L.push("ip dhcp snooping");
+    if (st.dai.vlans.length) L.push(`ip arp inspection vlan ${compactList(st.dai.vlans)}`); if (st.dai.validate.length) L.push(`ip arp inspection validate ${st.dai.validate.join(" ")}`);
+    for (const [v, n] of Object.entries(st.dai.filters)) L.push(`ip arp inspection filter ${n} vlan ${v}`);
+    if (st.relayTrustAll) L.push("ip dhcp relay information trust-all");
     for (const c of (st.errRecovery||[])) L.push(`errdisable recovery cause ${c}`); if (st.errRecoveryInt) L.push(`errdisable recovery interval ${st.errRecoveryInt}`);
     { const D = window.DHCP ? window.DHCP.running(st.dhcp) : []; if (D.length) L.push("!", ...D, "!"); }
     if (st.v6routing) L.push("ipv6 unicast-routing"); if (st.v6resolveDefault) L.push("ipv6 route static resolve default");
@@ -213,6 +219,7 @@ function ios2Env(opts){
           if (i.mode==="access") L.push(" switchport mode access"); else if (i.mode==="trunk") L.push(" switchport mode trunk"); else if (i.dtp==="desirable") L.push(" switchport mode dynamic desirable");
           if (i.nonegotiate) L.push(" switchport nonegotiate");
           if (i.voiceVlan) L.push(` switchport voice vlan ${i.voiceVlan}`);
+          if (i.daiTrust) L.push(" ip arp inspection trust"); if (i.snoopTrust) L.push(" ip dhcp snooping trust"); if (i.snoopRate) L.push(` ip dhcp snooping limit rate ${i.snoopRate}`);
           if (i.psec){ if (i.psecMax && i.psecMax!==1) L.push(` switchport port-security maximum ${i.psecMax}`); if (i.psecViol && i.psecViol!=="shutdown") L.push(` switchport port-security violation ${i.psecViol}`);
             for (const m of (i.psecMacs||[])) if (m.type==="static") L.push(` switchport port-security mac-address ${m.mac}`);
             if (i.psecSticky) L.push(" switchport port-security mac-address sticky"); for (const m of (i.psecMacs||[])) if (m.type==="sticky") L.push(` switchport port-security mac-address sticky ${m.mac}`);
@@ -225,6 +232,7 @@ function ios2Env(opts){
       }
       if (i.bw) L.push(` bandwidth ${i.bw}`);
       if (i.dhcpClient) L.push(" ip address dhcp"); else if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
+      if (i.relayTrusted) L.push(" ip dhcp relay information trusted");
       if (i.aclIn) L.push(` ip access-group ${i.aclIn} in`); if (i.aclOut) L.push(` ip access-group ${i.aclOut} out`); if (i.noUnreach) L.push(" no ip unreachables");
       if (i.natIn) L.push(" ip nat inside"); if (i.natOut) L.push(" ip nat outside");
       for (const h of (i.helpers||[])) L.push(` ip helper-address ${h}`);
@@ -253,6 +261,7 @@ function ios2Env(opts){
     for (const r of (st.routes6||[])) L.push(`ipv6 route ${U(r.net)}/${r.len}${r.ios?" "+r.ios:""}${r.nh?" "+U(r.nh):""}${r.ad?" "+r.ad:""}`);
     for (const r of st.routes.slice().sort((x,y)=>toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.ad?" "+r.ad:""}`);
     { const A = window.ACL ? window.ACL.running(st.acl) : []; if (A.length) L.push("!", ...A); }
+    for (const [n, E] of Object.entries(st.arpAcls)){ L.push(`arp access-list ${n}`); for (const e of E) L.push(` ${e.action} ip host ${e.ip} mac host ${e.mac}`); }
     if (st.dnsServer) L.push("ip dns server");
     if (st.logBuffered) L.push(`logging buffered ${st.logBuffered}`); if (st.logConsole!=null) L.push(`logging console ${SEV[st.logConsole]}`);
     if (st.logTrap!==6) L.push(`logging trap ${SEV[st.logTrap]}`); for (const h of st.logHosts) L.push(`logging host ${h}`);
@@ -681,7 +690,7 @@ function ios2Env(opts){
       if (!i.ip) L.push("  Internet protocol processing disabled");
       else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", "  MTU is 1500 bytes", ...(i.helpers && i.helpers.length ? (i.helpers.length===1 ? ["  Helper address is " + i.helpers[0]] : ["  Helper addresses are " + i.helpers[0], ...i.helpers.slice(1).map(h=>"                       " + h)]) : ["  Helper address is not set"]),
         "  Directed broadcast forwarding is disabled", "  Outgoing Common access list is not set", `  Outgoing access list is ${i.aclOut || "not set"}`, "  Inbound Common access list is not set", `  Inbound  access list is ${i.aclIn || "not set"}`,
-        `  Proxy ARP is ${i.proxyArp===false?"disabled":"enabled"}`, "  Local Proxy ARP is disabled", "  Security level is default", "  Split horizon is enabled", "  ICMP redirects are always sent", "  ICMP unreachables are always sent", "  ICMP mask replies are never sent");
+        `  Proxy ARP is ${i.proxyArp===false?"disabled":"enabled"}`, "  Local Proxy ARP is disabled", "  Security level is default", "  Split horizon is enabled", "  ICMP redirects are always sent", `  ICMP unreachables are ${i.noUnreach ? "never" : "always"} sent`, "  ICMP mask replies are never sent");
       return L.join("\n"); }),
     X("show interfaces A:IF", a=>{ const n = parseIf(a[0]); return n ? showInt(n) : "% Invalid interface type and number"; }),
     X("show vlan brief", ()=>vlanBrief()||inv()), X("show vlan", ()=>vlanBrief()||inv()),
@@ -706,6 +715,10 @@ function ios2Env(opts){
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
     X("show cdp neighbors", ()=>cdpNeighbors(false)), X("show cdp neighbors detail", ()=>cdpNeighbors(true)),
     X("show lldp neighbors", ()=>lldpNeighbors()),
+    X("show ip dhcp snooping", ()=>kind==="switch" ? snoopShow() : inv()), X("show ip dhcp snooping binding", ()=>kind==="switch" ? snoopBind() : inv()),
+    X("show ip arp inspection", ()=>kind==="switch" ? daiShow() : inv()),
+    X("show ip arp inspection vlan A:NUM", ()=>kind==="switch" ? daiShow() : inv()),
+    X("clear ip arp inspection statistics", ()=>{ st.daiStats = {}; return ""; }), X("clear ip dhcp snooping binding A:WORD", ()=>{ st.snoopBind = {}; return ""; }),
     X("show port-security", ()=>kind==="switch" ? psecShow() : inv()),
     X("show port-security interface A:IF", a=>{ const n = parseIf(a[0]); if (kind!=="switch" || !n || !st.intfs[n]) return inv(); return psecIf(n); }),
     X("show port-security address", ()=>kind==="switch" ? psecAddr() : inv()),
@@ -874,6 +887,22 @@ function ios2Env(opts){
       // ---- NAT/PAT ----
       X("ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "ip nat " + a[0], {ifName: n=>parseIf(n), ifAddr: n => (st.intfs[n]||{}).ip || null}); return r.err || ""; }),
       X("no ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "no ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
+      // ---- DHCP snooping (switch) ----
+      X("ip dhcp snooping", ()=>{ if (kind!=="switch") return inv(); st.snoop.on = true; return ""; }), X("no ip dhcp snooping", ()=>{ st.snoop.on = false; return ""; }),
+      X("ip dhcp snooping vlan A:LINE", a=>{ if (kind!=="switch") return inv(); const v = parseVlanList(a[0]); if (!v) return inv(); for (const x of v) if (!st.snoop.vlans.includes(x)) st.snoop.vlans.push(x); st.snoop.vlans.sort((x,y)=>x-y); return ""; }),
+      X("no ip dhcp snooping vlan A:LINE", a=>{ const v = parseVlanList(a[0]) || []; st.snoop.vlans = st.snoop.vlans.filter(x=>!v.includes(x)); return ""; }),
+      X("ip dhcp snooping information option", ()=>{ st.snoop.opt82 = true; return ""; }), X("no ip dhcp snooping information option", ()=>{ st.snoop.opt82 = false; return ""; }),
+      // ---- Dynamic ARP Inspection (switch) ----
+      X("ip arp inspection vlan A:LINE", a=>{ if (kind!=="switch") return inv(); const v = parseVlanList(a[0]); if (!v) return inv(); for (const x of v) if (!st.dai.vlans.includes(x)) st.dai.vlans.push(x); st.dai.vlans.sort((x,y)=>x-y); return ""; }),
+      X("no ip arp inspection vlan A:LINE", a=>{ const v = parseVlanList(a[0]) || []; st.dai.vlans = st.dai.vlans.filter(x=>!v.includes(x)); return ""; }),
+      X("ip arp inspection validate A:LINE", a=>{ const t = a[0].trim().split(/\s+/); if (t.some(x=>!["src-mac","dst-mac","ip"].includes(x))) return inv(); st.dai.validate = t; return ""; }),
+      X("no ip arp inspection validate A:LINE", ()=>{ st.dai.validate = []; return ""; }),
+      X("ip arp inspection filter A:WORD vlan A:LINE", a=>{ const v = parseVlanList(a[1]); if (!v) return inv(); for (const x of v) st.dai.filters[x] = a[0]; return ""; }),
+      X("no ip arp inspection filter A:WORD vlan A:LINE", a=>{ const v = parseVlanList(a[1]) || []; for (const x of v) delete st.dai.filters[x]; return ""; }),
+      X("arp access-list A:WORD", a=>{ st.arpAcls[a[0]] = st.arpAcls[a[0]] || []; st.mode = "config-arp-nacl"; st.curArpAcl = a[0]; return ""; }),
+      X("no arp access-list A:WORD", a=>{ delete st.arpAcls[a[0]]; return ""; }),
+      // an IOS DHCP server/relay accepts option 82 from a snooping switch (giaddr 0.0.0.0) only if told to trust it
+      X("ip dhcp relay information trust-all", ()=>{ st.relayTrustAll = true; return ""; }), X("no ip dhcp relay information trust-all", ()=>{ st.relayTrustAll = false; return ""; }),
       X("errdisable recovery cause A:WORD", a=>{ st.errRecovery = st.errRecovery || []; if (!st.errRecovery.includes(a[0])) st.errRecovery.push(a[0]); return ""; }),
       X("no errdisable recovery cause A:WORD", a=>{ st.errRecovery = (st.errRecovery||[]).filter(x=>x!==a[0]); return ""; }),
       X("errdisable recovery interval A:NUM", a=>{ st.errRecoveryInt = +a[0]; return ""; }),
@@ -949,6 +978,10 @@ function ios2Env(opts){
         let list; const m = s.match(/^(add|remove|except)\s+(.+)$/); if (s==="all") list=null; else if (s==="none") list=[]; else if (m){ const set = parse(m[2]); const base = cur || [...Array(4094)].map((_,k)=>k+1); list = m[1]==="add" ? (cur ? [...new Set([...cur, ...set])].sort((x,y)=>x-y) : null) : m[1]==="remove" ? base.filter(x=>!set.includes(x)) : [...Array(4094)].map((_,k)=>k+1).filter(x=>!set.includes(x)); if (list && list.length===4094) list=null; } else list = parse(s);
         return l2(i=>{ i.allowed = list; }); }),
       X("switchport trunk native vlan A:NUM", a=>l2(i=>{ i.native=+a[0]; })),
+      X("ip dhcp snooping trust", ()=>{ if (kind!=="switch") return inv(); forCur(i=>{ i.snoopTrust = true; }); return ""; }), X("no ip dhcp snooping trust", ()=>{ forCur(i=>{ delete i.snoopTrust; }); return ""; }),
+      X("ip dhcp snooping limit rate A:NUM", a=>{ if (kind!=="switch") return inv(); forCur(i=>{ i.snoopRate = +a[0]; }); return ""; }), X("no ip dhcp snooping limit rate", ()=>{ forCur(i=>{ delete i.snoopRate; }); return ""; }),
+      X("ip arp inspection trust", ()=>{ if (kind!=="switch") return inv(); forCur(i=>{ i.daiTrust = true; }); return ""; }), X("no ip arp inspection trust", ()=>{ forCur(i=>{ delete i.daiTrust; }); return ""; }),
+      X("ip dhcp relay information trusted", ()=>{ forCur(i=>{ i.relayTrusted = true; }); return ""; }), X("no ip dhcp relay information trusted", ()=>{ forCur(i=>{ delete i.relayTrusted; }); return ""; }),
       X("switchport port-security", ()=>psec(i=>{ i.psec = true; })),
       X("no switchport port-security", ()=>psec(i=>{ delete i.psec; }, true)),
       X("switchport port-security maximum A:NUM", a=>{ const n = +a[0]; if (!(n>=1 && n<=4096)) return inv(); return psec(i=>{ i.psecMax = n; }, true); }),
@@ -1019,6 +1052,8 @@ function ios2Env(opts){
       X("logging synchronous", ()=>{ st.lines[st.curLine].sync=true; return ""; }),
     ],
     "config-std-nacl": aclMode(), "config-ext-nacl": aclMode(),
+    "config-arp-nacl": [ X("permit ip host A:IP mac host A:WORD", a=>{ const m = normMac(a[1]); if (!m) return inv(); st.arpAcls[st.curArpAcl].push({action:"permit", ip:a[0], mac:m}); return ""; }),
+      X("deny ip host A:IP mac host A:WORD", a=>{ const m = normMac(a[1]); if (!m) return inv(); st.arpAcls[st.curArpAcl].push({action:"deny", ip:a[0], mac:m}); return ""; }) ],
     "config-dhcp": ["network","default-router","dns-server","domain-name","lease"].flatMap(k=>[
       X(k + " A:LINE", a=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, k + " " + a[0]); return r.err || ""; }),
       X("no " + k, ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }),
@@ -1045,9 +1080,29 @@ function ios2Env(opts){
   };
   const cfgDone = () => st.viaVty ? `%SYS-5-CONFIG_I: Configured from console by ${st.viaVty.user} on vty0 (${st.viaVty.ip})` : `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
-  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp"]) T[m].push(...cfgCommon);
+  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp","config-arp-nacl"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
+  const parseVlanList = t => { const out = []; for (const part of String(t).replace(/\s+/g, "").split(",")){ const m = part.match(/^(\d+)(?:-(\d+))?$/); if (!m) return null; const a = +m[1], b = m[2] ? +m[2] : a; if (a<1 || b>4094 || b<a) return null; for (let v = a; v <= b; v++) out.push(v); } return out; };
+  const macColon = m => m.replace(/\./g, "").match(/../g).join(":").toUpperCase();
+  function snoopShow(){ const tr = physical.filter(n=>st.intfs[n].snoopTrust || st.intfs[n].snoopRate);
+    return [`Switch DHCP snooping is ${st.snoop.on ? "enabled" : "disabled"}`, "Switch DHCP gleaning is disabled", "DHCP snooping is configured on following VLANs:", st.snoop.vlans.join(",") || "none",
+      "DHCP snooping is operational on following VLANs:", (st.snoop.on ? st.snoop.vlans.filter(v=>st.vlans[v]) : []).join(",") || "none",
+      "DHCP snooping is configured on the following L3 Interfaces:", "", `Insertion of option 82 is ${st.snoop.opt82 ? "enabled" : "disabled"}`, "   circuit-id default format: vlan-mod-port", `   remote-id: ${(st.intfs.Vlan1||{}).mac || baseMac + ".00ff"} (MAC)`,
+      "Option 82 on untrusted port is not allowed", "Verification of hwaddr field is enabled", "Verification of giaddr field is enabled", "DHCP snooping trust/rate is configured on the following Interfaces:", "",
+      "Interface                  Trusted    Allow option    Rate limit (pps)", "-----------------------    -------    ------------    ----------------",
+      ...tr.flatMap(n=>[`${pad(n, 27)}${pad(st.intfs[n].snoopTrust ? "yes" : "no", 11)}${pad(st.intfs[n].snoopTrust ? "yes" : "no", 16)}${st.intfs[n].snoopRate || "unlimited"}`, "  Custom circuit-ids:"])].join("\n"); }
+  function snoopBind(){ const B0 = st.snoopBind || {};
+    return ["MacAddress          IpAddress        Lease(sec)  Type           VLAN  Interface", "------------------  ---------------  ----------  -------------  ----  --------------------",
+      ...Object.values(B0).map(b=>`${pad(macColon(b.mac), 20)}${pad(b.ip, 17)}${pad(String(b.lease), 12)}${pad("dhcp-snooping", 15)}${pad(String(b.vlan), 6)}${b.iface}`),
+      `Total number of bindings: ${Object.keys(B0).length}`].join("\n"); }
+  function daiShow(){ const S0 = st.daiStats || {}; const vl = st.dai.vlans; const has = x => st.dai.validate.includes(x) ? "Enabled" : "Disabled";
+    return [`Source Mac Validation      : ${has("src-mac")}`, `Destination Mac Validation : ${has("dst-mac")}`, `IP Address Validation      : ${has("ip")}`, "",
+      " Vlan     Configuration    Operation   ACL Match          Static ACL", " ----     -------------    ---------   ---------          ----------",
+      ...vl.map(v=>`${String(v).padStart(5)}     Enabled          ${pad(st.vlans[v] ? "Active" : "Inactive", 12)}${pad(st.dai.filters[v] || "", 19)}${st.dai.filters[v] ? "No" : ""}`.trimEnd()), "",
+      " Vlan     ACL Logging      DHCP Logging      Probe Logging", " ----     -----------      ------------      -------------", ...vl.map(v=>`${String(v).padStart(5)}     Deny             Deny              Off`), "",
+      " Vlan      Forwarded        Dropped     DHCP Drops      ACL Drops", " ----      ---------        -------     ----------      ---------",
+      ...vl.map(v=>{ const x = S0[v] || {}; return `${String(v).padStart(5)}${String(x.fwd||0).padStart(15)}${String(x.drop||0).padStart(15)}${String(x.dhcpDrop||0).padStart(15)}${String(x.aclDrop||0).padStart(15)}`; })].join("\n"); }
   const normMac = m => { const h = String(m).toLowerCase().replace(/[^0-9a-f]/g, ""); return h.length===12 ? h.match(/.{4}/g).join(".") : null; };
   // port security works on static access (or trunk) ports only — a dynamic (DTP) port refuses it, like IOS
   function psec(fn, sub){ if (kind!=="switch") return inv();
@@ -1252,7 +1307,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-arp-nacl":h+"(config-arp-nacl)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;

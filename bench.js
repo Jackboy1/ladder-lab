@@ -334,6 +334,20 @@ function stpStateOf(S, d, lp, v){ const x = S.stp[d.id] && S.stp[d.id][v]; if (!
 // from: a port ref string (untagged), {ref, tag} (e.g. a router subinterface), or {svi:devId, vlan} (a switch's own SVI)
 // port security: a port accepts frames only from its secure MAC addresses (learned up to the maximum, or configured);
 // one more source MAC is a violation — shutdown (err-disable), restrict (drop + log + count) or protect (drop silently)
+// Dynamic ARP Inspection: an ARP on an untrusted port must match a DHCP snooping binding (or the VLAN's ARP ACL)
+function daiCheck(B, sw, ios, f, vlan, note){
+  const E = sw.env, S = E.daiStats = E.daiStats || {}, st = S[vlan] = S[vlan] || {fwd:0, drop:0, dhcpDrop:0, aclDrop:0};
+  const bind = Object.values(E.snoopBind || {}).find(b=>b.mac===f.src && b.vlan===vlan);
+  const aclName = E.dai.filters[vlan], acl = aclName && E.arpAcls[aclName], ae = acl && acl.find(e=>e.ip===f.arpIp && e.mac===f.src);
+  if (ae && ae.action==="permit"){ st.fwd++; return true; }
+  if (bind && bind.ip===f.arpIp){ st.fwd++; return true; }
+  st.drop++; if (ae) st.aclDrop++; else st.dhcpDrop++;
+  const tm = new Date(B.now || Date.UTC(2026,9,12,8,30)), two = x=>String(x).padStart(2,"0");
+  const when = `${two(tm.getUTCHours())}:${two(tm.getUTCMinutes())}:${two(tm.getUTCSeconds())} UTC ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][tm.getUTCDay()]} ${LMON[tm.getUTCMonth()]} ${tm.getUTCDate()} ${tm.getUTCFullYear()}`;
+  syslog(B, sw, `%SW_DAI-4-${ae ? "ACL_DENY" : "DHCP_SNOOPING_DENY"}: 1 Invalid ARPs (${f.arpOp==="req" ? "Req" : "Res"}) on ${shortIf(ios)}, vlan ${vlan}.([${f.src}/${f.arpIp}/${f.arpOp==="req" ? "0000.0000.0000" : f.dst}/${f.arpTarget||"0.0.0.0"}/${when}])`, true);
+  note(`${sw.label} ${shortIf(ios)} — <b>Dynamic ARP Inspection</b>: "${f.arpIp} is at ${f.src}" doesn't match any DHCP snooping binding${aclName ? " or ARP ACL " + aclName : ""} → dropped`);
+  return false;
+}
 function psecCheck(B, sw, ios, i, mac, vlan, note){
   i.psecMacs = i.psecMacs || []; const max = i.psecMax || 1, sh = shortIf(ios);
   if (i.psecMacs.some(m=>m.mac===mac)){ i.psecLast = {mac, vlan}; return true; }
@@ -404,6 +418,12 @@ function deliver(B, from, frame, step0){
       if (!d.env.vlans[v]){ pushNote(`${d.label} has no VLAN ${v} — frame dropped`); return; }
       if (stpStateOf(S, d, lp, v)!=="FWD"){ pushNote(`${d.label} ${lp.startsWith("po")?"Po"+lp.slice(2):shortIf(x.port.ios)} is blocking for VLAN ${v} (Spanning Tree) — frame discarded, no loop`); return; }
       if (i.psec && !lp.startsWith("po")){ const ok = psecCheck(B, d, x.port.ios, i, frame.src, v, pushNote); if (!ok) return; }
+      const pi = lpIntf(d, lp) || i, sh = lp.startsWith("po") ? "Po"+lp.slice(2) : shortIf(x.port.ios);
+      if (frame.kind==="dhcp" && d.env.snoop && d.env.snoop.on && d.env.snoop.vlans.includes(v) && !pi.snoopTrust){
+        if (/^(Offer|Ack|NAK)$/.test(frame.label)){ pushNote(`${d.label} ${sh} — <b>DHCP snooping</b>: a DHCP ${frame.label} is a SERVER message and this port is untrusted → dropped (only trusted ports may carry them)`); frame.snoopDropped = d.label; return; }
+        if (!frame.snoopClient) frame.snoopClient = {sw:d, ios:x.port.ios, vlan:v};
+        if (d.env.snoop.opt82 && !frame.opt82){ frame.opt82 = d.label; pushNote(`${d.label} ${sh} — DHCP snooping inserts <b>option 82</b> (relay agent information, giaddr 0.0.0.0) into the client's message`); } }
+      if (frame.kind==="arp" && d.env.dai && d.env.dai.vlans.includes(v) && !pi.daiTrust){ if (!daiCheck(B, d, x.port.ios, frame, v, pushNote)) return; }
       switchIn(d, lp, v, step); return;
     }
     if (d.kind==="hub"){ const key = d.id+"|"+tag; if (seen.has(key)){ storm = storm || {sw:d, vlan:tag}; return; } seen.add(key); pushNote(`${d.label} (hub) repeated the frame out every other port — every device on it sees it`); for (const p of d.ports) if (p.id!==x.port.id) sendPhys(d.id+":"+p.id, tag, step); return; }
@@ -411,7 +431,7 @@ function deliver(B, from, frame, step0){
       const i = d.env.intfs[x.port.ios]; if (!i || i.shut) return;
       let ln = null;
       const subs = Object.entries(d.env.intfs).filter(([n,s])=>s.sub && s.parent===x.port.ios && !s.shut);
-      if (tag==null){ ln = (i.ip || i.ip6 || i.ll || i.ip6en || i.ip6auto) ? x.port.ios : ((subs.find(([n,s])=>s.encapNative)||[])[0] || null); }
+      if (tag==null){ ln = (i.ip || i.ip6 || i.ll || i.ip6en || i.ip6auto || i.dhcpClient) ? x.port.ios : ((subs.find(([n,s])=>s.encapNative)||[])[0] || null); }
       else ln = (subs.find(([n,s])=>s.encap===tag && !s.encapNative)||[])[0] || null;
       if (!ln){ if (tag!=null) pushNote(`${d.label} has no subinterface for VLAN ${tag} on ${shortIf(x.port.ios)} — frame dropped`); return; }
       const li = d.env.intfs[ln];
@@ -465,7 +485,7 @@ function hop(B, node, nhIp, label, ttl){
   let entry = cache[nhIp];
   if (!entry){
     arped = true;
-    const req = deliver(B, fromSpec, {src:node.mac, dst:BCAST, kind:"arp", label:"ARP?"}, B.step);
+    const req = deliver(B, fromSpec, {src:node.mac, dst:BCAST, kind:"arp", label:"ARP?", arpIp:node.ip, arpOp:"req", arpTarget:nhIp}, B.step);
     if (req.storm){ out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast) from ${node.dev.label}: "Who has ${nhIp}?"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n)); B.step += 1; return Object.assign(out, {ok:false, arped:true, storm:true}); }
     out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast to ${BCAST}) from ${node.dev.label}: "Who has ${nhIp}? Tell ${node.ip}"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n));
     B.step += Math.max(1, ...req.hops.map(h=>h.step+1-B.step));
@@ -482,7 +502,8 @@ function hop(B, node, nhIp, label, ttl){
     const ownerFrom = owner.svi ? {svi:owner.dev.id, vlan:owner.vlan} : (owner.tag!=null ? {ref:owner.ref, tag:owner.tag} : owner.ref);   // a router subinterface answers with its 802.1Q tag
     const ownerCache = B.arp[owner.dev.id] || (B.arp[owner.dev.id] = {});
     ownerCache[node.ip] = {mac:node.mac, intf: owner.svi || owner.ios || "eth"};
-    const rep = deliver(B, ownerFrom, {src:ownerMac, dst:node.mac, kind:"arp", label:"ARP"}, B.step);
+    const rep = deliver(B, ownerFrom, {src:ownerMac, dst:node.mac, kind:"arp", label:"ARP", arpIp:nhIp, arpOp:"res", arpTarget:node.ip}, B.step);
+    if (!rep.recv.some(r=>r.dev===node.dev)){ delete ownerCache[node.ip]; }
     out.frames.push(...rep.hops); out.log.push(viaProxy ? `<b>Proxy ARP reply</b> (unicast) from ${owner.dev.label} ${shortIf(owner.ios)}: "${nhIp} is at ${ownerMac}" — the router answers with ITS OWN MAC because it has a route to ${nhIp} out of another interface` : `<b>ARP reply</b> (unicast) from ${owner.dev.label}: "${nhIp} is at ${ownerMac}"`, ...rep.notes.map(n=>"&nbsp;&nbsp;· "+n));
     if (viaProxy) B.proxied = (B.proxied||0) + 1;
     B.step += Math.max(1, ...rep.hops.map(h=>h.step+1-B.step));
@@ -758,7 +779,7 @@ function computeHsrp(B, hears){
   const key = (d, ios) => d.id+"|"+ios, mem = [];
   for (const d of routersOf(B)) for (const g of d.env.hsrpGroups()) if (g.up) mem.push(Object.assign({d, k:key(d, g.ios)}, g));
   const heard0 = m => { if (!hears.has(m.k)) hears.set(m.k, new Set(l3Hear(B, m.d, m.ios).map(h=>key(h.dev, h.ios)))); return hears.get(m.k); };
-  const heard = m => helloAcl(B, heard0(m), {src:(m.d.env.intfs[m.ios]||{}).ip, proto:"udp", sport:1985, dport:1985}, "224.0.0.2");
+  const heard = m => helloAcl(B, heard0(m), {src:(m.d.env.intfs[m.ios]||{}).ip, proto:"udp", sport:1985, dport:1985}, (m.d.env.intfs[m.ios]||{}).hsrpVer===2 ? "224.0.0.102" : "224.0.0.2");
   const out = {}, seen = new Set(); B._hsrpSeg = B._hsrpSeg || {}; B._hsrpSt = B._hsrpSt || {};
   for (const m of mem){ if (seen.has(m.k+"#"+m.grp)) continue;
     const grp = mem.filter(o=>o.grp===m.grp && (o===m || (heard(m).has(o.k) && heard(o).has(m.k)))); grp.forEach(o=>seen.add(o.k+"#"+o.grp));
@@ -803,13 +824,13 @@ function trace(B, node, dstIp){
 }
 function iosTraceText(t, dst){
   const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"], sil = t.silent || new Set();
-  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="prohib") L.push(`  ${k+1} ${h} !A  !A  !A`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(t.v6 ? `  ${k+1} ${h} !N  !N  !N` : `  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="prohib") L.push(`  ${k+1} ${h} !A  *  !A`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(t.v6 ? `  ${k+1} ${h} !N  !N  !N` : `  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
   if (!t.ok && !((t.kind==="netunreach" || t.kind==="prohib") && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
   return L.join("\n");
 }
 function winTraceText(t, dst){
   const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""], sil = t.silent || new Set();
-  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`${String(k+1).padStart(3)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="prohib") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Communication administratively prohibited.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Destination ${t.v6 ? "net" : "host"} unreachable.`); else L.push(`${String(k+1).padStart(3)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`${String(k+1).padStart(3)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="prohib") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Destination protocol unreachable.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Destination ${t.v6 ? "net" : "host"} unreachable.`); else L.push(`${String(k+1).padStart(3)}    <1 ms    <1 ms    <1 ms  ${h}`); });
   if (!t.ok && !((t.kind==="netunreach" || t.kind==="prohib") && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`${String(k).padStart(3)}     *        *        *     Request timed out.`);
   L.push("", "Trace complete."); return L.join("\n");
 }
@@ -977,12 +998,14 @@ function routerDora(B, r, ifn){ const i = r.env.intfs[ifn], node = routerNodeFor
 function doraCore(B, c, apply){
   B_ctx.B = B; B.step = 0; const frames = [], log = [], D = window.DHCP, d = c.self, ref = c.from;
   if (!ref || !linkUpAt(B, c.link)) return {ok:false, frames, log:[`No link — ${c.who} can't send a DHCP Discover`], why:"media"};
-  const disc = deliver(B, ref, {src:c.mac, dst:BCAST, kind:"dhcp", label:"Discover"}, B.step);
+  const df = {src:c.mac, dst:BCAST, kind:"dhcp", label:"Discover"}, disc = deliver(B, ref, df, B.step);
   dlog(B, frames, log, disc, `<b>DHCP Discover</b> (broadcast: 0.0.0.0 → 255.255.255.255, UDP 68 → 67) from ${c.label} (${c.mac}): "is there a DHCP server?"`);
-  let found = null;
+  const skip = new Set();
+  const search = () => { let found = null;
   for (const x of (disc.recv||[])){
-    const rd = x.dev, ifn = x.svi || x.ios; if (!rd.env || !rd.env.dhcp || !ifn || rd===d) continue;
+    const rd = x.dev, ifn = x.svi || x.ios; if (!rd.env || !rd.env.dhcp || !ifn || rd===d || skip.has(rd.id)) continue;
     const i = rd.env.intfs[ifn]; if (!i || !i.ip || i.shut) continue;
+    if (df.opt82 && !(rd.env.relayTrustAll || i.relayTrusted)){ log.push(`&nbsp;&nbsp;· ${rd.label} ${shortIf(ifn)} drops it: it carries option 82 from the DHCP-snooping switch ${df.opt82} with giaddr 0.0.0.0, which an IOS DHCP server/relay doesn't trust — fix: <b>no ip dhcp snooping information option</b> on the switch, or <b>ip dhcp relay information trust-all</b> on the router`); continue; }
     { const tmp = {path:[], srcAt:[], portAt:[], log:[]}; if (aclGate(B, tmp, rd, ifn, "in", {src:"0.0.0.0", proto:"udp", sport:68, dport:67}, "255.255.255.255")){ log.push(...tmp.log.map(x=>"&nbsp;&nbsp;· " + x.replace(/^&nbsp;&nbsp;· /,""))); continue; } }
     if (rd.env.serviceDhcp===false){ log.push(`&nbsp;&nbsp;· ${rd.label} heard it, but <b>no service dhcp</b> switches off both its DHCP server and its relay`); continue; }
     if (D.poolFor(rd.env.dhcp, i.ip)){ found = {srv:rd, srvIp:i.ip, via:i.ip, relay:null, iface:ifn, near:routerNodeFor(rd, ifn)}; break; }
@@ -997,24 +1020,35 @@ function doraCore(B, c, apply){
       if (!D.poolFor(sv.env.dhcp, i.ip)){ log.push(`&nbsp;&nbsp;· ${sv.label} got the relayed Discover, but none of its pools covers giaddr ${i.ip} — no Offer`); continue; }
       const back = sendIp(B, nodeFromFinal(B, go.final), i.ip, "DHCP Offer (to the relay)", {src:h, proto:"udp", sport:67, dport:67}); frames.push(...back.frames); log.push(...back.log);
       if (!back.ok){ log.push(`&nbsp;&nbsp;· ${sv.label} has no route back to the relay address ${i.ip} — its Offer never arrives`); continue; }
-      found = {srv:sv, srvIp:sv.env.intfs[sIf].ip, via:i.ip, relay:rd, iface:"Unknown", near:routerNodeFor(rd, ifn)}; break; }
+      found = {srv:sv, srvIp:sv.env.intfs[sIf].ip, via:i.ip, relay:rd, iface:"Unknown", near:routerNodeFor(rd, ifn), key:rd.id}; break; }
     if (found) break;
   }
+  return found; };
+  let found = search(), o = null, pool = null, st = null, q = null, nf = null, nm = null, by = null;
+  for (let tries = 0; found && tries < 5; tries++){
+    st = found.srv.env.dhcp; pool = window.DHCP.poolFor(st, found.via);
+    q = {mac:c.mac, cid:c.cid, via:found.via, iface:found.iface, now:B.now, want:c.want || null,
+      own: ip => Object.values(found.srv.env.intfs).some(x=>x.ip===ip),
+      inUse: ip => { const ow = ipOwner(B, ip); return !!ow && ow.dev!==d; }};
+    o = D.offer(st, q);
+    for (const m of (o.logs||[])){ syslog(B, found.srv, m, true); log.push(`&nbsp;&nbsp;· ${found.srv.label} pings each address before offering it — this one answered, so it logs <code>${m}</code>, sets it aside as a conflict and tries the next`); }
+    if (o.err) break;
+    nf = fromOf(found.near); nm = found.near.mac; by = found.relay ? `${found.relay.label} (relaying for ${found.srv.label})` : found.srv.label;
+    const ofr = {src:nm, dst:c.mac, kind:"dhcp", label:"Offer"}, of = deliver(B, nf, ofr, B.step);
+    dlog(B, frames, log, of, `<b>DHCP Offer</b> from ${by}: "you can have ${o.ip} ${o.mask}${o.routers[0] ? ", gateway " + o.routers[0] : ", no default gateway"}${o.dns.length ? ", DNS " + o.dns.join(", ") : ""}, lease ${leaseText(o.leaseMs)}" (pool ${pool.name})`);
+    if (of.recv.some(r=>r.dev===d)) break;
+    log.push(`&nbsp;&nbsp;· the Offer from ${found.srv.label} never reaches ${c.label}${ofr.snoopDropped ? " (DHCP snooping on " + ofr.snoopDropped + " dropped it)" : ""}`); skip.add(found.key || found.srv.id); found = search(); o = null; }
   if (!found){ log.push(c.who==="IOS" ? "No DHCP Offer came back — the interface stays unassigned and IOS keeps asking" : "No DHCP Offer came back. Windows keeps trying and meanwhile gives itself an <b>APIPA</b> address (169.254.x.x, mask 255.255.0.0) — usable only with other APIPA hosts on the same link"); return {ok:false, frames, log, why:"nooffer"}; }
-  const st = found.srv.env.dhcp, pool = D.poolFor(st, found.via);
-  const q = {mac:c.mac, cid:c.cid, via:found.via, iface:found.iface, now:B.now, want:c.want || null,
-    own: ip => Object.values(found.srv.env.intfs).some(x=>x.ip===ip),
-    inUse: ip => { const o = ipOwner(B, ip); return !!o && o.dev!==d; }};
-  const o = D.offer(st, q);
-  for (const m of (o.logs||[])){ syslog(B, found.srv, m, true); log.push(`&nbsp;&nbsp;· ${found.srv.label} pings each address before offering it — this one answered, so it logs <code>${m}</code>, sets it aside as a conflict and tries the next`); }
   if (o.err){ log.push(o.err==="exhausted" ? `${found.srv.label}: pool <b>${pool.name}</b> has no free address left (every one is leased, excluded or in conflict) — no Offer` : "No Offer"); return {ok:false, frames, log, why:o.err}; }
-  const nf = fromOf(found.near), nm = found.near.mac, by = found.relay ? `${found.relay.label} (relaying for ${found.srv.label})` : found.srv.label;
-  dlog(B, frames, log, deliver(B, nf, {src:nm, dst:c.mac, kind:"dhcp", label:"Offer"}, B.step), `<b>DHCP Offer</b> from ${by}: "you can have ${o.ip} ${o.mask}${o.routers[0] ? ", gateway " + o.routers[0] : ", no default gateway"}${o.dns.length ? ", DNS " + o.dns.join(", ") : ""}, lease ${leaseText(o.leaseMs)}" (pool ${pool.name})`);
-  dlog(B, frames, log, deliver(B, ref, {src:c.mac, dst:BCAST, kind:"dhcp", label:"Request"}, B.step), `<b>DHCP Request</b> (broadcast again) from ${c.label}: "I'll take ${o.ip} from server ${found.srvIp}" — broadcast, so any other server that made an offer knows it wasn't chosen`);
+  if (false) dlog(B, frames, log, deliver(B, nf, {src:nm, dst:c.mac, kind:"dhcp", label:"Offer"}, B.step), `<b>DHCP Offer</b> from ${by}: "you can have ${o.ip} ${o.mask}${o.routers[0] ? ", gateway " + o.routers[0] : ", no default gateway"}${o.dns.length ? ", DNS " + o.dns.join(", ") : ""}, lease ${leaseText(o.leaseMs)}" (pool ${pool.name})`);
+  const rqf = {src:c.mac, dst:BCAST, kind:"dhcp", label:"Request"};
+  dlog(B, frames, log, deliver(B, ref, rqf, B.step), `<b>DHCP Request</b> (broadcast again) from ${c.label}: "I'll take ${o.ip} from server ${found.srvIp}" — broadcast, so any other server that made an offer knows it wasn't chosen`);
   if (found.relay) log.push(`&nbsp;&nbsp;· ${found.relay.label} relays the Request to the server too`);
   D.bind(st, q, o);
   dlog(B, frames, log, deliver(B, nf, {src:nm, dst:c.mac, kind:"dhcp", label:"Ack"}, B.step), `<b>DHCP Ack</b> from ${by}: lease confirmed — ${c.label} now uses ${o.ip}`);
   apply(o, found);
+  // DHCP snooping records who got which address on which port — DAI checks ARP against this table
+  const sc = rqf.snoopClient || df.snoopClient; if (sc){ const E = sc.sw.env; E.snoopBind = E.snoopBind || {}; E.snoopBind[c.mac] = {mac:c.mac, ip:o.ip, vlan:sc.vlan, iface:sc.ios, lease: o.leaseMs==null ? 4294967295 : Math.round(o.leaseMs/1000) - 98}; log.push(`&nbsp;&nbsp;· ${sc.sw.label} adds a DHCP snooping binding: ${c.mac} = ${o.ip} on ${shortIf(sc.ios)}, VLAN ${sc.vlan}`); }
   return {ok:true, frames, log, ip:o.ip, server:found.srvIp};
 }
 function dhcpRenew(B, d){
@@ -1200,11 +1234,11 @@ function curlCmd(B, d, raw){
   if (!m) return "curl: try 'curl --help' for more information";
   const scheme = (m[1]||"http").toLowerCase(), host = m[2], port = +(m[3] || (scheme==="https" ? 443 : 80));
   let ip = host; if (ipToInt(host)==null){ const r = resolveWin(B, d, host); if (!r.ip) return `curl: (6) Could not resolve host: ${host}`; ip = r.ip; }
-  if (!d.ip) return `curl: (7) Failed to connect to ${host} port ${port} after 0 ms: Couldn't connect to server`;
+  if (!d.ip) return `curl: (7) Failed to connect to ${host}:${port} after 0 ms: Could not connect to server`;
   const t = tcpConnect(B, hostNode(d), ip, port); B.frames = t.frames; B.log = t.log;
-  if (!t.ok) return t.kind==="prohib" ? `curl: (7) Failed to connect to ${host} port ${port} after 12 ms: Couldn't connect to server` : `curl: (28) Failed to connect to ${host} port ${port} after 21045 ms: Couldn't connect to server`;
+  if (!t.ok) return t.kind==="prohib" ? `curl: (28) Failed to connect to ${host}:${port} after 21045 ms: Could not connect to server` : `curl: (28) Failed to connect to ${host}:${port} after 21037 ms: Could not connect to server`;
   const w = t.owner && t.owner.dev.services && t.owner.dev.services.web, wport = w ? (w.port || 80) : null;
-  if (!w || wport!==t.port) return `curl: (7) Failed to connect to ${host} port ${port} after 3 ms: Couldn't connect to server`;
+  if (!w || wport!==t.port) return `curl: (7) Failed to connect to ${host}:${port} after 2049 ms: Could not connect to server`;
   if (scheme==="https") return `curl: (35) schannel: next InitializeSecurityContext failed: SEC_E_INTERNAL_ERROR (0x80090304) - The Local Security Authority cannot be contacted`;
   B.log.push(`<b>HTTP</b> GET ${m[4]||"/"} → ${t.owner.dev.label} answers 200 OK`); (B.fetched = B.fetched || {})[d.id+">"+host] = true; if (host!==ip) B.fetched[d.id+">"+ip] = true;
   return `<!DOCTYPE html>\n<html><head><title>${w.title||t.owner.dev.label}</title></head>\n<body><h1>${w.title||t.owner.dev.label}</h1><p>${w.body||"It works."}</p></body></html>`;
@@ -1388,7 +1422,7 @@ function pcExec(B, d, line){
     const ttl = res.ttl || 128;
     if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${ip}: bytes=32 time<1ms TTL=${ttl}`).join("\n") + stat(4) + RTT;
     if (res.kind==="ttlexpired") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: TTL expired in transit.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
-    if (res.kind==="prohib") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Communication administratively prohibited.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
+    if (res.kind==="prohib") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination protocol unreachable.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="netunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination host unreachable.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="general" || res.kind==="noroute") return head + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") + stat(0);
     if (res.kind==="unreach") return head + [...Array(4)].map(()=>`Reply from ${d.ip}: Destination host unreachable.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
@@ -1397,12 +1431,12 @@ function pcExec(B, d, line){
   const ssh = raw.match(/^ssh\s+(?:-l\s+(\S+)\s+(\S+)|(\S+)@(\S+))$/i), tel = raw.match(/^telnet\s+(\S+)$/i);
   if (ssh || tel){
     const user = ssh ? (ssh[1]||ssh[3]) : null, ip = ssh ? (ssh[2]||ssh[4]) : tel[1];
-    if (!media || !d.ip) return `Connecting to ${ip}...Could not open connection to the host: Connect failed`;
+    if (!media || !d.ip) return `Connecting To ${ip}...Could not open connection to the host: Connect failed`;
     const port = ssh ? 22 : 23, tcp = tcpConnect(B, hostNode(d), ip, port); B.frames = tcp.frames; B.log = tcp.log;
     const o = tcp.owner || ipOwner(B, ip), p = {ok: tcp.ok};
     if (o && o.dev.env && tcp.ok){ const acl = o.dev.env.lines.vty.acl;   // access-class: only these sources may open a VTY session
       if (acl && o.dev.env.acl.lists[acl] && !window.ACL.check(o.dev.env.acl, acl, {src:tcp.src}).permit){ B.log.push(`<b>access-class ${acl} in</b> on ${o.dev.label}'s VTY lines doesn't permit ${tcp.src} — the router refuses the session`);
-        return ssh ? `kex_exchange_identification: read: Connection reset` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`; } }
+        return ssh ? `ssh: connect to host ${ip} port 22: Connection refused` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`; } }
     if (!p.ok || !o || !o.dev.env) return ssh ? `ssh: connect to host ${ip} port 22: Connection timed out` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`;
     const env = o.dev.env, vty = env.lines.vty;
     if (ssh){
@@ -1850,6 +1884,8 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
   // IP services (Module 7+)
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
+  snoopBound: (B, sw, mac) => { const d = B.devs[sw]; return !!(d && d.env && d.env.snoopBind && Object.values(d.env.snoopBind).some(b=>!mac || b.mac===mac)); },
+  daiDrops: (B, sw, vlan) => { const d = B.devs[sw]; const x = d && d.env && d.env.daiStats && d.env.daiStats[vlan]; return x ? x.drop : 0; },
   psecViolations: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i ? (i.psecViolCount||0) : 0; },
   secureMacs: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i && i.psecMacs ? i.psecMacs.map(m=>m.mac + ":" + m.type) : []; },
   aclHits: (B, r, name, seq) => { const d = B.devs[r]; const l = d && d.env && d.env.acl.lists[name]; const e = l && l.entries.find(x=>!x.remark && x.seq===seq); return e ? e.hits : 0; },

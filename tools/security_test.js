@@ -30,26 +30,26 @@ const mk = (r1x, r2x) => { const B = Bench.create({ devices: [
   const B = mk();
   ok(/Reply from 192\.168\.50\.20: bytes=32/.test(pc(B, "p1", "ping 192.168.50.20")), "baseline: PC1 pings WEB");
   ok(/<title>Payroll portal<\/title>/.test(pc(B, "p1", "curl http://192.168.50.20")), "baseline: curl gets the web page", pc(B, "p1", "curl http://192.168.50.20"));
-  ok(/curl: \(7\) Failed to connect to 192\.168\.50\.20 port 8080 after \d+ ms: Couldn't connect to server/.test(pc(B, "p1", "curl http://192.168.50.20:8080")), "nothing listens on 8080: connection refused (curl 7)");
+  ok(/curl: \(7\) Failed to connect to 192\.168\.50\.20:8080 after \d+ ms: Could not connect to server/.test(pc(B, "p1", "curl http://192.168.50.20:8080")), "nothing listens on 8080: connection refused (curl 7)");
   ok(/password: $/.test(pc(B, "p1", "ssh -l netops 192.168.50.1")), "baseline: SSH to R2 asks for the password", pc(B, "p1", "ssh -l netops 192.168.50.1")); }
 
 { // a standard ACL near the destination: block one host, allow the rest
   const B = mk(null, ["access-list 10 deny host 192.168.10.11", "access-list 10 permit any", "int g0/0", "ip access-group 10 out", "end"]);
   ok(/Reply from 192\.168\.50\.20: bytes=32/.test(pc(B, "p1", "ping 192.168.50.20")), "standard ACL 10 out on R2 G0/0: PC1 still gets through");
   const r = pc(B, "p2", "ping 192.168.50.20");
-  ok(/Reply from 10\.0\.12\.2: Communication administratively prohibited\./.test(r) && /Received = 4/.test(r), "PC2 is denied: R2 answers 'administratively prohibited' from the interface the packet came in on", r);
+  ok(/Reply from 10\.0\.12\.2: Destination protocol unreachable\./.test(r) && /Received = 4/.test(r), "PC2 is denied: R2 answers 'administratively prohibited' from the interface the packet came in on", r);
   ok(/ACL 10 out on R2 Gi0\/0 denies ICMP echo 192\.168\.10\.11 → 192\.168\.50\.20 — line 10 \(deny   192\.168\.10\.11\) drops it/.test(log(B)), "the frame log names the ACL, the direction and the line", log(B));
   const sh = cli(B, "r2", "show access-lists");
   ok(/10 deny   192\.168\.10\.11 \(4 matches\)/.test(sh) && /20 permit any \(4 matches\)/.test(sh), "counters: 4 echoes each", sh);
   ok(/  Outgoing access list is 10\n/.test(cli(B, "r2", "show ip interface g0/0")) && /interface GigabitEthernet0\/0\n ip address 192\.168\.50\.1 255\.255\.255\.0\n ip access-group 10 out/.test(cli(B, "r2", "show running-config")), "show ip interface + running-config show the ACL", cli(B, "r2", "show ip interface g0/0"));
-  ok(/  1    <1 ms    <1 ms    <1 ms  192\.168\.10\.1\n  2  10\.0\.12\.2  reports: Communication administratively prohibited\./.test(pc(B, "p2", "tracert 192.168.50.20")), "tracert: the blocking router reports it", pc(B, "p2", "tracert 192.168.50.20")); }
+  ok(/  1    <1 ms    <1 ms    <1 ms  192\.168\.10\.1\n  2  10\.0\.12\.2  reports: Destination protocol unreachable\./.test(pc(B, "p2", "tracert 192.168.50.20")), "tracert: the blocking router reports it", pc(B, "p2", "tracert 192.168.50.20")); }
 
 { // an extended ACL near the source: web yes, ping no (logged), and the implicit deny
   const B = mk(["access-list 110 permit tcp 192.168.10.0 0.0.0.255 host 192.168.50.20 eq www", "access-list 110 deny icmp any any echo log", "int g0/0", "ip access-group 110 in", "end"]);
   ok(/Payroll portal/.test(pc(B, "p1", "curl 192.168.50.20")), "extended ACL 110 in on R1 G0/0: web to WEB is permitted");
-  ok(/Communication administratively prohibited/.test(pc(B, "p1", "ping 192.168.50.20")) && /%SEC-6-IPACCESSLOGDP: list 110 denied icmp 192\.168\.10\.10 -> 192\.168\.50\.20 \(8\/0\), 1 packet/.test(cli(B, "r1", "show logging")), "ping denied by the 'log' line → %SEC-6-IPACCESSLOGDP", cli(B, "r1", "show logging"));
-  ok(/Communication administratively prohibited|timed out/.test(pc(B, "p1", "ping 10.0.12.2")), "anything not permitted (ping to R2's link) — implicit deny");
-  ok(/curl: \(7\) Failed to connect to 192\.168\.50\.20 port 443/.test(pc(B, "p1", "curl https://192.168.50.20")), "https (443) isn't permitted: refused at R1");
+  ok(/Destination protocol unreachable/.test(pc(B, "p1", "ping 192.168.50.20")) && /%SEC-6-IPACCESSLOGDP: list 110 denied icmp 192\.168\.10\.10 -> 192\.168\.50\.20 \(8\/0\), 1 packet/.test(cli(B, "r1", "show logging")), "ping denied by the 'log' line → %SEC-6-IPACCESSLOGDP", cli(B, "r1", "show logging"));
+  ok(/Destination protocol unreachable|timed out/.test(pc(B, "p1", "ping 10.0.12.2")), "anything not permitted (ping to R2's link) — implicit deny");
+  ok(/curl: \(28\) Failed to connect to 192\.168\.50\.20:443/.test(pc(B, "p1", "curl https://192.168.50.20")), "https (443) isn't permitted: refused at R1");
   cfg(["int g0/0", "no ip unreachables"])(B.devs.r1.env);
   ok(/Request timed out\./.test(pc(B, "p1", "ping 192.168.50.20")), "no ip unreachables: the denied ping just times out"); }
 
@@ -66,7 +66,7 @@ const mk = (r1x, r2x) => { const B = Bench.create({ devices: [
   const B = mk(null, ["access-list 15 permit host 192.168.10.10", "line vty 0 4", "access-class 15 in", "end"]);
   ok(/line vty 0 4\n access-class 15 in/.test(cli(B, "r2", "show running-config")), "running-config: access-class under line vty", cli(B, "r2", "show running-config"));
   ok(/password: $/.test(pc(B, "p1", "ssh -l netops 192.168.50.1")), "access-class 15: PC1 (permitted) gets the password prompt");
-  ok(/^kex_exchange_identification: read: Connection reset$/.test(pc(B, "p2", "ssh -l netops 192.168.50.1")) && /access-class 15 in/.test(log(B)), "PC2 is refused by the VTY access-class", pc(B, "p2", "ssh -l netops 192.168.50.1"));
+  ok(/^ssh: connect to host 192\.168\.50\.1 port 22: Connection refused$/.test(pc(B, "p2", "ssh -l netops 192.168.50.1")) && /access-class 15 in/.test(log(B)), "PC2 is refused by the VTY access-class", pc(B, "p2", "ssh -l netops 192.168.50.1"));
   ok(/Reply from 192\.168\.50\.1/.test(pc(B, "p2", "ping 192.168.50.1")), "access-class only guards the VTY lines — pings still work"); }
 
 { // IOS-originated traffic, DHCP through an ACL, an undefined ACL, sequence-numbered edits take effect at once
@@ -74,7 +74,7 @@ const mk = (r1x, r2x) => { const B = Bench.create({ devices: [
   ok(/U\.U\.U/.test(cli(B, "r1", "ping 192.168.50.20")) && /Success rate is 0 percent/.test(cli(B, "r1", "ping 192.168.50.20")), "IOS ping blocked by an ACL: U.U.U", cli(B, "r1", "ping 192.168.50.20"));
   ok(/  2 192\.168\.50\.20 \d msec/.test(cli(B, "r1", "traceroute 192.168.50.20")), "IOS traceroute probes with UDP, which NO-ICMP permits — so it still completes while ping fails", cli(B, "r1", "traceroute 192.168.50.20"));
   cfg(["ip access-list extended NO-UDP", "deny udp any any", "permit ip any any", "exit", "int g0/1", "ip access-group NO-UDP in", "end"])(B.devs.r2.env);
-  ok(/  1 10\.0\.12\.2 !A  !A  !A/.test(cli(B, "r1", "traceroute 192.168.50.20")), "an ACL that drops the UDP probes: traceroute shows !A at the blocking router", cli(B, "r1", "traceroute 192.168.50.20"));
+  ok(/  1 10\.0\.12\.2 !A  \*  !A/.test(cli(B, "r1", "traceroute 192.168.50.20")), "an ACL that drops the UDP probes: traceroute shows !A at the blocking router", cli(B, "r1", "traceroute 192.168.50.20"));
   cfg(["int g0/1", "ip access-group NO-ICMP in", "end"])(B.devs.r2.env);
   cfg(["ip access-list extended NO-ICMP", "5 permit icmp host 10.0.12.1 any", "end"])(B.devs.r2.env);
   ok(/!!!!!/.test(cli(B, "r1", "ping 192.168.50.20")), "a numbered line inserted at 5 takes effect immediately");
@@ -129,6 +129,44 @@ const mkSw = (swx, extra, cables) => Bench.create({ devices: [
   const B = mkSw(["int g0/2", "switchport mode access", "switchport port-security", "switchport port-security mac-address 0050.0000.beef"]);
   ok(!/Reply from 192\.168\.10\.1:/.test(pc(B, "p1", "ping 192.168.10.1")) && Bench.errdis(B, "sw", "g2")==="psecure-violation", "a configured (static) secure MAC that isn't PC1's: PC1 is a violation");
   ok(/0050\.0000\.beef\s+SecureConfigured\s+Gi0\/2/.test(cli(B, "sw", "show port-security address")), "show port-security address: SecureConfigured", cli(B, "sw", "show port-security address")); }
+
+// ---- Stage C: DHCP snooping and Dynamic ARP Inspection ----
+// R1 (the real DHCP server) on SW1 G0/1; staff PCs on G0/3 and G0/4; someone has plugged a home Wi-Fi router into G0/2
+const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
+    { id:"r1", kind:"router", label:"R1", x:0, y:0, config: cfg(["int g0/0","ip address 192.168.10.1 255.255.255.0","no shut","exit","ip dhcp excluded-address 192.168.10.1 192.168.10.9","ip dhcp pool STAFF","network 192.168.10.0 255.255.255.0","default-router 192.168.10.1","exit", ...(r1x||[])]) },
+    { id:"home", kind:"router", label:"HOME-WIFI", x:300, y:0, config: cfg(["int g0/0","ip address 10.99.99.1 255.255.255.0","no shut","exit","ip dhcp pool HOME","network 10.99.99.0 255.255.255.0","default-router 10.99.99.1","exit","ip dhcp relay information trust-all"]) },   // a consumer router ignores option 82
+    { id:"sw", kind:"switch", label:"SW1", x:0, y:200, config: cfg(swx||[]) },
+    { id:"p1", kind:"pc", label:"PC1", x:0, y:350, dhcp:true }, { id:"p2", kind:"pc", label:"PC2", x:100, y:350, dhcp:true }, ...(extra||[]) ],
+  cables: [{type:"cat6",a:"r1:g0",b:"sw:g8"},{type:"cat6",a:"home:g0",b:"sw:g2"},{type:"cat6",a:"p1:eth",b:"sw:g3"},{type:"cat6",a:"p2:eth",b:"sw:g4"}, ...((extra||[]).map((x,k)=>({type:"cat6",a:x.id+":eth",b:"sw:g"+(5+k)})))] });
+{ const B = mkSnoop();
+  const got = [B.devs.p1.ip, B.devs.p2.ip];
+  ok(got.some(ip=>/^10\.99\.99\./.test(ip||"")), "no snooping: at least one PC takes an address from the home Wi-Fi router (the rogue answers first)", JSON.stringify(got));
+  // turn on snooping (trust the uplink to R1); with the default option 82 insertion, R1 refuses the requests
+  const B2 = mkSnoop(["ip dhcp snooping", "ip dhcp snooping vlan 1", "int g0/8", "ip dhcp snooping trust"]);
+  Bench.act(B2, ["dhcp", "p1"]);
+  ok(B2.devs.p1.ip===null && /DHCP snooping: a DHCP Offer is a SERVER message and this port is untrusted → dropped/.test(log(B2)) && /carries option 82 from the DHCP-snooping switch SW1 with giaddr 0\.0\.0\.0/.test(log(B2)), "snooping on: the home router's Offer is dropped, and R1 refuses the option-82 Discover → no address", log(B2));
+  cfg(["no ip dhcp snooping information option"])(B2.devs.sw.env); Bench.act(B2, ["dhcp", "p1"]); Bench.act(B2, ["dhcp", "p2"]);
+  ok(/^192\.168\.10\./.test(B2.devs.p1.ip||"") && /^192\.168\.10\./.test(B2.devs.p2.ip||""), "no ip dhcp snooping information option: both PCs lease from R1 only", JSON.stringify([B2.devs.p1.ip, B2.devs.p2.ip]));
+  const sb = cli(B2, "sw", "show ip dhcp snooping binding");
+  ok(/^MacAddress          IpAddress        Lease\(sec\)  Type           VLAN  Interface\n------------------  ---------------  ----------  -------------  ----  --------------------\n/.test(sb) && new RegExp(B2.devs.p1.mac.replace(/\./g,"").match(/../g).join(":").toUpperCase() + "\\s+" + B2.devs.p1.ip.replace(/\./g,"\\.") + "\\s+\\d+\\s+dhcp-snooping  1     GigabitEthernet0/3").test(sb) && /Total number of bindings: 2/.test(sb), "show ip dhcp snooping binding", sb);
+  const ss = cli(B2, "sw", "show ip dhcp snooping");
+  ok(/^Switch DHCP snooping is enabled/.test(ss) && /DHCP snooping is operational on following VLANs:\n1\n/.test(ss) && /Insertion of option 82 is disabled/.test(ss) && /GigabitEthernet0\/8\s+yes\s+yes\s+unlimited/.test(ss), "show ip dhcp snooping", ss);
+  ok(/ip dhcp snooping vlan 1\nno ip dhcp snooping information option\nip dhcp snooping/.test(cli(B2, "sw", "show running-config")) && /interface GigabitEthernet0\/8\n ip dhcp snooping trust/.test(cli(B2, "sw", "show running-config")), "running-config", cli(B2, "sw", "show running-config"));
+  ok(Bench.snoopBound(B2, "sw", B2.devs.p2.mac), "task helper snoopBound");
+  const B3 = mkSnoop(["ip dhcp snooping", "ip dhcp snooping vlan 1", "int g0/8", "ip dhcp snooping trust"], ["ip dhcp relay information trust-all"]);
+  Bench.act(B3, ["dhcp", "p1"]); ok(/^192\.168\.10\./.test(B3.devs.p1.ip||""), "the other fix: ip dhcp relay information trust-all on R1"); }
+{ // DAI: DHCP clients pass (they have bindings); a static-IP printer is dropped until an ARP ACL allows it
+  const prn = [{ id:"prn", kind:"server", label:"PRINTER", x:200, y:350, ip:"192.168.10.5", mask:"255.255.255.0", gw:"192.168.10.1" }];
+  const B = mkSnoop(["ip dhcp snooping", "ip dhcp snooping vlan 1", "no ip dhcp snooping information option", "ip arp inspection vlan 1", "int g0/8", "ip dhcp snooping trust", "ip arp inspection trust"], null, prn);
+  Bench.act(B, ["dhcp", "p1"]);
+  ok(/Reply from 192\.168\.10\.1: bytes=32/.test(pc(B, "p1", "ping 192.168.10.1")), "DAI on: PC1's ARP matches its DHCP snooping binding — it works");
+  const r = pc(B, "prn", "ping 192.168.10.1");
+  ok(!/Reply from 192\.168\.10\.1:/.test(r) && Bench.daiDrops(B, "sw", 1) > 0 && /Dynamic ARP Inspection/.test(log(B)), "the static-IP printer has no binding: its ARP is dropped", log(B));
+  ok(/%SW_DAI-4-DHCP_SNOOPING_DENY: 1 Invalid ARPs \(Req\) on Gi0\/5, vlan 1\.\(\[[0-9a-f.]+\/192\.168\.10\.5\/0000\.0000\.0000\/192\.168\.10\.1\/08:30:00 UTC Mon Oct 12 2026\]\)/.test(cli(B, "sw", "show logging")), "syslog %SW_DAI-4-DHCP_SNOOPING_DENY", cli(B, "sw", "show logging"));
+  ok(/    1     Enabled          Active/.test(cli(B, "sw", "show ip arp inspection")) && /    1\s+\d+\s+[1-9]\d*\s+[1-9]\d*\s+0/.test(cli(B, "sw", "show ip arp inspection")), "show ip arp inspection: VLAN 1 active, drops counted", cli(B, "sw", "show ip arp inspection"));
+  cfg(["arp access-list STATIC-HOSTS", "permit ip host 192.168.10.5 mac host " + B.devs.prn.mac, "exit", "ip arp inspection filter STATIC-HOSTS vlan 1"])(B.devs.sw.env);
+  ok(/Reply from 192\.168\.10\.1: bytes=32/.test(pc(B, "prn", "ping 192.168.10.1")), "an ARP ACL entry for the printer (ip arp inspection filter): it works again");
+  ok(/ip arp inspection vlan 1\nip arp inspection filter STATIC-HOSTS vlan 1/.test(cli(B, "sw", "show running-config")) && /arp access-list STATIC-HOSTS\n permit ip host 192\.168\.10\.5 mac host /.test(cli(B, "sw", "show running-config")) && / ip arp inspection trust/.test(cli(B, "sw", "show running-config")), "running-config: DAI lines and the ARP ACL", cli(B, "sw", "show running-config")); }
 
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;
