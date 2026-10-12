@@ -197,7 +197,7 @@ function ios2Env(opts){
     if (st.serviceDhcp===false) L.push("no service dhcp");
     if (st.snoop.vlans.length) L.push(`ip dhcp snooping vlan ${compactList(st.snoop.vlans)}`); if (!st.snoop.opt82) L.push("no ip dhcp snooping information option"); if (st.snoop.on) L.push("ip dhcp snooping");
     if (st.dai.vlans.length) L.push(`ip arp inspection vlan ${compactList(st.dai.vlans)}`); if (st.dai.validate.length) L.push(`ip arp inspection validate ${st.dai.validate.join(" ")}`);
-    for (const [v, n] of Object.entries(st.dai.filters)) L.push(`ip arp inspection filter ${n} vlan ${v}`);
+    for (const [v, n] of Object.entries(st.dai.filters)) L.push(`ip arp inspection filter ${n} vlan ${v}${(st.dai.statics||{})[v] ? " static" : ""}`);
     if (st.relayTrustAll) L.push("ip dhcp relay information trust-all");
     if (st.secMinLen) L.push(`security passwords min-length ${st.secMinLen}`);
     if (st.loginBlock) L.push(`login block-for ${st.loginBlock.for} attempts ${st.loginBlock.attempts} within ${st.loginBlock.within}`); if (st.loginQuietAcl) L.push(`login quiet-mode access-class ${st.loginQuietAcl}`);
@@ -229,10 +229,10 @@ function ios2Env(opts){
           if (i.nonegotiate) L.push(" switchport nonegotiate");
           if (i.voiceVlan) L.push(` switchport voice vlan ${i.voiceVlan}`);
           if (i.daiTrust) L.push(" ip arp inspection trust"); if (i.snoopTrust) L.push(" ip dhcp snooping trust"); if (i.snoopRate) L.push(` ip dhcp snooping limit rate ${i.snoopRate}`);
-          if (i.psec){ if (i.psecMax && i.psecMax!==1) L.push(` switchport port-security maximum ${i.psecMax}`); if (i.psecViol && i.psecViol!=="shutdown") L.push(` switchport port-security violation ${i.psecViol}`);
-            for (const m of (i.psecMacs||[])) if (m.type==="static") L.push(` switchport port-security mac-address ${m.mac}`);
+          if (i.psec){ if (i.psecMax && i.psecMax!==1) L.push(` switchport port-security maximum ${i.psecMax}`); L.push(" switchport port-security");   // IOS order: maximum, enable, violation, MACs
+            if (i.psecViol && i.psecViol!=="shutdown") L.push(` switchport port-security violation ${i.psecViol}`);
             if (i.psecSticky) L.push(" switchport port-security mac-address sticky"); for (const m of (i.psecMacs||[])) if (m.type==="sticky") L.push(` switchport port-security mac-address sticky ${m.mac}`);
-            L.push(" switchport port-security"); }
+            for (const m of (i.psecMacs||[])) if (m.type==="static") L.push(` switchport port-security mac-address ${m.mac}`); }
           if (i.channel) L.push(` channel-group ${i.channel.group} mode ${i.channel.mode}`);
           const t = i.stp||{};
           if (t.portfast) L.push(" spanning-tree portfast"); if (t.bpduguard===true) L.push(" spanning-tree bpduguard enable"); if (t.bpduguard===false) L.push(" spanning-tree bpduguard disable");
@@ -735,6 +735,8 @@ function ios2Env(opts){
     X("show ip dhcp snooping", ()=>kind==="switch" ? snoopShow() : inv()), X("show ip dhcp snooping binding", ()=>kind==="switch" ? snoopBind() : inv()),
     X("show ip arp inspection", ()=>kind==="switch" ? daiShow() : inv()),
     X("show ip arp inspection vlan A:NUM", ()=>kind==="switch" ? daiShow() : inv()),
+    X("show ip arp inspection statistics", ()=>kind==="switch" ? daiStatsTable(st.dai.vlans) : inv()),
+    X("show ip arp inspection statistics vlan A:NUM", a=>kind==="switch" ? daiStatsTable([+a[0]]) : inv()),
     X("clear ip arp inspection statistics", ()=>{ st.daiStats = {}; return ""; }), X("clear ip dhcp snooping binding A:WORD", ()=>{ st.snoopBind = {}; return ""; }),
     X("show port-security", ()=>kind==="switch" ? psecShow() : inv()),
     X("show port-security interface A:IF", a=>{ const n = parseIf(a[0]); if (kind!=="switch" || !n || !st.intfs[n]) return inv(); return psecIf(n); }),
@@ -932,7 +934,8 @@ function ios2Env(opts){
       X("no ip arp inspection vlan A:LINE", a=>{ const v = parseVlanList(a[0]) || []; st.dai.vlans = st.dai.vlans.filter(x=>!v.includes(x)); return ""; }),
       X("ip arp inspection validate A:LINE", a=>{ const t = a[0].trim().split(/\s+/); if (t.some(x=>!["src-mac","dst-mac","ip"].includes(x))) return inv(); st.dai.validate = t; return ""; }),
       X("no ip arp inspection validate A:LINE", ()=>{ st.dai.validate = []; return ""; }),
-      X("ip arp inspection filter A:WORD vlan A:LINE", a=>{ const v = parseVlanList(a[1]); if (!v) return inv(); for (const x of v) st.dai.filters[x] = a[0]; return ""; }),
+      X("ip arp inspection filter A:WORD vlan A:LINE", a=>{ const m = a[1].trim().match(/^(\S+)(\s+static)?$/), v = m && parseVlanList(m[1]); if (!v) return inv();
+        st.dai.statics = st.dai.statics || {}; for (const x of v){ st.dai.filters[x] = a[0]; if (m[2]) st.dai.statics[x] = true; else delete st.dai.statics[x]; } return ""; }),   // static: the ACL alone decides (no binding fallback)
       X("no ip arp inspection filter A:WORD vlan A:LINE", a=>{ const v = parseVlanList(a[1]) || []; for (const x of v) delete st.dai.filters[x]; return ""; }),
       X("arp access-list A:WORD", a=>{ st.arpAcls[a[0]] = st.arpAcls[a[0]] || []; st.mode = "config-arp-nacl"; st.curArpAcl = a[0]; return ""; }),
       X("no arp access-list A:WORD", a=>{ delete st.arpAcls[a[0]]; return ""; }),
@@ -1132,15 +1135,22 @@ function ios2Env(opts){
       ...tr.flatMap(n=>[`${pad(n, 27)}${pad(st.intfs[n].snoopTrust ? "yes" : "no", 11)}${pad(st.intfs[n].snoopTrust ? "yes" : "no", 16)}${st.intfs[n].snoopRate || "unlimited"}`, "  Custom circuit-ids:"])].join("\n"); }
   function snoopBind(){ const B0 = st.snoopBind || {};
     return ["MacAddress          IpAddress        Lease(sec)  Type           VLAN  Interface", "------------------  ---------------  ----------  -------------  ----  --------------------",
-      ...Object.values(B0).map(b=>`${pad(macColon(b.mac), 20)}${pad(b.ip, 17)}${pad(String(b.lease), 12)}${pad("dhcp-snooping", 15)}${pad(String(b.vlan), 6)}${b.iface}`),
+      ...Object.values(B0).map(b=>`${pad(macColon(b.mac), 20)}${pad(b.ip, 17)}${pad(String(b.lease), 12)}${pad("dhcp-snooping", 16)}${pad(String(b.vlan), 6)}${b.iface}`),
       `Total number of bindings: ${Object.keys(B0).length}`].join("\n"); }
   function daiShow(){ const S0 = st.daiStats || {}; const vl = st.dai.vlans; const has = x => st.dai.validate.includes(x) ? "Enabled" : "Disabled";
     return [`Source Mac Validation      : ${has("src-mac")}`, `Destination Mac Validation : ${has("dst-mac")}`, `IP Address Validation      : ${has("ip")}`, "",
       " Vlan     Configuration    Operation   ACL Match          Static ACL", " ----     -------------    ---------   ---------          ----------",
-      ...vl.map(v=>`${String(v).padStart(5)}     Enabled          ${pad(st.vlans[v] ? "Active" : "Inactive", 12)}${pad(st.dai.filters[v] || "", 19)}${st.dai.filters[v] ? "No" : ""}`.trimEnd()), "",
+      ...vl.map(v=>`${String(v).padStart(5)}     Enabled          ${pad(st.vlans[v] ? "Active" : "Inactive", 12)}${pad(st.dai.filters[v] || "", 19)}${st.dai.filters[v] ? ((st.dai.statics||{})[v] ? "Yes" : "No") : ""}`.trimEnd()), "",
       " Vlan     ACL Logging      DHCP Logging      Probe Logging", " ----     -----------      ------------      -------------", ...vl.map(v=>`${String(v).padStart(5)}     Deny             Deny              Off`), "",
-      " Vlan      Forwarded        Dropped     DHCP Drops      ACL Drops", " ----      ---------        -------     ----------      ---------",
-      ...vl.map(v=>{ const x = S0[v] || {}; return `${String(v).padStart(5)}${String(x.fwd||0).padStart(15)}${String(x.drop||0).padStart(15)}${String(x.dhcpDrop||0).padStart(15)}${String(x.aclDrop||0).padStart(15)}`; })].join("\n"); }
+      daiStatsTable(vl)].join("\n"); }
+  // the three counter blocks of show ip arp inspection [statistics]
+  function daiStatsTable(vl){ const S0 = st.daiStats || {}, n = (x, w) => String(x||0).padStart(w);
+    return [" Vlan      Forwarded        Dropped     DHCP Drops      ACL Drops", " ----      ---------        -------     ----------      ---------",
+      ...vl.map(v=>{ const x = S0[v] || {}; return `${String(v).padStart(5)}${n(x.fwd,15)}${n(x.drop,15)}${n(x.dhcpDrop,15)}${n(x.aclDrop,15)}`; }), "",
+      " Vlan   DHCP Permits    ACL Permits  Probe Permits   Source MAC Failures", " ----   ------------    -----------  -------------   -------------------",
+      ...vl.map(v=>{ const x = S0[v] || {}; return `${String(v).padStart(5)}${n(x.dhcpPermit,15)}${n(x.aclPermit,15)}${n(0,15)}${n(0,22)}`; }), "",
+      " Vlan   Dest MAC Failures   IP Validation Failures   Invalid Protocol Data", " ----   -----------------   ----------------------   ---------------------",
+      ...vl.map(v=>`${String(v).padStart(5)}${n(0,20)}${n(0,25)}${n(0,24)}`)].join("\n"); }
   const normMac = m => { const h = String(m).toLowerCase().replace(/[^0-9a-f]/g, ""); return h.length===12 ? h.match(/.{4}/g).join(".") : null; };
   // port security works on static access (or trunk) ports only — a dynamic (DTP) port refuses it, like IOS
   function psec(fn, sub){ if (kind!=="switch") return inv();
@@ -1358,7 +1368,7 @@ function ios2Env(opts){
     return line;
   };
   // console/SSH session start: banner + login prompt when the line asks for it
-  const stamp = () => { const t = new Date(clockMs()), two = x=>String(x).padStart(2,"0"); return `${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())} UTC ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`; };
+  const stamp = () => { const t = new Date(hooks.logNow ? hooks.logNow() : clockMs()), two = x=>String(x).padStart(2,"0"); return `${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())} UTC ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`; };
   const quietNow = () => { if (st.quietUntil && hooks.now() >= st.quietUntil){ st.quietUntil = null; hooks.emit(`%SEC_LOGIN-5-QUIET_MODE_OFF: Quiet Mode is OFF, because block period timed out at ${stamp()}`); } return !!st.quietUntil; };
   // may <src> open a session now? (quiet mode refuses everyone the quiet-mode access-class doesn't permit)
   st.loginAllowed = src => { if (!quietNow()) return true; const acl = st.loginQuietAcl; return !!(acl && st.acl.lists[acl] && window.ACL.check(st.acl, acl, {src}, false).permit); };

@@ -148,7 +148,7 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   cfg(["no ip dhcp snooping information option"])(B2.devs.sw.env); Bench.act(B2, ["dhcp", "p1"]); Bench.act(B2, ["dhcp", "p2"]);
   ok(/^192\.168\.10\./.test(B2.devs.p1.ip||"") && /^192\.168\.10\./.test(B2.devs.p2.ip||""), "no ip dhcp snooping information option: both PCs lease from R1 only", JSON.stringify([B2.devs.p1.ip, B2.devs.p2.ip]));
   const sb = cli(B2, "sw", "show ip dhcp snooping binding");
-  ok(/^MacAddress          IpAddress        Lease\(sec\)  Type           VLAN  Interface\n------------------  ---------------  ----------  -------------  ----  --------------------\n/.test(sb) && new RegExp(B2.devs.p1.mac.replace(/\./g,"").match(/../g).join(":").toUpperCase() + "\\s+" + B2.devs.p1.ip.replace(/\./g,"\\.") + "\\s+\\d+\\s+dhcp-snooping  1     GigabitEthernet0/3").test(sb) && /Total number of bindings: 2/.test(sb), "show ip dhcp snooping binding", sb);
+  ok(/^MacAddress          IpAddress        Lease\(sec\)  Type           VLAN  Interface\n------------------  ---------------  ----------  -------------  ----  --------------------\n/.test(sb) && new RegExp(B2.devs.p1.mac.replace(/\./g,"").match(/../g).join(":").toUpperCase() + "\\s+" + B2.devs.p1.ip.replace(/\./g,"\\.") + "\\s+\\d+\\s+dhcp-snooping\\s+1\\s+GigabitEthernet0/3").test(sb) && /Total number of bindings: 2/.test(sb), "show ip dhcp snooping binding", sb);
   const ss = cli(B2, "sw", "show ip dhcp snooping");
   ok(/^Switch DHCP snooping is enabled/.test(ss) && /DHCP snooping is operational on following VLANs:\n1\n/.test(ss) && /Insertion of option 82 is disabled/.test(ss) && /GigabitEthernet0\/8\s+yes\s+yes\s+unlimited/.test(ss), "show ip dhcp snooping", ss);
   ok(/ip dhcp snooping vlan 1\nno ip dhcp snooping information option\nip dhcp snooping/.test(cli(B2, "sw", "show running-config")) && /interface GigabitEthernet0\/8\n ip dhcp snooping trust/.test(cli(B2, "sw", "show running-config")), "running-config", cli(B2, "sw", "show running-config"));
@@ -162,11 +162,24 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   ok(/Reply from 192\.168\.10\.1: bytes=32/.test(pc(B, "p1", "ping 192.168.10.1")), "DAI on: PC1's ARP matches its DHCP snooping binding — it works");
   const r = pc(B, "prn", "ping 192.168.10.1");
   ok(!/Reply from 192\.168\.10\.1:/.test(r) && Bench.daiDrops(B, "sw", 1) > 0 && /Dynamic ARP Inspection/.test(log(B)), "the static-IP printer has no binding: its ARP is dropped", log(B));
-  ok(/%SW_DAI-4-DHCP_SNOOPING_DENY: 1 Invalid ARPs \(Req\) on Gi0\/5, vlan 1\.\(\[[0-9a-f.]+\/192\.168\.10\.5\/0000\.0000\.0000\/192\.168\.10\.1\/08:30:00 UTC Mon Oct 12 2026\]\)/.test(cli(B, "sw", "show logging")), "syslog %SW_DAI-4-DHCP_SNOOPING_DENY", cli(B, "sw", "show logging"));
+  ok(/%SW_DAI-4-DHCP_SNOOPING_DENY: 1 Invalid ARPs \(Req\) on Gi0\/5, vlan 1\.\(\[[0-9a-f.]+\/192\.168\.10\.5\/0000\.0000\.0000\/192\.168\.10\.1\/\d\d:\d\d:\d\d UTC Mon Oct 12 2026\]\)/.test(cli(B, "sw", "show logging")), "syslog %SW_DAI-4-DHCP_SNOOPING_DENY", cli(B, "sw", "show logging"));
   ok(/    1     Enabled          Active/.test(cli(B, "sw", "show ip arp inspection")) && /    1\s+\d+\s+[1-9]\d*\s+[1-9]\d*\s+0/.test(cli(B, "sw", "show ip arp inspection")), "show ip arp inspection: VLAN 1 active, drops counted", cli(B, "sw", "show ip arp inspection"));
   cfg(["arp access-list STATIC-HOSTS", "permit ip host 192.168.10.5 mac host " + B.devs.prn.mac, "exit", "ip arp inspection filter STATIC-HOSTS vlan 1"])(B.devs.sw.env);
   ok(/Reply from 192\.168\.10\.1: bytes=32/.test(pc(B, "prn", "ping 192.168.10.1")), "an ARP ACL entry for the printer (ip arp inspection filter): it works again");
-  ok(/ip arp inspection vlan 1\nip arp inspection filter STATIC-HOSTS vlan 1/.test(cli(B, "sw", "show running-config")) && /arp access-list STATIC-HOSTS\n permit ip host 192\.168\.10\.5 mac host /.test(cli(B, "sw", "show running-config")) && / ip arp inspection trust/.test(cli(B, "sw", "show running-config")), "running-config: DAI lines and the ARP ACL", cli(B, "sw", "show running-config")); }
+  ok(/ip arp inspection vlan 1\nip arp inspection filter STATIC-HOSTS vlan 1/.test(cli(B, "sw", "show running-config")) && /arp access-list STATIC-HOSTS\n permit ip host 192\.168\.10\.5 mac host /.test(cli(B, "sw", "show running-config")) && / ip arp inspection trust/.test(cli(B, "sw", "show running-config")), "running-config: DAI lines and the ARP ACL", cli(B, "sw", "show running-config"));
+  const dl = cli(B, "sw", "show logging").split("\n").find(l=>/%SW_DAI-4-DHCP_SNOOPING_DENY/.test(l)) || "", hm = dl.match(/^\*?\w{3} \d+ (\d\d:\d\d:\d\d)\.\d{3}: .*\/(\d\d:\d\d:\d\d) UTC/);
+  ok(hm && hm[1]===hm[2], "the time inside the DAI message is the log line's own time", dl);
+  const stt = cli(B, "sw", "show ip arp inspection statistics");
+  ok(/ Vlan   DHCP Permits    ACL Permits  Probe Permits   Source MAC Failures/.test(stt) && /    1\s+[1-9]\d*\s+[1-9]\d*\s+0\s+0/.test(stt.split("Source MAC Failures")[1]) && /IP Validation Failures/.test(stt), "show ip arp inspection statistics: DHCP and ACL permits counted", stt);
+  // "static": only the ARP ACL counts — PC1's DHCP binding no longer lets it through
+  cfg(["ip arp inspection filter STATIC-HOSTS vlan 1 static"])(B.devs.sw.env); pc(B, "p1", "arp -d");
+  ok(!/Reply from 192\.168\.10\.1: bytes=32/.test(pc(B, "p1", "ping 192.168.10.1")) && /Reply from 192\.168\.10\.1: bytes=32/.test((pc(B, "prn", "arp -d"), pc(B, "prn", "ping 192.168.10.1"))) && /STATIC-HOSTS\s+Yes/.test(cli(B, "sw", "show ip arp inspection")) && /ip arp inspection filter STATIC-HOSTS vlan 1 static/.test(cli(B, "sw", "show running-config")), "filter … static: the DHCP binding is ignored — PC1 dropped, the printer (in the ACL) still works", cli(B, "sw", "show ip arp inspection")); }
+{ // port-security running-config order and the switch's link-down log order
+  const B = mkSw(["int g0/2", "switchport mode access", "switchport port-security maximum 2", "switchport port-security", "switchport port-security violation restrict", "switchport port-security mac-address sticky"]);
+  pc(B, "p1", "ping 192.168.10.1");
+  ok(/ switchport mode access\n switchport port-security maximum 2\n switchport port-security\n switchport port-security violation restrict\n switchport port-security mac-address sticky\n switchport port-security mac-address sticky [0-9a-f.]+\n/.test(cli(B, "sw", "show running-config")), "running-config: maximum, enable, violation, sticky, sticky MACs (IOS order)", cli(B, "sw", "show running-config"));
+  Bench.act(B, ["unplug", "p1:eth"]); const lg = cli(B, "sw", "show logging");
+  ok(/%LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0\/2, changed state to down\n.*%LINK-3-UPDOWN: Interface GigabitEthernet0\/2, changed state to down/.test(lg), "unplugged: the switch logs line protocol down, then link down", lg); }
 
 { // stage D — device access hardening
   const B = mk(null, ["security passwords min-length 10"]);
@@ -179,7 +192,7 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   const third = pc(B2, "p2", "bad3");
   ok(/netops@192\.168\.50\.1: Permission denied \(password\)/.test(third) && Bench.loginFailures(B2, "r2")===3 && Bench.quietMode(B2, "r2"), "three wrong SSH passwords → quiet mode", third + "\nfails=" + Bench.loginFailures(B2, "r2"));
   const lg = cli(B2, "r2", "show logging");
-  ok(/%SEC_LOGIN-4-LOGIN_FAILED: Login failed \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] at 08:30:00 UTC Mon Oct 12 2026/.test(lg) && /%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is \d+ secs, \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] \[ACL: sl_def_acl\] at /.test(lg), "syslog: LOGIN_FAILED ×3 then QUIET_MODE_ON", lg);
+  ok(/%SEC_LOGIN-4-LOGIN_FAILED: Login failed \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] at \d\d:\d\d:\d\d UTC Mon Oct 12 2026/.test(lg) && /%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is \d+ secs, \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] \[ACL: sl_def_acl\] at /.test(lg), "syslog: LOGIN_FAILED ×3 then QUIET_MODE_ON", lg);
   ok(/ssh: connect to host 192\.168\.50\.1 port 22: Connection refused/.test(pc(B2, "p2", "ssh -l netops 192.168.50.1")), "quiet mode: PC2 is refused");
   ok(/password: $/.test(pc(B2, "p1", "ssh -l netops 192.168.50.1")), "quiet mode: PC1 is permitted by the quiet-mode access-class ADMINS");
   pc(B2, "p1", "Adm1n!"); cli(B2, "r2", "en"); ok(Bench.remoteTo(B2, "p1")==="192.168.50.1" && /%SEC_LOGIN-5-LOGIN_SUCCESS: Login Success \[user: netops\] \[Source: 192\.168\.10\.10\] \[localport: 22\] at /.test(cli(B2, "r2", "show logging")), "PC1 logs in; LOGIN_SUCCESS logged");

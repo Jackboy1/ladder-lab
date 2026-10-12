@@ -336,13 +336,14 @@ function stpStateOf(S, d, lp, v){ const x = S.stp[d.id] && S.stp[d.id][v]; if (!
 // one more source MAC is a violation — shutdown (err-disable), restrict (drop + log + count) or protect (drop silently)
 // Dynamic ARP Inspection: an ARP on an untrusted port must match a DHCP snooping binding (or the VLAN's ARP ACL)
 function daiCheck(B, sw, ios, f, vlan, note){
-  const E = sw.env, S = E.daiStats = E.daiStats || {}, st = S[vlan] = S[vlan] || {fwd:0, drop:0, dhcpDrop:0, aclDrop:0};
+  const E = sw.env, S = E.daiStats = E.daiStats || {}, st = S[vlan] = S[vlan] || {fwd:0, drop:0, dhcpDrop:0, aclDrop:0, dhcpPermit:0, aclPermit:0};
   const bind = Object.values(E.snoopBind || {}).find(b=>b.mac===f.src && b.vlan===vlan);
   const aclName = E.dai.filters[vlan], acl = aclName && E.arpAcls[aclName], ae = acl && acl.find(e=>e.ip===f.arpIp && e.mac===f.src);
-  if (ae && ae.action==="permit"){ st.fwd++; return true; }
-  if (bind && bind.ip===f.arpIp){ st.fwd++; return true; }
+  if (ae && ae.action==="permit"){ st.fwd++; st.aclPermit++; return true; }
+  const statik = aclName && (E.dai.statics||{})[vlan];   // "filter … static": the ARP ACL alone decides
+  if (!statik && bind && bind.ip===f.arpIp){ st.fwd++; st.dhcpPermit++; return true; }
   st.drop++; if (ae) st.aclDrop++; else st.dhcpDrop++;
-  const tm = new Date(B.now || Date.UTC(2026,9,12,8,30)), two = x=>String(x).padStart(2,"0");
+  const c1 = (B.clock||0) + 1, tm = new Date((B.now || Date.UTC(2026,9,12,8,30)) + c1*7000 + (c1*137)%1000), two = x=>String(x).padStart(2,"0");
   const when = `${two(tm.getUTCHours())}:${two(tm.getUTCMinutes())}:${two(tm.getUTCSeconds())} UTC ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][tm.getUTCDay()]} ${LMON[tm.getUTCMonth()]} ${tm.getUTCDate()} ${tm.getUTCFullYear()}`;
   syslog(B, sw, `%SW_DAI-4-${ae ? "ACL_DENY" : "DHCP_SNOOPING_DENY"}: 1 Invalid ARPs (${f.arpOp==="req" ? "Req" : "Res"}) on ${shortIf(ios)}, vlan ${vlan}.([${f.src}/${f.arpIp}/${f.arpOp==="req" ? "0000.0000.0000" : f.dst}/${f.arpTarget||"0.0.0.0"}/${when}])`, true);
   note(`${sw.label} ${shortIf(ios)} — <b>Dynamic ARP Inspection</b>: "${f.arpIp} is at ${f.src}" doesn't match any DHCP snooping binding${aclName ? " or ARP ACL " + aclName : ""} → dropped`);
@@ -1294,6 +1295,7 @@ function makeHooks(B, d){
     ether: () => { const S = l2State(B); return Object.values(S.bundles[d.id]||{}).map(G=>({group:G.group, proto:G.proto, up:G.up, members:G.members.map(m=>({name:m.ios, flag:m.flag}))})); },
     logs: () => (B.syslog[d.id]||[]).slice(),
     emit: msg => syslog(B, d, msg, true),
+    logNow: () => { const c1 = (B.clock||0) + 1; return (B.now || Date.UTC(2026, 9, 12, 8, 30)) + c1*7000 + (c1*137)%1000; },   // the time syslog() will stamp the next message with
     now: () => B.now || Date.UTC(2026, 9, 12, 8, 30),
     ntp: st => { computeL3(B); return ntpOf(B, d, 0); },   // refresh first: the cached answer is keyed to the network state
     dns: (name, servers) => { const fromNode = routerFrom(d); for (const ip of servers){ const r = dnsAsk(B, fromNode, ip, name, 0); if (r.reach) return {ip:r.ip, server:ip}; } return {ip:null, server:servers[0]}; },
@@ -1512,7 +1514,8 @@ function linkLogs(B){
     for (const p of d.ports){ if (!p.ios || !d.env.intfs[p.ios]) continue; const i = d.env.intfs[p.ios]; now[id+"|"+p.ios] = {up: !i.shut && linkUpAt(B, id+":"+p.id), shut: !!i.shut}; } }
   if (prev) for (const [k, v] of Object.entries(now)){ const o = prev[k]; if (!o || o.up===v.up) continue; if (v.shut || o.shut) continue;   // admin changes: the CLI printed them
     const [id, ios] = k.split("|"), d = B.devs[id], st = v.up ? "up" : "down";
-    syslog(B, d, `%LINK-3-UPDOWN: Interface ${ios}, changed state to ${st}`, true); syslog(B, d, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${ios}, changed state to ${st}`, true); }
+    const lk = `%LINK-3-UPDOWN: Interface ${ios}, changed state to ${st}`, lp = `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${ios}, changed state to ${st}`;
+    for (const m of (v.up || d.kind!=="switch" ? [lk, lp] : [lp, lk])) syslog(B, d, m, true); }   // going down, a Catalyst logs line protocol first
   B._linkPrev = now;
 }
 function openConsole(B, laptopId, s){
