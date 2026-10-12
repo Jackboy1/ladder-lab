@@ -140,7 +140,7 @@ const mkNat = (edgeX, extraPcs) => Bench.create({ devices: [
   const tr = cli(B, "edge", "show ip nat translations");
   ok(/icmp 203\.0\.113\.2:1\s+192\.168\.10\.10:1\s+198\.51\.100\.10:1\s+198\.51\.100\.10:1\n/.test(tr) && /icmp 203\.0\.113\.2:1024\s+192\.168\.10\.11:1\s+198\.51\.100\.10:1\s+198\.51\.100\.10:1024\n/.test(tr) && /Total number of translations: 2$/.test(tr), "show ip nat translations: PC2's id 1 is taken, so it becomes 1024", tr);
   const trc = pc(B, "p1", "tracert 198.51.100.10");
-  ok(/   1    <1 ms    <1 ms    <1 ms  192\.168\.10\.1\n   2    <1 ms    <1 ms    <1 ms  203\.0\.113\.1\n   3    <1 ms    <1 ms    <1 ms  198\.51\.100\.10\n/.test(trc), "tracert through PAT: every hop answers (its replies are translated back)", trc);
+  ok(/  1    <1 ms    <1 ms    <1 ms  192\.168\.10\.1\n  2    <1 ms    <1 ms    <1 ms  203\.0\.113\.1\n  3    <1 ms    <1 ms    <1 ms  198\.51\.100\.10\n/.test(trc), "tracert through PAT: every hop answers (its replies are translated back)", trc);
   ok(/Outside interfaces:\n  GigabitEthernet0\/1\nInside interfaces: \n  GigabitEthernet0\/0\n/.test(cli(B, "edge", "show ip nat statistics")), "show ip nat statistics names the inside and outside interfaces", cli(B, "edge", "show ip nat statistics"));
   cli(B, "edge", "clear ip nat translation *"); ok(/^Pro[^\n]*\nTotal number of translations: 0$/.test(cli(B, "edge", "show ip nat translations")), "clear ip nat translation *", cli(B, "edge", "show ip nat translations"));
   ok(/ip nat inside source list 1 interface GigabitEthernet0\/1 overload/.test(cli(B, "edge", "show running-config")) && /interface GigabitEthernet0\/0\n ip address 192\.168\.10\.1 255\.255\.255\.0\n ip nat inside/.test(cli(B, "edge", "show running-config")), "running-config: interface name expanded, ip nat inside under the interface", cli(B, "edge", "show running-config"));
@@ -331,6 +331,16 @@ const mkSvc = (r1x, r2x) => Bench.create({ devices: [
   ok(/^DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks:/.test(pc(B, "srv", "snmpget -v2c -c LabRO 10.0.12.2 sysUpTime.0")), "sysUpTimeInstance has no .0", pc(B, "srv", "snmpget -v2c -c LabRO 10.0.12.2 sysUpTime.0"));
   const w = pc(B, "srv", "snmpwalk -v2c -c LabRO 10.0.12.2");
   ok(/sysName\.0 = STRING: R2/.test(w) && /IF-MIB::ifOperStatus/.test(w), "snmpwalk with no object walks mib-2 (system and interfaces)", w); }
+{ // last format review: verbose NAT, aliases for pool addresses in use, NAK for a now-excluded address, "No response from server"
+  const B = mkNat(NATX.pat); pc(B, "p1", "ping 198.51.100.10");
+  ok(/icmp 203\.0\.113\.2:1[^\n]*\n  create: [^\n]*timeout: 00:01:00\n  Map-Id\(In\): 1\n  Mac-Address: 0000\.0000\.0000    Input-IDB: GigabitEthernet0\/0\n  entry-id: 0x0, use_count:0/.test(cli(B, "edge", "show ip nat translations verbose")), "show ip nat translations verbose (IOS XE layout)", cli(B, "edge", "show ip nat translations verbose"));
+  const B2 = mkNat(["access-list 1 permit 192.168.10.0 0.0.0.255", "ip nat pool PUB 203.0.113.3 203.0.113.4 netmask 255.255.255.248", "ip nat inside source list 1 pool PUB", "int g0/0", "ip nat inside", "int g0/1", "ip nat outside", "exit"]);
+  ok(!/203\.0\.113\.3/.test(cli(B2, "edge", "show ip aliases")), "an unused pool address isn't listed in show ip aliases");
+  pc(B2, "p1", "ping 198.51.100.10"); ok(/Dynamic\s+203\.0\.113\.3/.test(cli(B2, "edge", "show ip aliases")), "… it is once a translation uses it", cli(B2, "edge", "show ip aliases"));
+  const B3 = mk(); cfg(["ip dhcp excluded-address 192.168.10.12"])(B3.devs.r1.env); pc(B3, "p1", "ipconfig /renew");
+  ok(/DHCP NAK/.test(log(B3)) && B3.devs.p1.ip && B3.devs.p1.ip!=="192.168.10.12", "renewing an address that is now excluded: NAK, then a new lease", log(B3));
+  const B4 = mkSvc(); ok(/^Server:  UnKnown\nAddress:  192\.168\.20\.1\n\n\*\*\* UnKnown can't find portal\.hq\.example\.com: No response from server$/.test(pc(B4, "p2", "nslookup portal.hq.example.com")), "nslookup to a router that runs no DNS server: No response from server", pc(B4, "p2", "nslookup portal.hq.example.com")); }
+
 { const B = Bench.create({ devices: [
     { id:"r1", kind:"router", label:"R1", x:0, y:0, config: cfg(["int g0/0","ip address 10.5.5.1 255.255.255.252","no shut","exit","ip dhcp pool T","network 10.5.5.0 255.255.255.252"]) },
     { id:"p1", kind:"pc", label:"PC1", x:0, y:300, dhcp:true } ], cables: [{type:"cat6",a:"r1:g0",b:"p1:eth"}] });

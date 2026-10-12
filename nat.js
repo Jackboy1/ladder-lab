@@ -132,8 +132,9 @@ NAT.show = (st, ctx) => { bindIf(st, ctx);
   syncStatics(st);
   const rows = st.table.slice().sort((a,b)=>(!!b.proto - !!a.proto) || (toInt(a.il)-toInt(b.il)));
   return ["Pro  Inside global         Inside local          Outside local         Outside global",
-    ...rows.map(e=> e.proto ? `${pad(e.proto,5)}${pad(ep(e.ig,e.igp),22)}${pad(ep(e.il,e.ilp),22)}${pad(ep(e.ol,e.olp),22)}${ep(e.og,e.ogp)}`
-                            : `${pad("---",5)}${pad(e.ig,22)}${pad(e.il,22)}${pad("---",22)}---`), `Total number of translations: ${rows.length}`].join("\n");
+    ...rows.map((e, k)=> (e.proto ? `${pad(e.proto,5)}${pad(ep(e.ig,e.igp),22)}${pad(ep(e.il,e.ilp),22)}${pad(ep(e.ol,e.olp),22)}${ep(e.og,e.ogp)}`
+                            : `${pad("---",5)}${pad(e.ig,22)}${pad(e.il,22)}${pad("---",22)}---`)
+      + (ctx && ctx.verbose ? `\n  create: 10/12/26 08:30:07, use: 10/12/26 08:30:07, timeout: ${e.static && !e.proto ? "00:00:00" : e.proto==="icmp" ? "00:01:00" : e.proto ? "24:00:00" : "24:00:00"}\n  Map-Id(In): ${e.static ? 0 : 1}\n  Mac-Address: 0000.0000.0000    Input-IDB: GigabitEthernet0/0\n  entry-id: 0x${k.toString(16)}, use_count:${e.proto ? 0 : 1}` : "")), `Total number of translations: ${rows.length}`].join("\n");
 };
 NAT.stats = (st, ins, outs) => {
   syncStatics(st);

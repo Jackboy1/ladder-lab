@@ -3325,11 +3325,11 @@ ${K.out(`C:\\Users\\IB-PC>tracert 10.40.50.20
 
 Tracing route to 10.40.50.20 over a maximum of 30 hops
 
-   1    <1 ms    <1 ms    <1 ms  10.40.10.2
-   2    <1 ms    <1 ms    <1 ms  192.0.2.1
-   3    <1 ms    <1 ms    <1 ms  192.0.2.2
-   4    <1 ms    <1 ms    <1 ms  192.0.2.1
-   5    <1 ms    <1 ms    <1 ms  192.0.2.2
+  1    <1 ms    <1 ms    <1 ms  10.40.10.2
+  2    <1 ms    <1 ms    <1 ms  192.0.2.1
+  3    <1 ms    <1 ms    <1 ms  192.0.2.2
+  4    <1 ms    <1 ms    <1 ms  192.0.2.1
+  5    <1 ms    <1 ms    <1 ms  192.0.2.2
    ...`, "A loop. IB-GW1 has no route for Kano's LAN (10.40.50.0/24), so it uses its default to the ISP (192.0.2.1); the ISP's route for the company's whole 10.40.0.0/16 sends it back — until the TTL runs out. The cure is the missing specific route (you'll see below why Kano never advertised it).")}
 <h3>Three failure messages, three different places to look</h3>
 <div class="tablewrap"><table>
@@ -3375,7 +3375,7 @@ ${K.out(`C:\\Users\\PHONE-ADMIN>tracert 10.40.60.20
 
 Tracing route to 10.40.60.20 over a maximum of 30 hops
 
-   1    <1 ms    <1 ms    <1 ms  10.40.20.1
+  1    <1 ms    <1 ms    <1 ms  10.40.20.1
    2     *        *        *     Request timed out.
    3     *        *        *     Request timed out.
    ...`, "The first router that goes silent and stays silent is the first one with no route back to you.")}

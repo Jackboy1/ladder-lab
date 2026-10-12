@@ -88,7 +88,7 @@ DHCP.offer = (st, q) => {
   if (q.now!=null) st.bindings = st.bindings.filter(b=>b.expires==null || b.expires > q.now);
   const mine = st.bindings.find(b=>b.mac===q.mac && b.pool===p.name);
   const pack = ip => ({ ip, mask: lenMask(p.len), routers: p.routers.slice(), dns: p.dns.slice(), domain: p.domain, leaseMs: leaseMs(p), pool: p.name });
-  if (mine) return pack(mine.ip);                                         // a returning client keeps its address
+  if (mine && !excluded(st, toInt(mine.ip))) return pack(mine.ip);                                         // a returning client keeps its address
   const first = p.net + 1, last = p.net + 2**(32-p.len) - 2, size = last - first + 1;
   const free = n => { const ip = toIp(n); return n>=first && n<=last && !excluded(st, n) && !st.bindings.some(b=>b.ip===ip) && !st.conflicts.some(c=>c.ip===ip) && !(q.own && q.own(ip)); };
   const logs = [];

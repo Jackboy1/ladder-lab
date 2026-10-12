@@ -757,8 +757,8 @@ function iosTraceText(t, dst){
 }
 function winTraceText(t, dst){
   const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""], sil = t.silent || new Set();
-  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${String(k+1).padStart(2)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`  ${k+1}  ${h}  reports: Destination ${t.v6 ? "net" : "host"} unreachable.`); else L.push(`  ${String(k+1).padStart(2)}    <1 ms    <1 ms    <1 ms  ${h}`); });
-  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${String(k).padStart(2)}     *        *        *     Request timed out.`);
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`${String(k+1).padStart(3)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Destination ${t.v6 ? "net" : "host"} unreachable.`); else L.push(`${String(k+1).padStart(3)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`${String(k).padStart(3)}     *        *        *     Request timed out.`);
   L.push("", "Trace complete."); return L.join("\n");
 }
 
@@ -970,8 +970,10 @@ function dhcpRenew(B, d){
   log.push(`<b>DHCP Request</b> (unicast renewal) from ${d.label} to ${d.lease.server}: "may I keep ${d.ip}?" — with a lease in hand there's no Discover or Offer`, ...go.log);
   if (!go.ok || !sv || !sv.env || !sv.env.dhcp || sv.env.serviceDhcp===false){ log.push("&nbsp;&nbsp;· no answer from the server — the PC keeps its address until the lease runs out"); return {ok:false, frames, log}; }
   const st = sv.env.dhcp, pool = D.poolFor(st, d.ip);
-  const taken = st.bindings.find(b=>b.ip===d.ip && b.mac!==d.mac);
-  if (!pool || taken){ log.push(`<b>DHCP NAK</b> from ${sv.label}: ${d.ip} ${!pool ? "isn't in any of its pools any more" : "belongs to another client now"} — the PC drops it and starts again with a Discover`);
+  const taken = st.bindings.find(b=>b.ip===d.ip && b.mac!==d.mac) || (st.excluded||[]).some(x=>{ const n = ipToInt(d.ip); return n>=x[0] && n<=x[1]; });
+  const other = st.bindings.find(b=>b.ip===d.ip && b.mac!==d.mac);
+  if (!pool || taken){ log.push(`<b>DHCP NAK</b> from ${sv.label}: ${d.ip} ${!pool ? "isn't in any of its pools any more" : other ? "belongs to another client now" : "is now an excluded address"} — the PC drops it and starts again with a Discover`);
+    st.bindings = st.bindings.filter(b=>!(b.mac===d.mac && b.ip===d.ip)); d.lastIp = null;   // the server forgets the refused lease
     d.ip = null; d.mask = null; d.gw = null; return {ok:false, nak:true, frames, log}; }
   const o = { ip:d.ip, mask:d.mask, routers:pool.routers.slice(), dns:pool.dns.slice(), domain:pool.domain, leaseMs: pool.lease==="infinite" ? null : ((pool.lease[0]*24 + pool.lease[1])*60 + pool.lease[2]) * 60000, pool:pool.name };
   D.bind(st, {mac:d.mac, iface: (st.bindings.find(b=>b.mac===d.mac)||{}).iface || "Unknown", now:B.now}, o);
@@ -1047,7 +1049,7 @@ function dnsAnswer(B, dev, name, depth){
 function dnsAsk(B, fromNode, ip, name, depth){
   const o = ipOwner(B, ip); if (!o) return {reach:false};
   const w = udpTwoWay(B, fromNode, ip); if (!w.ok) return {reach:false};
-  const a = dnsAnswer(B, o.dev, name, depth); if (a.refused) return {reach:false};
+  const a = dnsAnswer(B, o.dev, name, depth); if (a.refused) return {reach:false, refused:true, server:ip};
   return {reach:true, ip:a.ip||null, auth:!!a.auth, nx:!!a.nx, server:ip, srvName: o.dev.services && o.dev.services.dns && o.dev.services.dns.name};
 }
 // Windows: add the connection's DNS suffix to a single-label name, ask the DNS servers in order
@@ -1064,6 +1066,7 @@ function nslookupText(B, d, name, server){
   const r = d.ip ? dnsAsk(B, hostNode(d), srv, fq, 0) : {reach:false};
   const head = `Server:  ${r.srvName || "UnKnown"}\nAddress:  ${srv}\n\n`;
   const to = "DNS request timed out.\n    timeout was 2 seconds.\n";
+  if (!r.reach && r.refused) return head + `*** UnKnown can't find ${name}: No response from server`;
   if (!r.reach) return to + "Server:  UnKnown\nAddress:  " + srv + "\n\n" + to.repeat(4) + "*** Request to UnKnown timed-out";
   if (!r.ip) return head + `*** ${r.srvName || "UnKnown"} can't find ${name}: Non-existent domain`;
   return head + (r.auth ? "" : "Non-authoritative answer:\n") + `Name:    ${fq}\nAddress:  ${r.ip}\n`;
@@ -1207,7 +1210,7 @@ function pcPrompt(B, d){ const r = B.remote[d.id]; if (r){ if (r.env.pending) re
 function pcExec(B, d, line){
   const r = B.remote[d.id];
   if (r){
-    const out = r.env.exec(line);
+    r.env.viaVty = {user: r.user || "", ip: d.ip}; let out; try { out = r.env.exec(line); } finally { r.env.viaVty = null; }
     if (out && out.logout){ delete B.remote[d.id]; return `\n[Connection to ${r.host} closed by foreign host]`; }
     if (out && out.reload){ delete B.remote[d.id]; return (out.text||"") + `\n[Connection to ${r.host} closed by foreign host]`; }
     return out;

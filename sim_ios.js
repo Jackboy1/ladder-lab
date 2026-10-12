@@ -704,7 +704,7 @@ function ios2Env(opts){
     X("show ip aliases", ()=>{ const rows = [];
       for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && !i.shut) rows.push(["Interface", i.ip]); }
       for (const x of st.nat.statics) if (x.global && ifNames().some(n=>{ const i = st.intfs[n]; return i.ip && sameNet(i.ip, x.global, i.mask); })) rows.push(["Dynamic", x.global]);
-      for (const pl of Object.values(st.nat.pools)) for (let a = pl.start; a <= pl.end; a++){ const ip = [24,16,8,0].map(k=>Math.floor(a/2**k)%256).join("."); if (ifNames().some(n=>{ const i = st.intfs[n]; return i.ip && sameNet(i.ip, ip, i.mask); })) rows.push(["Dynamic", ip]); }
+      for (const pl of Object.values(st.nat.pools)) for (let a = pl.start; a <= pl.end; a++){ if (!(pl.used||{})[a]) continue; const ip = [24,16,8,0].map(k=>Math.floor(a/2**k)%256).join("."); if (ifNames().some(n=>{ const i = st.intfs[n]; return i.ip && sameNet(i.ip, ip, i.mask); })) rows.push(["Dynamic", ip]); }
       return "Address Type             IP Address      Port\n" + rows.map(r=>pad(r[0], 25) + r[1]).join("\n"); }), X("show ip nat statistics", ()=>{ const f = st.natIfs(); return window.NAT.stats(st.nat, f.ins, f.outs); }),
     X("show dhcp lease", ()=>{ const L = ifNames().filter(n=>st.intfs[n].dhcpClient); if (!L.length) return "";
       return L.map(n=>{ const i = st.intfs[n], z = i.dhcpLease; if (!i.ip || !z) return `Temp IP addr: 0.0.0.0  for peer on Interface: ${n}\n   State is Selecting`;
@@ -1011,7 +1011,7 @@ function ios2Env(opts){
     ],
     "config-vlan": [ X("name A:WORD", a=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=a[0].slice(0,32); return ""; }), X("no name", ()=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=`VLAN${String(v).padStart(4,"0")}`; return ""; }) ],
   };
-  const cfgDone = () => `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
+  const cfgDone = () => st.viaVty ? `%SYS-5-CONFIG_I: Configured from console by ${st.viaVty.user} on vty0 (${st.viaVty.ip})` : `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
   for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp"]) T[m].push(...cfgCommon);
 

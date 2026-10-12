@@ -72,7 +72,7 @@ const mk = (r1x, r2x, pcs) => Bench.create({ devices: [
 { // IPv6 traceroute needs a return path (R2 loses its default route back to R1's side)
   const B = mk(null, ["no ipv6 route ::/0 g0/1 fe80::12:1"]);
   const tr = pc(B, "p1", "tracert 2001:db8:acad:2::10");
-  ok(/   1    <1 ms    <1 ms    <1 ms  2001:db8:acad:1::1\n   2     \*        \*        \*     Request timed out\./.test(tr), "tracert -6: R2 and PC2 can't route back → * * * from hop 2", tr);
+  ok(/  1    <1 ms    <1 ms    <1 ms  2001:db8:acad:1::1\n  2     \*        \*        \*     Request timed out\./.test(tr), "tracert -6: R2 and PC2 can't route back → * * * from hop 2", tr);
   const ntr = pc(B, "p1", "tracert 2001:db8:acad:99::1");
   ok(/  1  2001:db8:acad:1::1  reports: Destination net unreachable\./.test(ntr), "tracert -6 to a prefix R1 has no route for: 'Destination net unreachable.'", ntr); }
 { const e = SIM.ios2Env({kind:"router"}); for (const c of ["en","conf t","int g0/0","ipv6 address 2001:db8:5::1/64","no shut","int g0/1","no shut","ipv6 address 2001:db8:5::2/64","end"]) e.exec(c);
