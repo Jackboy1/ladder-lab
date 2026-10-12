@@ -14,11 +14,10 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 **1. IT Support & Hardware (CompTIA A+ Core 1 & 2 level)**
 ⬜ M1 Inside the computer: CPU, RAM, storage, motherboards, power, building and upgrading a PC
 ⬜ M2 Operating systems: Windows install/repair, settings, Control Panel vs Settings, macOS & Linux basics
-⬜ M3 Windows command line & disk management: `cmd`/PowerShell, copy/xcopy/robocopy, chkdsk, sfc/DISM, diskpart
+⬜ M3 Windows command line & disk management: `cmd`/PowerShell, copy/xcopy/robocopy, chkdsk, sfc/DISM, diskpart, PowerShell scripting for everyday admin tasks
 ⬜ M4 Networks for support: IP config, DHCP vs static, DNS, Wi-Fi, shared printers, mapped drives
 ⬜ M5 Active Directory & accounts: domains vs workgroups, joining a domain, users/groups/OUs, password resets, GPO basics, Microsoft 365/Entra ID
 ⬜ M6 Troubleshooting methodology & customer service: the CompTIA 7 steps, tickets, SLAs, talking to users
-✅ M7 IP services — 8 lessons (DHCP server and the Windows client; relay with ip helper-address and the router as DHCP client; DNS; NAT and static/dynamic NAT; PAT, port forwarding and NAT troubleshooting; NTP and syslog; SNMP and TFTP backups; QoS + 6-fault challenge + portfolio project); 16 benches, 8 terminals, 31 diagrams, all fact-checked; IP-services engine (DHCP/relay/client, NAT/PAT in the packet path, DNS, NTP, syslog servers, SNMP + Net-SNMP tools, TFTP)
 ⬜ M8 Number systems: binary, hex, how computers count (shared with CCNA M2)
 
 **2. Networking — CCNA 200-301** (v1.1 until 2 Feb 2027; v2.0 from 3 Feb 2027 — same code, more troubleshooting, new AI-in-network-operations domain ~10%: covered as it lands)
@@ -28,7 +27,7 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 ✅ M4 VLANs, trunks & Spanning Tree — 7 lessons (VLANs + voice VLAN, 802.1Q trunks/native/allowed/DTP/VTP, inter-VLAN routing ROAS + L3 switch, STP basics, Rapid PVST+ in practice with PortFast/BPDU guard/root guard, EtherChannel LACP/PAgP/on, troubleshooting + 8-fault challenge); 13 benches, 7 terminals, 25 diagrams, all fact-checked
 ✅ M5 Routing — 8 lessons (reading the routing table: longest match, AD, metric; static/default/host/floating routes and recursion; OSPF concepts; single-area OSPF config; DR/BDR and network types; OSPF cost and adjacency troubleshooting + multi-area first look; HSRP with VRRP/GLBP compared; end-to-end troubleshooting + 7-fault challenge + first portfolio project); 14 benches, 8 terminals, 27 diagrams, all fact-checked
 ✅ M6 IPv6 — 6 lessons (reading/shortening addresses; address types and /48 subnet planning; router config, EUI-64, link-local; NDP, SLAAC vs DHCPv6, what Windows shows; static, default, floating and link-local-next-hop routes; dual-stack troubleshooting + 6-fault challenge + portfolio project); 9 benches, 6 terminals, 22 diagrams, all fact-checked; IPv6 engine (RA/SLAAC, ND, routing, traceroute return path, extended ping)
-⬜ M7 IP services — DHCP (and relay), DNS, NAT/PAT, NTP, SNMP, syslog, SSH, FTP/TFTP, QoS
+✅ M7 IP services — 8 lessons (DHCP server and the Windows client; relay with ip helper-address and the router as DHCP client; DNS; NAT and static/dynamic NAT; PAT, port forwarding and NAT troubleshooting; NTP and syslog; SNMP and TFTP backups; QoS + 6-fault challenge + portfolio project); 16 benches, 8 terminals, 31 diagrams, all fact-checked; IP-services engine (DHCP/relay/client, NAT/PAT in the packet path, DNS, NTP, syslog servers, SNMP + Net-SNMP tools, TFTP)
 ⬜ M8 Security — CIA, threats & attacks (DoS/DDoS, spoofing, MITM, social engineering), AAA/RADIUS/TACACS+, standard & extended ACLs, port security, DHCP snooping, DAI, VPNs, wireless security
 ⬜ M9 Wireless — RF basics (reflection, refraction, absorption, diffraction, scattering), 802.11 standards, SSIDs/service sets, AP modes, autonomous vs lightweight vs cloud APs, WLC config, WPA2/WPA3
 ⬜ M10 WAN, virtualization & cloud — WAN options, MPLS, SD-WAN, VMs, containers, VRFs, cloud service models
@@ -40,14 +39,16 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 **4. Git & GitHub** — how Git thinks · branching & merging · conflicts · remotes & PRs · rebase/reset/revert safely · GitHub Actions intro · team workflows
 **5. Python & network automation** — Python from zero (types, collections incl. sets, functions, scope, errors, OOP) · files & JSON · Paramiko/Netmiko · scaling to 500 routers · threading · regex/TextFSM · REST APIs/RESTCONF · Ansible · testing & packaging
 **6. AWS** — Cloud Practitioner foundations → Solutions Architect Associate (IAM, EC2, storage, ELB/ASG, S3, databases, Route 53/CloudFront, VPC, decoupling, serverless, containers, monitoring, security, DR, cost) → AI Practitioner
-**7. Databases & SQL** *(new)* — relational thinking, SQL from SELECT to joins/indexes, PostgreSQL admin, NoSQL, backups, on AWS (RDS/Aurora/DynamoDB)
+**7. Cloud networking & BGP** *(new, 12 Oct 2026)* — BGP from zero (neighbours, AS numbers, path attributes, best-path choice, eBGP vs iBGP), hybrid connectivity (site-to-site VPN and AWS Direct Connect over BGP), VPC design and IP planning, Transit Gateway and route tables, hybrid DNS (Route 53 Resolver), load balancers, troubleshooting cloud and hybrid paths — the core of the Cloud Network Architect target
+**8. Security for network & cloud engineers** *(new, 12 Oct 2026; 6–8 lessons, builds on CCNA M8)* — stateful vs stateless filtering, zones and next-gen firewalls, hands-on IPsec site-to-site and remote-access VPNs, TLS and PKI (certificates, chains, why expiry breaks things), cloud IAM and least privilege, zero trust, logging and alerting (SIEM basics); Security+ stays optional (see Certs)
+**9. Databases & SQL** *(new)* — relational thinking, SQL from SELECT to joins/indexes, PostgreSQL admin, NoSQL, backups, on AWS (RDS/Aurora/DynamoDB)
 
 ### Phase 2 · Platform
-**8. Docker** · **9. Terraform** · **10. CI/CD & GitHub Actions** · **11. Kubernetes** · **12. Observability, SRE & GitOps** · **13. Security engineering** *(new — network, cloud and DevSecOps)*
+**10. Docker** · **11. Terraform** · **12. CI/CD & GitHub Actions** · **13. Kubernetes** · **14. Observability, SRE & GitOps** · **15. DevSecOps** *(pipeline and supply-chain security, secrets, image scanning, policy as code — network and cloud security moved to course 8)*
 
 ### Phase 3 · Builder & AI *(new)*
-**14. Full-stack web development** — HTML/CSS/JS, a backend API, databases, auth, deployment
-**15. AI, ML & generative AI** — ML fundamentals, deep learning, LLMs, prompting, RAG, fine-tuning, AI on AWS
+**16. Full-stack web development** — HTML/CSS/JS, a backend API, databases, auth, deployment
+**17. AI, ML & generative AI** — ML fundamentals, deep learning, LLMs, prompting, RAG, fine-tuning, AI on AWS
 
 ## Part B — Building real experience ("Work Experience" mode)
 
@@ -74,7 +75,8 @@ checked Oct 2026 (CCNA v2.0 from Feb 2027, DevNet Associate → CCNA Automation,
    Every module ends with a portfolio project (built for real, with a write-up template).
 2. Finish the platform: Work Experience mode (simulated job: tickets, change requests, incidents, STAR stories),
    portfolio projects for M1–M4, access points + firewalls in the topology builder, curated videos.
-3. The foundations ladder, rebuilt to the same standard: Git → Linux → AWS → Python.
+3. The foundations ladder, rebuilt to the same standard: Git → Linux → AWS → Python, then Cloud networking & BGP →
+   Security for network & cloud engineers (both added 12 Oct 2026, approved by the owner).
 4. Then DevOps: Docker → Terraform → CI/CD → Kubernetes → SRE.
 
 ## Part E — Next big builds (from the owner's testing)
