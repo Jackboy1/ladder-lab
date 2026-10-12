@@ -219,6 +219,7 @@ function ios2Env(opts){
       }
       if (i.bw) L.push(` bandwidth ${i.bw}`);
       if (i.dhcpClient) L.push(" ip address dhcp"); else if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
+      if (i.aclIn) L.push(` ip access-group ${i.aclIn} in`); if (i.aclOut) L.push(` ip access-group ${i.aclOut} out`); if (i.noUnreach) L.push(" no ip unreachables");
       if (i.natIn) L.push(" ip nat inside"); if (i.natOut) L.push(" ip nat outside");
       for (const h of (i.helpers||[])) L.push(` ip helper-address ${h}`);
       if (i.ll) L.push(` ipv6 address ${U(i.ll)} link-local`);
@@ -262,6 +263,7 @@ function ios2Env(opts){
     // Catalyst switches show the 16 VTY lines as two blocks (0 4 and 5 15); routers have 0 4
     for (const blk of (kind==="switch" ? ["0 4","5 15"] : ["0 4"])){
       L.push(`line vty ${blk}`);
+      if (v.acl) L.push(` access-class ${v.acl} in`);
       if (v.timeout && v.timeout!=="10 0") L.push(` exec-timeout ${v.timeout}`); if (v.password) L.push(` password ${pw(v.password)}`); if (v.loginLocal) L.push(" login local"); else if (v.login) L.push(" login"); if (v.transport!=="all") L.push(` transport input ${v.transport}`);
     }
     if (st.ntpMaster!=null) L.push(st.ntpMaster===8 ? "ntp master" : `ntp master ${st.ntpMaster}`); for (const h of st.ntpServers) L.push(`ntp server ${h}`);
@@ -672,7 +674,7 @@ function ios2Env(opts){
       const L = [`${n} is ${i.shut?"administratively down":(l||(i.mode==="svi"&&st.vlans[i.vlan]))?"up":"down"}, line protocol is ${l?"up":"down"}`];
       if (!i.ip) L.push("  Internet protocol processing disabled");
       else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", "  MTU is 1500 bytes", ...(i.helpers && i.helpers.length ? (i.helpers.length===1 ? ["  Helper address is " + i.helpers[0]] : ["  Helper addresses are " + i.helpers[0], ...i.helpers.slice(1).map(h=>"                       " + h)]) : ["  Helper address is not set"]),
-        "  Directed broadcast forwarding is disabled", "  Outgoing Common access list is not set", "  Outgoing access list is not set", "  Inbound Common access list is not set", "  Inbound  access list is not set",
+        "  Directed broadcast forwarding is disabled", "  Outgoing Common access list is not set", `  Outgoing access list is ${i.aclOut || "not set"}`, "  Inbound Common access list is not set", `  Inbound  access list is ${i.aclIn || "not set"}`,
         `  Proxy ARP is ${i.proxyArp===false?"disabled":"enabled"}`, "  Local Proxy ARP is disabled", "  Security level is default", "  Split horizon is enabled", "  ICMP redirects are always sent", "  ICMP unreachables are always sent", "  ICMP mask replies are never sent");
       return L.join("\n"); }),
     X("show interfaces A:IF", a=>{ const n = parseIf(a[0]); return n ? showInt(n) : "% Invalid interface type and number"; }),
@@ -896,6 +898,10 @@ function ios2Env(opts){
       X("no ip address", ()=>{ forCur(i=>{ i.ip=null; i.mask=null; delete i.dhcpClient; delete i.dhcpGw; delete i.dhcpLease; }); return ""; }),
       X("ip address dhcp", ()=>{ const i = st.intfs[st.cur]; if (kind==="switch" && i.mode!=="svi" && i.mode!=="routed") return inv(); forCur(x=>{ x.ip = null; x.mask = null; x.dhcpClient = true; }); return ""; }),
       X("no ip address dhcp", ()=>{ forCur(i=>{ if (i.dhcpClient){ i.ip = null; i.mask = null; delete i.dhcpClient; delete i.dhcpGw; delete i.dhcpLease; } }); return ""; }),
+      X("ip access-group A:WORD A:WORD", a=>{ const d = a[1].toLowerCase(); if (d!=="in" && d!=="out") return inv(); forCur(i=>{ if (d==="in") i.aclIn = a[0]; else i.aclOut = a[0]; }); return ""; }),
+      X("no ip access-group A:WORD A:WORD", a=>{ const d = a[1].toLowerCase(); forCur(i=>{ if (d==="in" && i.aclIn===a[0]) delete i.aclIn; if (d==="out" && i.aclOut===a[0]) delete i.aclOut; }); return ""; }),
+      X("no ip access-group A:WORD", a=>{ const d = a[0].toLowerCase(); forCur(i=>{ if (d==="in") delete i.aclIn; else if (d==="out") delete i.aclOut; }); return ""; }),
+      X("ip unreachables", ()=>{ forCur(i=>{ delete i.noUnreach; }); return ""; }), X("no ip unreachables", ()=>{ forCur(i=>{ i.noUnreach = true; }); return ""; }),
       X("ip nat inside", ()=>{ forCur(i=>{ i.natIn = true; delete i.natOut; }); return ""; }), X("ip nat outside", ()=>{ forCur(i=>{ i.natOut = true; delete i.natIn; }); return ""; }),
       X("no ip nat inside", ()=>{ forCur(i=>{ delete i.natIn; }); return ""; }), X("no ip nat outside", ()=>{ forCur(i=>{ delete i.natOut; }); return ""; }),
       X("speed A:WORD", a=>{ if (!/^(10|100|1000|auto)$/.test(a[0])) return "% Invalid input detected at '^' marker."; if (st.intfs[st.cur].mode==="svi") return inv(); forCur(i=>i.speed=a[0]==="auto"?"auto":+a[0]); return ""; }),
@@ -981,6 +987,8 @@ function ios2Env(opts){
     "config-line": [
       X("password A:LINE", a=>{ st.lines[st.curLine].password=unhash(a[0]); return ""; }), X("no password", ()=>{ st.lines[st.curLine].password=null; return ""; }),
       X("login", ()=>{ const L = st.lines[st.curLine]; L.login=true; L.loginLocal=false; return L.password ? "" : "% Login disabled on line "+(st.curLine==="con"?0:1)+", until 'password' is set"; }),
+      X("access-class A:WORD in", a=>{ st.lines[st.curLine].acl = a[0]; return ""; }), X("no access-class A:WORD in", ()=>{ delete st.lines[st.curLine].acl; return ""; }),
+      X("access-class A:WORD in vrf-also", a=>{ st.lines[st.curLine].acl = a[0]; return ""; }),
       X("login local", ()=>{ const L = st.lines[st.curLine]; L.loginLocal=true; L.login=true; return ""; }), X("no login", ()=>{ const L = st.lines[st.curLine]; L.login=false; L.loginLocal=false; return ""; }),
       X("transport input A:LINE", a=>{ if (st.curLine!=="vty") return inv(); const v = a[0].trim().toLowerCase(); if (!/^(ssh|telnet|all|none|telnet ssh|ssh telnet)$/.test(v)) return "% Invalid input detected at '^' marker."; st.lines.vty.transport = /telnet ssh|ssh telnet/.test(v) ? "telnet ssh" : v; return ""; }),
       X("exec-timeout A:NUM A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} ${a[1]}`; return ""; }), X("exec-timeout A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} 0`; return ""; }),
@@ -1113,7 +1121,7 @@ function ios2Env(opts){
     if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
       if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
     const r = hooks.ping(ip, src) || {};
-    const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : r.kind==="netunreach" ? "U.U.U" : r.kind==="ttlexpired" ? "&&&&&" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
+    const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : (r.kind==="netunreach" || r.kind==="prohib") ? "U.U.U" : r.kind==="ttlexpired" ? "&&&&&" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
     const n = (bar.match(/!/g)||[]).length;
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }

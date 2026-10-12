@@ -480,6 +480,29 @@ function hop(B, node, nhIp, label, ttl){
   return Object.assign(out, {ok:!!rcv, to:rcv, arped});
 }
 // one direction: node → dstIp, hop by hop. returns {ok, kind, arpedFirst, frames, log, finalNode}
+const ICMPN = {0:"echo-reply", 3:"unreachable", 8:"echo", 11:"time-exceeded"};
+const pktText = (p, dst) => p.proto==="icmp" ? `ICMP ${ICMPN[p.icmp]||""} ${p.src} → ${dst}`.replace("  ", " ") : (p.proto==="tcp"||p.proto==="udp") ? `${p.proto.toUpperCase()} ${p.src}:${p.sport} → ${dst}:${p.dport}` : `${String(p.proto).toUpperCase()} ${p.src} → ${dst}`;
+// IOS access-list log lines (%SEC-6-IPACCESSLOG…)
+function aclLogLine(name, l, action, p, dst){ const v = action==="permit" ? "permitted" : "denied";
+  if (l.kind==="standard") return `%SEC-6-IPACCESSLOGS: list ${name} ${v} ${p.src} 1 packet`;
+  if (p.proto==="icmp") return `%SEC-6-IPACCESSLOGDP: list ${name} ${v} icmp ${p.src} -> ${dst} (${p.icmp||0}/${p.icode||0}), 1 packet`;
+  if (p.proto==="tcp" || p.proto==="udp") return `%SEC-6-IPACCESSLOGP: list ${name} ${v} ${p.proto} ${p.src}(${p.sport}) -> ${dst}(${p.dport}), 1 packet`;
+  const num = {ospf:89, eigrp:88, gre:47, esp:50}[p.proto] || p.proto; return `%SEC-6-IPACCESSLOGNP: list ${name} ${v} ${num} ${p.src} -> ${dst}, 1 packet`; }
+// → null (carry on) or res (dropped: kind "prohib", or "timeout" when the router has no ip unreachables)
+function aclGate(B, res, dev, ifn, dir, pkt, dst, arrIf){
+  const E = dev.env, i = E && E.intfs[ifn], name = i && (dir==="in" ? i.aclIn : i.aclOut); if (!name || !window.ACL) return null;
+  const r = window.ACL.check(E.acl, name, {src:pkt.src, dst, proto:pkt.proto, sport:pkt.sport, dport:pkt.dport, icmp:pkt.icmp, icode:pkt.icode, ack:pkt.ack});
+  if (r.missing) return null;   // an ACL that doesn't exist permits everything
+  const L = E.acl.lists[name];
+  if (r.entry){ (res.aclHits = res.aclHits || []).push(r.entry); if (r.entry.log) syslog(B, dev, aclLogLine(name, L, r.entry.action, pkt, dst), true); }
+  const lineTxt = r.entry ? `line ${r.entry.seq} (${window.ACL.entryText(L, r.entry, false)})` : "";
+  if (r.permit){ res.log.push(`&nbsp;&nbsp;· ACL <b>${name}</b> ${dir} on ${dev.label} ${shortIf(ifn)}: ${pktText(pkt, dst)} matches ${lineTxt} → permitted`); return null; }
+  const ai = E.intfs[arrIf || ifn], from = ai && ai.ip, quiet = ai && ai.noUnreach;
+  res.kind = quiet ? "timeout" : "prohib"; res.unreachFrom = from; res.prohibBy = dev;
+  if (!quiet && from && dir==="in") res.path.push(from), res.srcAt.push(pkt.src), res.portAt.push(pkt.sport);   // (an outbound deny: the router is already the last hop)
+  res.log.push(`<b>ACL ${name} ${dir}</b> on ${dev.label} ${shortIf(ifn)} denies ${pktText(pkt, dst)} — ${r.implicit ? "no line matched, so the implicit <b>deny any</b> at the end drops it" : lineTxt + " drops it"}; ${quiet ? "<b>no ip unreachables</b> on that interface, so the sender hears nothing" : "the router sends ICMP Destination Unreachable (type 3, code 13 'administratively prohibited') back from " + from}`);
+  return res;
+}
 const natPort = (p, x) => p && p.proto!=null && x!=null ? ":" + x : "";
 function sendIp(B, node, dstIp, label, pkt0){
   const res = {frames:[], log:[], ok:false, kind:"timeout", path:[], srcAt:[], portAt:[], dst:dstIp};
@@ -503,6 +526,7 @@ function sendIp(B, node, dstIp, label, pkt0){
           if (t.untranslated) res.log.push(`<b>NAT</b> on ${cur.dev.label}: ${pkt.src} isn't matched by any NAT rule's access list — it leaves untranslated, with a private source address nobody on the internet can reply to`);
           else res.log.push(`<b>NAT</b> on ${cur.dev.label} (${shortIf(cur.inIf)} inside → ${shortIf(r.ios)} outside): source ${pkt.src}${natPort(pkt, pkt.sport)} → ${t.pkt.src}${natPort(pkt, t.pkt.sport)} (inside local → inside global)`);
           if (!t.untranslated) (res.natDevs = res.natDevs || new Set()).add(cur.dev); pkt.src = t.pkt.src; pkt.sport = t.pkt.sport; } }
+      if (pkt && cur.inIf){ const g = aclGate(B, res, cur.dev, r.ios, "out", pkt, dstIp, cur.inIf); if (g) return g; }
       cur = routerNodeFor(cur.dev, r.ios); nh = r.nh;
     } else {
       if (cur.ip===dstIp){ res.ok = true; res.final = cur; return res; }
@@ -516,10 +540,12 @@ function sendIp(B, node, dstIp, label, pkt0){
     if (n===0) res.arpedFirst = h.arped;
     if (!h.ok){ res.kind = n===0 ? "unreach" : "timeout"; return res; }
     const to = h.to;
+    if (to.svi && pkt && isRouterDev(to.dev)){ const g = aclGate(B, res, to.dev, to.svi, "in", pkt, dstIp); if (g) return g; }
     if (to.svi){ if (to.dev.env.intfs[to.svi].ip===dstIp || hsrpOwnsIp(B, to.dev, to.svi, dstIp)){ res.ok=true; res.final={dev:to.dev, svi:to.svi, vlan:+to.svi.slice(4)}; seen(dstIp); return res; }
-      if (isRouterDev(to.dev)){ cur = {dev:to.dev, inIp: to.dev.env.intfs[to.svi].ip}; seen(to.dev.env.intfs[to.svi].ip); ttl--; res.routers = (res.routers||0)+1; if (ttl<=0){ res.kind = "ttlexpired"; res.unreachFrom = cur.inIp; res.log.push(`${to.dev.label} decremented the TTL to 0 — it drops the packet and sends ICMP <b>Time Exceeded</b> ("TTL expired in transit") back to the sender. A packet that circles like this is a <b>routing loop</b>.`); return res; } res.log.push(`${to.dev.label} (Layer 3 switch) received it on ${to.svi}, decrements TTL to ${ttl} and routes it between VLANs`); continue; }
+      if (isRouterDev(to.dev)){ cur = {dev:to.dev, inIp: to.dev.env.intfs[to.svi].ip, inIf: to.svi}; seen(to.dev.env.intfs[to.svi].ip); ttl--; res.routers = (res.routers||0)+1; if (ttl<=0){ res.kind = "ttlexpired"; res.unreachFrom = cur.inIp; res.log.push(`${to.dev.label} decremented the TTL to 0 — it drops the packet and sends ICMP <b>Time Exceeded</b> ("TTL expired in transit") back to the sender. A packet that circles like this is a <b>routing loop</b>.`); return res; } res.log.push(`${to.dev.label} (Layer 3 switch) received it on ${to.svi}, decrements TTL to ${ttl} and routes it between VLANs`); continue; }
       res.log.push(`${to.dev.label} isn't routing (no ip routing) — dropped`); return res; }
     if (to.ios && isRouterDev(to.dev)){
+      if (pkt){ const g = aclGate(B, res, to.dev, to.ios, "in", pkt, dstIp); if (g) return g; }
       if (pkt && to.dev.kind==="router" && window.NAT && to.dev.env.intfs[to.ios].natOut){
         const t = window.NAT.inbound(to.dev.env.nat, {src:pkt.src, dst:dstIp, proto:pkt.proto, sport:pkt.sport, dport:pkt.dport, err:pkt.err}, to.dev.env.natCtx ? to.dev.env.natCtx() : null);
         if (t){ if (res.preNat==null) res.preNat = dstIp; (res.natDevs = res.natDevs || new Set()).add(to.dev); res.log.push(`<b>NAT</b> on ${to.dev.label} (arriving on outside ${shortIf(to.ios)}): destination ${dstIp}${natPort(pkt, pkt.dport)} → ${t.pkt.dst}${natPort(pkt, t.pkt.dport)} (inside global → inside local)`); dstIp = t.pkt.dst; pkt.dport = t.pkt.dport; } }
@@ -541,19 +567,21 @@ function sviNode(sw, name){ const i = sw.env.intfs[name]; return {dev:sw, svi:na
 function ping(B, node, dstIp){
   B_ctx.B = B; B.step = 0; computeL3(B);
   if (isRouterDev(node.dev) && !node.ip && !node.svi){ const r = routeLookup(node.dev, dstIp); if (r) node = {dev:node.dev, ip:node.dev.env.intfs[r.ios].ip}; }
-  const id = node.dev.env ? 0 : 1, go = sendIp(B, node, dstIp, "ICMP echo request", {src:node.ip, proto:"icmp", sport:id, dport:id});
+  const id = node.dev.env ? 0 : 1, go = sendIp(B, node, dstIp, "ICMP echo request", {src:node.ip, proto:"icmp", icmp:8, icode:0, sport:id, dport:id});
   let frames = go.frames, log = go.log.slice(), ok = false, kind = go.kind;
   if (go.ok){
-    const rq = go.pkt, back = sendIp(B, nodeFromFinal(B, go.final), rq.src, "ICMP echo reply", {src:go.dst || dstIp, proto:"icmp", sport:rq.sport, dport:rq.sport});
+    const rq = go.pkt, back = sendIp(B, nodeFromFinal(B, go.final), rq.src, "ICMP echo reply", {src:go.dst || dstIp, proto:"icmp", icmp:0, icode:0, sport:rq.sport, dport:rq.sport});
     frames = frames.concat(back.frames); log = log.concat(back.log);
     ok = back.ok && !!back.final && back.final.dev===node.dev; if (!ok){ kind = "timeout"; log.push(`The reply couldn't get back to ${node.ip} — check the far end's default gateway and the return path`); }
     var replyTtl = (go.final.dev.env ? 255 : 128) - (back.routers||0);
-    var natBack = back.natDevs;
+    var natBack = back.natDevs; var backHits = back.aclHits;
   }
   // a Windows ping sends 4 echoes and an IOS ping 5: the extra packets are NAT hits
   { const n = node.dev.env ? 5 : 4; for (const r of new Set([...(go.natDevs||[]), ...(natBack||[])])) if (r.env && r.env.nat) r.env.nat.hits += (n-1) * (ok ? 2 : 1);
+    for (const e of [...(go.aclHits||[]), ...((typeof backHits!=="undefined" && backHits) || [])]) e.hits += n-1;   // each echo is matched again
     for (const r of (go.natDrops||[])) if (r.env && r.env.nat){ r.env.nat.misses += n-1; for (const pl of Object.values(r.env.nat.pools)) if (pl.misses) pl.misses += n-1; } }
   B.frames = frames; B.log = log;
+  if (kind==="prohib") log.push("The ping is answered with <b>Destination Unreachable — administratively prohibited</b>: an access list dropped it, not a missing route.");
   return {ok, kind, ttl: replyTtl, unreachFrom: go.unreachFrom, firstMiss: go.arpedFirst && node.dev.kind!=="pc" && node.dev.kind!=="server" && node.dev.kind!=="laptop"};
 }
 
@@ -581,12 +609,18 @@ function computeL3(B){
   try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; res.ra = computeRa(B); autoDhcp(B); try { linkLogs(B); } catch(e){} return res; }
   finally { B._l3busy = false; B.stormSeen = keepStorm; }
 }
+// a hello is heard only if the receiving interface's inbound ACL lets it in (a forgotten "permit ospf" kills the adjacency)
+function helloAcl(B, set, pkt, dst){ if (!window.ACL) return set; const out = new Set();
+  for (const k of set){ const [id, ios] = k.split("|"), d = B.devs[id], i = d && d.env && d.env.intfs[ios];
+    if (i && i.aclIn && d.env.acl.lists[i.aclIn] && !window.ACL.check(d.env.acl, i.aclIn, Object.assign({dst}, pkt), false).permit) continue; out.add(k); }
+  return out; }
 function computeOspf(B, hears){
   const key = (d, ios) => d.id+"|"+ios, info = {}, out = {};
   for (const d of routersOf(B)){ const x = d.env.ospfInfo(); if (x && x.rid) info[d.id] = x; }
   const ifs = []; for (const id in info) for (const f of info[id].ifaces) if (f.up) ifs.push({d:B.devs[id], f, x:info[id], k:key(B.devs[id], f.ios)});
   const byKey = new Map(ifs.map(e=>[e.k, e]));
-  const heard = e => { if (!hears.has(e.k)) hears.set(e.k, new Set(l3Hear(B, e.d, e.f.ios).map(h=>key(h.dev, h.ios)))); return hears.get(e.k); };
+  const heard0 = e => { if (!hears.has(e.k)) hears.set(e.k, new Set(l3Hear(B, e.d, e.f.ios).map(h=>key(h.dev, h.ios)))); return hears.get(e.k); };
+  const heard = e => helloAcl(B, heard0(e), {src:e.f.ip, proto:"ospf"}, "224.0.0.5");
   // neighbours: both ends hear each other's hellos and every hello check passes
   const nbrOf = new Map(ifs.map(e=>[e.k, []]));
   for (const e of ifs){ if (e.f.passive || e.f.loop) continue;
@@ -707,7 +741,8 @@ const hsrpVmacOf = (g, ver) => ver===2 ? `0000.0c9f.f${g.toString(16).padStart(3
 function computeHsrp(B, hears){
   const key = (d, ios) => d.id+"|"+ios, mem = [];
   for (const d of routersOf(B)) for (const g of d.env.hsrpGroups()) if (g.up) mem.push(Object.assign({d, k:key(d, g.ios)}, g));
-  const heard = m => { if (!hears.has(m.k)) hears.set(m.k, new Set(l3Hear(B, m.d, m.ios).map(h=>key(h.dev, h.ios)))); return hears.get(m.k); };
+  const heard0 = m => { if (!hears.has(m.k)) hears.set(m.k, new Set(l3Hear(B, m.d, m.ios).map(h=>key(h.dev, h.ios)))); return hears.get(m.k); };
+  const heard = m => helloAcl(B, heard0(m), {src:(m.d.env.intfs[m.ios]||{}).ip, proto:"udp", sport:1985, dport:1985}, "224.0.0.2");
   const out = {}, seen = new Set(); B._hsrpSeg = B._hsrpSeg || {}; B._hsrpSt = B._hsrpSt || {};
   for (const m of mem){ if (seen.has(m.k+"#"+m.grp)) continue;
     const grp = mem.filter(o=>o.grp===m.grp && (o===m || (heard(m).has(o.k) && heard(o).has(m.k)))); grp.forEach(o=>seen.add(o.k+"#"+o.grp));
@@ -736,13 +771,14 @@ const hsrpOwnsMac = (B, d, ios, mac) => hsrpFor(B, d, ios).some(v=>v.vmac===mac)
 function trace(B, node, dstIp){
   B_ctx.B = B; B.step = 0; computeL3(B);
   if (isRouterDev(node.dev) && !node.ip && !node.svi){ const r = routeLookup(node.dev, dstIp); if (r) node = {dev:node.dev, ip:node.dev.env.intfs[r.ios].ip}; }
-  const go = sendIp(B, node, dstIp, "Traceroute probe", {src:node.ip, proto:"icmp", sport:1, dport:1});
+  const probe = node.dev.env ? {src:node.ip, proto:"udp", sport:49200, dport:33434} : {src:node.ip, proto:"icmp", icmp:8, icode:0, sport:1, dport:1};   // IOS probes with UDP, Windows with ICMP echo
+  const go = sendIp(B, node, dstIp, "Traceroute probe", probe);
   const hops = go.path || [];
   // each hop answers (ICMP time exceeded, or the final reply) only if IT can route back to the sender — a missing return route shows as * * *
   const silent = new Set();
   hops.forEach((ip, k) => { if (k >= 30) return; const o = ipOwner(B, ip); if (!o) return;
     const from = o.ios && o.dev.env ? (isRouterDev(o.dev) ? {dev:o.dev} : (o.ios.startsWith("Vlan") ? sviNode(o.dev, o.ios) : {dev:o.dev})) : hostNode(o.dev);
-    const back = sendIp(B, from, go.srcAt[k] || node.ip, "ICMP reply to the traceroute", {src:ip, proto:"icmp", sport:go.portAt[k], dport:go.portAt[k], err:true});
+    const back = sendIp(B, from, go.srcAt[k] || node.ip, "ICMP reply to the traceroute", {src:ip, proto:"icmp", icmp: k===hops.length-1 && go.ok ? (node.dev.env ? 3 : 0) : k===hops.length-1 && go.kind!=="timeout" ? 3 : 11, icode: k===hops.length-1 && go.ok && node.dev.env ? 3 : 0, sport:go.portAt[k], dport:go.portAt[k], err:true});
     if (!back.ok || !back.final || back.final.dev!==node.dev) silent.add(k); });
   B.frames = go.frames; B.log = go.log.concat(silent.size ? [`Hop${silent.size>1?"s":""} ${[...silent].map(k=>k+1).join(", ")} received the probe but had no way back to ${node.ip} — their replies never arrive (* * *): check the return route`] : []);
   const ok = go.ok && !silent.has(hops.length-1);
@@ -751,14 +787,14 @@ function trace(B, node, dstIp){
 }
 function iosTraceText(t, dst){
   const L = ["Type escape sequence to abort.", `Tracing the route to ${dst}`, "VRF info: (vrf in name/id, vrf out name/id)"], sil = t.silent || new Set();
-  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(t.v6 ? `  ${k+1} ${h} !N  !N  !N` : `  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
-  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`  ${k+1}  *  *  *`); else if (k===t.hops.length-1 && t.kind==="prohib") L.push(`  ${k+1} ${h} !A  !A  !A`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(t.v6 ? `  ${k+1} ${h} !N  !N  !N` : `  ${k+1} ${h} !H  !H  !H`); else L.push(`  ${k+1} ${h} ${1+k%2} msec ${1+(k+1)%2} msec ${1+k%3} msec`); });
+  if (!t.ok && !((t.kind==="netunreach" || t.kind==="prohib") && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`  ${k}  *  *  *`);
   return L.join("\n");
 }
 function winTraceText(t, dst){
   const L = ["", `Tracing route to ${dst} over a maximum of 30 hops`, ""], sil = t.silent || new Set();
-  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`${String(k+1).padStart(3)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Destination ${t.v6 ? "net" : "host"} unreachable.`); else L.push(`${String(k+1).padStart(3)}    <1 ms    <1 ms    <1 ms  ${h}`); });
-  if (!t.ok && !(t.kind==="netunreach" && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`${String(k).padStart(3)}     *        *        *     Request timed out.`);
+  t.hops.slice(0, 30).forEach((h,k)=>{ if (sil.has(k)) L.push(`${String(k+1).padStart(3)}     *        *        *     Request timed out.`); else if (k===t.hops.length-1 && t.kind==="prohib") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Communication administratively prohibited.`); else if (k===t.hops.length-1 && t.kind==="netunreach") L.push(`${String(k+1).padStart(3)}  ${h}  reports: Destination ${t.v6 ? "net" : "host"} unreachable.`); else L.push(`${String(k+1).padStart(3)}    <1 ms    <1 ms    <1 ms  ${h}`); });
+  if (!t.ok && !((t.kind==="netunreach" || t.kind==="prohib") && !sil.has(t.hops.length-1)) && t.hops.length < 30) for (let k=t.hops.length+1; k<=30; k++) L.push(`${String(k).padStart(3)}     *        *        *     Request timed out.`);
   L.push("", "Trace complete."); return L.join("\n");
 }
 
@@ -931,18 +967,19 @@ function doraCore(B, c, apply){
   for (const x of (disc.recv||[])){
     const rd = x.dev, ifn = x.svi || x.ios; if (!rd.env || !rd.env.dhcp || !ifn || rd===d) continue;
     const i = rd.env.intfs[ifn]; if (!i || !i.ip || i.shut) continue;
+    { const tmp = {path:[], srcAt:[], portAt:[], log:[]}; if (aclGate(B, tmp, rd, ifn, "in", {src:"0.0.0.0", proto:"udp", sport:68, dport:67}, "255.255.255.255")){ log.push(...tmp.log.map(x=>"&nbsp;&nbsp;· " + x.replace(/^&nbsp;&nbsp;· /,""))); continue; } }
     if (rd.env.serviceDhcp===false){ log.push(`&nbsp;&nbsp;· ${rd.label} heard it, but <b>no service dhcp</b> switches off both its DHCP server and its relay`); continue; }
     if (D.poolFor(rd.env.dhcp, i.ip)){ found = {srv:rd, srvIp:i.ip, via:i.ip, relay:null, iface:ifn, near:routerNodeFor(rd, ifn)}; break; }
     if (!i.helpers || !i.helpers.length){ log.push(`&nbsp;&nbsp;· ${rd.label} ${shortIf(ifn)} heard the broadcast, but it has no DHCP pool for ${netOf(i.ip, i.mask)}/${mbits(i.mask)} and no <b>ip helper-address</b> — routers don't forward broadcasts, so the Discover stops here`); continue; }
     for (const h of i.helpers){
-      const go = sendIp(B, {dev:rd, ip:i.ip}, h, "DHCP Discover (relayed)"); frames.push(...go.frames);
+      const go = sendIp(B, {dev:rd, ip:i.ip}, h, "DHCP Discover (relayed)", {src:i.ip, proto:"udp", sport:67, dport:67}); frames.push(...go.frames);
       log.push(`<b>Relay:</b> ${rd.label} ${shortIf(ifn)} has <b>ip helper-address ${h}</b> — it turns the broadcast into a unicast to ${h} (sent from its interface towards the server) and writes giaddr = ${i.ip}, so the server knows which subnet the client is on`, ...go.log);
       if (!go.ok){ log.push(`&nbsp;&nbsp;· the relayed Discover never reached ${h} — check the route from ${rd.label} to the server`); continue; }
       const sv = go.final.dev, sIf = go.final.ios || go.final.svi;
       if (!sv.env || !sv.env.dhcp || !sIf){ log.push(`&nbsp;&nbsp;· ${h} answered, but it isn't running a DHCP server`); continue; }
       if (sv.env.serviceDhcp===false){ log.push(`&nbsp;&nbsp;· ${sv.label} has <b>no service dhcp</b> — it ignores the request`); continue; }
       if (!D.poolFor(sv.env.dhcp, i.ip)){ log.push(`&nbsp;&nbsp;· ${sv.label} got the relayed Discover, but none of its pools covers giaddr ${i.ip} — no Offer`); continue; }
-      const back = sendIp(B, nodeFromFinal(B, go.final), i.ip, "DHCP Offer (to the relay)"); frames.push(...back.frames); log.push(...back.log);
+      const back = sendIp(B, nodeFromFinal(B, go.final), i.ip, "DHCP Offer (to the relay)", {src:h, proto:"udp", sport:67, dport:67}); frames.push(...back.frames); log.push(...back.log);
       if (!back.ok){ log.push(`&nbsp;&nbsp;· ${sv.label} has no route back to the relay address ${i.ip} — its Offer never arrives`); continue; }
       found = {srv:sv, srvIp:sv.env.intfs[sIf].ip, via:i.ip, relay:rd, iface:"Unknown", near:routerNodeFor(rd, ifn)}; break; }
     if (found) break;
@@ -966,7 +1003,7 @@ function doraCore(B, c, apply){
 }
 function dhcpRenew(B, d){
   B_ctx.B = B; B.step = 0; const frames = [], log = [], sv = B.devs[d.lease.srvId], D = window.DHCP;
-  const go = sendIp(B, hostNode(d), d.lease.server, "DHCP Request (renew)"); frames.push(...go.frames);
+  const go = sendIp(B, hostNode(d), d.lease.server, "DHCP Request (renew)", {src:d.ip, proto:"udp", sport:68, dport:67}); frames.push(...go.frames);
   log.push(`<b>DHCP Request</b> (unicast renewal) from ${d.label} to ${d.lease.server}: "may I keep ${d.ip}?" — with a lease in hand there's no Discover or Offer`, ...go.log);
   if (!go.ok || !sv || !sv.env || !sv.env.dhcp || sv.env.serviceDhcp===false){ log.push("&nbsp;&nbsp;· no answer from the server — the PC keeps its address until the lease runs out"); return {ok:false, frames, log}; }
   const st = sv.env.dhcp, pool = D.poolFor(st, d.ip);
@@ -977,7 +1014,7 @@ function dhcpRenew(B, d){
     d.ip = null; d.mask = null; d.gw = null; return {ok:false, nak:true, frames, log}; }
   const o = { ip:d.ip, mask:d.mask, routers:pool.routers.slice(), dns:pool.dns.slice(), domain:pool.domain, leaseMs: pool.lease==="infinite" ? null : ((pool.lease[0]*24 + pool.lease[1])*60 + pool.lease[2]) * 60000, pool:pool.name };
   D.bind(st, {mac:d.mac, iface: (st.bindings.find(b=>b.mac===d.mac)||{}).iface || "Unknown", now:B.now}, o);
-  const back = sendIp(B, nodeFromFinal(B, go.final), d.ip, "DHCP Ack"); frames.push(...back.frames);
+  const back = sendIp(B, nodeFromFinal(B, go.final), d.ip, "DHCP Ack", {src:d.lease.server, proto:"udp", sport:67, dport:68}); frames.push(...back.frames);
   log.push(`<b>DHCP Ack</b> from ${sv.label}: lease renewed for ${leaseText(o.leaseMs)}`, ...back.log);
   d.gw = o.routers[0] || null; d.dns = o.dns.slice(); d.domain = o.domain || null;
   d.lease = Object.assign({}, d.lease, {obtained:B.now, expires: o.leaseMs==null ? null : B.now + o.leaseMs});
@@ -1010,12 +1047,13 @@ const winTime = ms => { const t = new Date(ms); let h = t.getUTCHours(); const a
 /* ---- IP services: NTP, DNS, TFTP, syslog servers, SNMP ---- */
 const routerFrom = d => d.kind==="router" || (d.env && d.env.ipRouting) ? {dev:d} : (()=>{ const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut); return svi ? sviNode(d, svi) : {dev:d}; })();
 // a UDP request/reply between two devices (no frames or log kept): both directions must route
-function udpTwoWay(B, fromNode, ip){
+function udpTwoWay(B, fromNode, ip, port){
   const keep = [B.frames, B.log, B.step]; try {
-    const go = sendIp(B, fromNode, ip, "UDP request"); if (!go.ok) return {ok:false};
     const rt = !fromNode.ip && fromNode.dev.env && fromNode.dev.env.lookup ? fromNode.dev.env.lookup(ip) : null, srcIp = fromNode.ip || (rt ? fromNode.dev.env.intfs[rt.ios].ip : null);   // a router sends from the interface towards the target
     if (!srcIp) return {ok:false};
-    const back = sendIp(B, nodeFromFinal(B, go.final), go.pkt ? go.pkt.src : srcIp, "UDP reply");
+    const sp = port===123 ? 123 : 49152;
+    const go = sendIp(B, fromNode, ip, "UDP request", {src:srcIp, proto:"udp", sport:sp, dport:port||0}); if (!go.ok) return {ok:false, kind:go.kind};
+    const back = sendIp(B, nodeFromFinal(B, go.final), go.pkt ? go.pkt.src : srcIp, "UDP reply", {src:go.dst || ip, proto:"udp", sport:port||0, dport:go.pkt ? go.pkt.sport : sp});
     const via = fromNode.dev.env && fromNode.dev.env.lookup && fromNode.dev.env.lookup(ip) ? fromNode.dev.env.lookup(ip).ios : null;
     return {ok: back.ok && !!back.final && back.final.dev===fromNode.dev, final: go.final, srcIp, via};
   } finally { [B.frames, B.log, B.step] = keep; }
@@ -1028,7 +1066,7 @@ function ntpOf(B, d, depth){
   if (depth < 4) for (const ip of (E.ntpServers||[])){
     const pe = {ip, reach:false, stratum:16, ref:".INIT."}; res.peers.push(pe);
     const o = ipOwner(B, ip); if (!o) continue;
-    const w = udpTwoWay(B, routerFrom(d), ip); if (!w.ok) continue;
+    const w = udpTwoWay(B, routerFrom(d), ip, 123); if (!w.ok) continue;
     let up = null; if (o.dev.env) up = ntpOf(B, o.dev, depth+1); else if (o.dev.services && o.dev.services.ntp) up = {synced:true, stratum: o.dev.services.ntp.stratum || 1, ref: o.dev.services.ntp.ref || ".GPS."};
     if (!up || !up.synced) { pe.reach = true; pe.stratum = 16; pe.ref = ".INIT."; continue; }
     pe.reach = true; pe.stratum = up.stratum; pe.ref = up.ref;
@@ -1048,7 +1086,7 @@ function dnsAnswer(B, dev, name, depth){
 }
 function dnsAsk(B, fromNode, ip, name, depth){
   const o = ipOwner(B, ip); if (!o) return {reach:false};
-  const w = udpTwoWay(B, fromNode, ip); if (!w.ok) return {reach:false};
+  const w = udpTwoWay(B, fromNode, ip, 53); if (!w.ok) return {reach:false};
   const a = dnsAnswer(B, o.dev, name, depth); if (a.refused) return {reach:false, refused:true, server:ip};
   return {reach:true, ip:a.ip||null, auth:!!a.auth, nx:!!a.nx, server:ip, srvName: o.dev.services && o.dev.services.dns && o.dev.services.dns.name};
 }
@@ -1074,16 +1112,17 @@ function nslookupText(B, d, name, server){
 // TFTP: the router copies to/from a server running a TFTP service, if both directions route
 function tftpTarget(B, d, host){
   let ip = host; if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip)){ const r = d.env.resolveName ? d.env.resolveName(host) : {}; ip = r.ip; } if (!ip) return {ok:false};
-  const o = ipOwner(B, ip); if (!o || o.dev.env || !o.dev.services || !o.dev.services.tftp) { const w0 = o ? udpTwoWay(B, routerFrom(d), ip) : null; return {ok:false, why: w0 && w0.ok ? "refused" : "timeout"}; }
-  const w = udpTwoWay(B, routerFrom(d), ip); if (!w.ok) return {ok:false, why:"timeout"};
+  const o = ipOwner(B, ip); if (!o || o.dev.env || !o.dev.services || !o.dev.services.tftp) { const w0 = o ? udpTwoWay(B, routerFrom(d), ip, 69) : null; return {ok:false, why: w0 && w0.ok ? "refused" : "timeout"}; }
+  const w = udpTwoWay(B, routerFrom(d), ip, 69); if (!w.ok) return {ok:false, why:"timeout"};
   return {ok:true, srv:o.dev, via:w.via};
 }
 // what a syslog server / SNMP manager has received: messages addressed to it, from routers that can reach it (UDP, one way)
-function oneWay(B, d, ip){ const keep = [B.frames, B.log, B.step]; try { const go = sendIp(B, routerFrom(d), ip, "UDP"); return go.ok; } finally { [B.frames, B.log, B.step] = keep; } }
+function oneWay(B, d, ip, port){ const keep = [B.frames, B.log, B.step]; try { const n = routerFrom(d), rt = d.env.lookup ? d.env.lookup(ip) : null, src = rt && d.env.intfs[rt.ios] ? d.env.intfs[rt.ios].ip : null;
+  const go = sendIp(B, n, ip, "UDP", src ? {src, proto:"udp", sport:port, dport:port} : null); return go.ok; } finally { [B.frames, B.log, B.step] = keep; } }
 function received(B, srv, kind){
   const out = []; if (!srv.ip) return out;
   for (const id of B.order){ const d = B.devs[id]; if (!d.env) continue; const L = (B.syslog[id]||[]).filter(x=>(kind==="trap" ? x.trap : x.to||[]).includes(srv.ip)); if (!L.length) continue;
-    if (!oneWay(B, d, srv.ip)) continue; const r = d.env.lookup ? d.env.lookup(srv.ip) : null; const src = r && d.env.intfs[r.ios] ? d.env.intfs[r.ios].ip : "?";
+    if (!oneWay(B, d, srv.ip, kind==="trap" ? 162 : 514)) continue; const r = d.env.lookup ? d.env.lookup(srv.ip) : null; const src = r && d.env.intfs[r.ios] ? d.env.intfs[r.ios].ip : "?";
     for (const x of L) out.push({from:d.label, src, t:x.t, msg:x.msg, sev:x.sev}); }
   return out;
 }
@@ -1098,7 +1137,7 @@ function snmpTool(B, d, raw){
   const timeout = `Timeout: No Response from ${agent}${cmd==="snmpget" ? "." : ""}`;
   const o = ipOwner(B, agent); if (!o || !o.dev.env || !d.ip) return timeout;
   const R = o.dev, E = R.env, c = E.snmp && E.snmp.communities[comm];
-  if (!udpTwoWay(B, hostNode(d), agent).ok || !Object.keys(E.snmp.communities).length) return timeout;
+  if (!udpTwoWay(B, hostNode(d), agent, 161).ok || !Object.keys(E.snmp.communities).length) return timeout;
   const S = E.snmpStats = E.snmpStats || {}; S.inp = (S.inp||0) + 1;
   if (!c){ S.badComm = (S.badComm||0) + 1; return timeout; }
   if (c.acl && window.ACL && E.acl.lists[c.acl] && !window.ACL.check(E.acl, c.acl, {src:d.ip}, false).permit) return timeout;
@@ -1128,6 +1167,31 @@ function snmpTool(B, d, raw){
     else return `Error in packet.\nReason: notWritable (That object does not support modification)\nFailed object: ${SNMPOBJ[q.base]}.${q.idx||0}`;
     return `${SNMPOBJ[q.base]}.${q.idx||0} = STRING: ${v}`; }
   return null;
+}
+
+// a TCP handshake: SYN out, SYN-ACK back (both must pass every ACL and route); NAT and port forwards apply
+function tcpConnect(B, from, ip, port){ B_ctx.B = B; B.step = 0; computeL3(B);
+  const go = sendIp(B, from, ip, `TCP SYN to port ${port}`, {src:from.ip, proto:"tcp", sport:51000, dport:port});
+  if (!go.ok) return {ok:false, kind:go.kind, frames:go.frames, log:go.log};
+  const back = sendIp(B, nodeFromFinal(B, go.final), go.pkt.src, "TCP SYN-ACK", {src:go.dst || ip, proto:"tcp", sport:go.pkt.dport, dport:go.pkt.sport, ack:true});
+  const ok = back.ok && !!back.final && back.final.dev===from.dev;
+  const final = go.final, owner = final.dev.env ? {dev:final.dev, ios:final.ios||final.svi} : {dev:final.dev};
+  return {ok, kind: ok ? "ok" : back.kind, frames:go.frames.concat(back.frames), log:go.log.concat(back.log), owner, port: go.pkt.dport, src: go.pkt.src};
+}
+// Windows curl.exe against a web server (services:{web:{title, port}}) — HTTP over TCP, through ACLs and NAT
+function curlCmd(B, d, raw){
+  const m = raw.trim().match(/^curl(?:\.exe)?\s+(?:-\S+\s+)*(?:(https?):\/\/)?([^\/\s:]+)(?::(\d+))?(\/\S*)?$/i);
+  if (!m) return "curl: try 'curl --help' for more information";
+  const scheme = (m[1]||"http").toLowerCase(), host = m[2], port = +(m[3] || (scheme==="https" ? 443 : 80));
+  let ip = host; if (ipToInt(host)==null){ const r = resolveWin(B, d, host); if (!r.ip) return `curl: (6) Could not resolve host: ${host}`; ip = r.ip; }
+  if (!d.ip) return `curl: (7) Failed to connect to ${host} port ${port} after 0 ms: Couldn't connect to server`;
+  const t = tcpConnect(B, hostNode(d), ip, port); B.frames = t.frames; B.log = t.log;
+  if (!t.ok) return t.kind==="prohib" ? `curl: (7) Failed to connect to ${host} port ${port} after 12 ms: Couldn't connect to server` : `curl: (28) Failed to connect to ${host} port ${port} after 21045 ms: Couldn't connect to server`;
+  const w = t.owner && t.owner.dev.services && t.owner.dev.services.web, wport = w ? (w.port || 80) : null;
+  if (!w || wport!==t.port) return `curl: (7) Failed to connect to ${host} port ${port} after 3 ms: Couldn't connect to server`;
+  if (scheme==="https") return `curl: (35) schannel: next InitializeSecurityContext failed: SEC_E_INTERNAL_ERROR (0x80090304) - The Local Security Authority cannot be contacted`;
+  B.log.push(`<b>HTTP</b> GET ${m[4]||"/"} → ${t.owner.dev.label} answers 200 OK`); (B.fetched = B.fetched || {})[d.id+">"+host] = true; if (host!==ip) B.fetched[d.id+">"+ip] = true;
+  return `<!DOCTYPE html>\n<html><head><title>${w.title||t.owner.dev.label}</title></head>\n<body><h1>${w.title||t.owner.dev.label}</h1><p>${w.body||"It works."}</p></body></html>`;
 }
 
 /* ---- hooks the IOS engine calls ---- */
@@ -1219,7 +1283,7 @@ function pcExec(B, d, line){
   const l = raw.toLowerCase(), t = raw.split(/\s+/);
   const media = linkUpAt(B, hostNode(d).ref);
   if (!raw) return "";
-  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ipconfig /flushdns · ping <ip|name> · tracert <ip|name> · nslookup <name> [server] · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
+  if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ipconfig /flushdns · ping <ip|name> · tracert <ip|name> · nslookup <name> [server] · curl http://<ip|name>[:port] · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
   if (l==="cls") return {clear:true};
   if (l==="ipconfig /release" || l==="ipconfig /renew"){
     const head = "\nWindows IP Configuration\n\n";
@@ -1260,6 +1324,7 @@ function pcExec(B, d, line){
   }
   if (/^arp\s+-d/.test(l)){ B.arp[d.id] = {}; return ""; }
   const RTT = "\nApproximate round trip times in milli-seconds:\n    Minimum = 0ms, Maximum = 0ms, Average = 0ms";
+  if (/^curl(\.exe)?$/i.test(t[0])) return media ? curlCmd(B, d, raw) : "curl: (7) Failed to connect: Network is unreachable";
   if (t[0].toLowerCase()==="nslookup"){ if (!t[1]){ const s0 = (d.dns||[])[0], o0 = s0 && ipOwner(B, s0), nm0 = o0 && o0.dev.services && o0.dev.services.dns && o0.dev.services.dns.name;
       return "Default Server:  " + (nm0 || "UnKnown") + "\nAddress:  " + (s0||"::1") + "\n\n> (interactive mode isn't available in this lab — use nslookup <name> [server])"; }
     const r = nslookupText(B, d, t[1], t[2]); return r; }
@@ -1307,6 +1372,7 @@ function pcExec(B, d, line){
     const ttl = res.ttl || 128;
     if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${ip}: bytes=32 time<1ms TTL=${ttl}`).join("\n") + stat(4) + RTT;
     if (res.kind==="ttlexpired") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: TTL expired in transit.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
+    if (res.kind==="prohib") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Communication administratively prohibited.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="netunreach") return head + [...Array(4)].map(()=>`Reply from ${res.unreachFrom}: Destination host unreachable.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
     if (res.kind==="general" || res.kind==="noroute") return head + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") + stat(0);
     if (res.kind==="unreach") return head + [...Array(4)].map(()=>`Reply from ${d.ip}: Destination host unreachable.`).join("\n") + `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`;
@@ -1316,8 +1382,11 @@ function pcExec(B, d, line){
   if (ssh || tel){
     const user = ssh ? (ssh[1]||ssh[3]) : null, ip = ssh ? (ssh[2]||ssh[4]) : tel[1];
     if (!media || !d.ip) return `Connecting to ${ip}...Could not open connection to the host: Connect failed`;
-    const p = ping(B, hostNode(d), ip); B.frames = [];
-    const o = ipOwner(B, ip);
+    const port = ssh ? 22 : 23, tcp = tcpConnect(B, hostNode(d), ip, port); B.frames = tcp.frames; B.log = tcp.log;
+    const o = tcp.owner || ipOwner(B, ip), p = {ok: tcp.ok};
+    if (o && o.dev.env && tcp.ok){ const acl = o.dev.env.lines.vty.acl;   // access-class: only these sources may open a VTY session
+      if (acl && o.dev.env.acl.lists[acl] && !window.ACL.check(o.dev.env.acl, acl, {src:tcp.src}).permit){ B.log.push(`<b>access-class ${acl} in</b> on ${o.dev.label}'s VTY lines doesn't permit ${tcp.src} — the router refuses the session`);
+        return ssh ? `kex_exchange_identification: read: Connection reset` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`; } }
     if (!p.ok || !o || !o.dev.env) return ssh ? `ssh: connect to host ${ip} port 22: Connection timed out` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`;
     const env = o.dev.env, vty = env.lines.vty;
     if (ssh){
@@ -1765,6 +1834,9 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
   // IP services (Module 7+)
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
+  aclHits: (B, r, name, seq) => { const d = B.devs[r]; const l = d && d.env && d.env.acl.lists[name]; const e = l && l.entries.find(x=>!x.remark && x.seq===seq); return e ? e.hits : 0; },
+  blocked: (B, pc, ip) => B.events.some(e=>e.a[0]==="pc" && e.a[1]===pc && new RegExp("^(ping|tracert|curl)\\b.*" + ip.replace(/\./g, "\\.")).test(e.a[2]||"")) && !B.pinged[pc+">"+ip],
+  fetched: (B, pc, host) => !!(B.fetched && B.fetched[pc+">"+host]),
   syslogGot: (B, srv, re) => received(B, B.devs[srv], "log").some(m=>re.test(m.msg)),
   trapGot: (B, srv, re) => received(B, B.devs[srv], "trap").some(m=>re.test(m.msg)),
   tftpFile: (B, srv, name) => { const S = B.devs[srv] && B.devs[srv].services; const f = S && S.tftp && S.tftp.files; return f ? (name ? f[name]!=null : Object.keys(f).length > 0) : false; },
