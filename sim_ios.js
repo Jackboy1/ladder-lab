@@ -748,7 +748,7 @@ function ios2Env(opts){
       if (W.length) L.push("Interface       Errdisable reason       Time left(sec)", "---------       -----------------       --------------", ...W.map(n=>{ const i = st.intfs[n], left = Math.max(0, Math.round(((i.errdisAt||now) + iv*1000 - now)/1000)); return `${pad(short(n), 16)}${pad(i.errdis, 24)}${String(left).padStart(5)}`; }));
       return L.join("\n").replace(/\n+$/, ""); }), X("show ip dhcp snooping binding", ()=>kind==="switch" ? snoopBind() : inv()),
     X("show ip arp inspection", ()=>kind==="switch" ? daiShow() : inv()),
-    X("show ip arp inspection vlan A:NUM", ()=>kind==="switch" ? daiShow() : inv()),
+    X("show ip arp inspection vlan A:NUM", a=>kind==="switch" ? daiShow([+a[0]], true) : inv()),   // vlan N: the configuration tables only (statistics has its own command)
     X("show ip arp inspection statistics", ()=>kind==="switch" ? daiStatsTable(st.dai.vlans) : inv()),
     X("show ip arp inspection statistics vlan A:NUM", a=>kind==="switch" ? daiStatsTable([+a[0]]) : inv()),
     X("clear ip arp inspection statistics", ()=>{ st.daiStats = {}; return ""; }),
@@ -796,7 +796,7 @@ function ios2Env(opts){
   ];
   const T = {
     user: [ X("enable", ()=>goEnable()), ...execCommon, X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()), X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show clock", ()=>clockText()) ],
-    priv: [ X("disable", ()=>{ st.mode="user"; return ""; }), X("configure terminal", ()=>{ st.mode="config"; return "Enter configuration commands, one per line.  End with CNTL/Z."; }),
+    priv: [ X("enable", ()=>""), X("disable", ()=>{ st.mode="user"; return ""; }), X("configure terminal", ()=>{ st.mode="config"; return "Enter configuration commands, one per line.  End with CNTL/Z."; }),
       ...execShow, ...execCommon,
       X("copy running-config startup-config", ()=>ask("Destination filename [startup-config]? ", ()=>save())),
       X("write memory", ()=>save()), X("write", ()=>save()),
@@ -1155,12 +1155,12 @@ function ios2Env(opts){
     return ["MacAddress          IpAddress        Lease(sec)  Type           VLAN  Interface", "------------------  ---------------  ----------  -------------  ----  --------------------",
       ...Object.values(B0).map(b=>`${pad(macColon(b.mac), 20)}${pad(b.ip, 17)}${pad(String(b.lease), 12)}${pad("dhcp-snooping", 16)}${pad(String(b.vlan), 6)}${b.iface}`),
       `Total number of bindings: ${Object.keys(B0).length}`].join("\n"); }
-  function daiShow(){ const S0 = st.daiStats || {}; const vl = st.dai.vlans; const has = x => st.dai.validate.includes(x) ? "Enabled" : "Disabled";
+  function daiShow(only, noStats){ const S0 = st.daiStats || {}; const vl = only || st.dai.vlans; const has = x => st.dai.validate.includes(x) ? "Enabled" : "Disabled";
     return [`Source Mac Validation      : ${has("src-mac")}`, `Destination Mac Validation : ${has("dst-mac")}`, `IP Address Validation      : ${has("ip")}`, "",
       " Vlan     Configuration    Operation   ACL Match          Static ACL", " ----     -------------    ---------   ---------          ----------",
       ...vl.map(v=>`${String(v).padStart(5)}     Enabled          ${pad(st.vlans[v] ? "Active" : "Inactive", 12)}${pad(st.dai.filters[v] || "", 19)}${st.dai.filters[v] ? ((st.dai.statics||{})[v] ? "Yes" : "No") : ""}`.trimEnd()), "",
       " Vlan     ACL Logging      DHCP Logging      Probe Logging", " ----     -----------      ------------      -------------", ...vl.map(v=>`${String(v).padStart(5)}     Deny             Deny              Off`), "",
-      daiStatsTable(vl)].join("\n"); }
+      ...(noStats ? [] : [daiStatsTable(vl)])].join("\n").replace(/\n+$/, ""); }
   // the three counter blocks of show ip arp inspection [statistics]
   function daiStatsTable(vl){ const S0 = st.daiStats || {}, n = (x, w) => String(x||0).padStart(w);
     return [" Vlan      Forwarded        Dropped     DHCP Drops      ACL Drops", " ----      ---------        -------     ----------      ---------",

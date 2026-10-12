@@ -275,5 +275,10 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   for (let k = 0; k < 4; k++){ pc(L2, "p2", "ssh -l netops 192.168.50.1"); pc(L2, "p2", "x"); pc(L2, "p2", "y"); pc(L2, "p2", "z"); if (Bench.quietMode(L2, "r2")) break; }
   ok(Bench.quietMode(L2, "r2") && /Denying logins from all sources\./.test(cli(L2, "r2", "show login")) && (cli(L2, "r2", "show logging").match(/LOGIN_FAILED/g)||[]).length===Math.floor(Bench.loginFailures(L2, "r2")/2), "quiet mode with no access-class: Denying logins from all sources; every 2nd failure logged", cli(L2, "r2", "show login")); }
 
+{ // show ip arp inspection vlan N = configuration tables only; enable at # is accepted silently
+  const B = mkSnoop(["ip arp inspection vlan 1"]); const v = cli(B, "sw", "show ip arp inspection vlan 1");
+  ok(/ Vlan     Configuration    Operation/.test(v) && !/Forwarded/.test(v) && /Forwarded/.test(cli(B, "sw", "show ip arp inspection")), "show ip arp inspection vlan 1: no statistics tables", v);
+  ok(cli(B, "sw", "enable")==="" && B.devs.sw.env.mode==="priv", "enable typed at # does nothing (no error)"); }
+
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;
