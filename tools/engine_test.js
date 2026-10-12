@@ -57,12 +57,12 @@ ok(/Generating 2048/.test(out(B,["term",""])),"RSA prompt accepts Enter for 2048
 for(const c of ["ip ssh version 2","username admin secret Str0ng!","line vty 0 15","login local","transport input ssh","exit","int vlan 1","ip add 192.168.1.2 255.255.255.0","no shut","end"]) run(B,["term",c]);
 ok(/up\s+up/.test(out(B,["term","show ip int br"]).split("\n").find(l=>/^Vlan1/.test(l))||""),"Vlan1 up/up");
 ok(/Reply/.test(out(B,["pc","pc","ping 192.168.1.2"])),"PC pings switch SVI");
-ok(/password/.test(out(B,["pc","pc","ssh -l admin 192.168.1.2"])),"ssh asks for password");
-out(B,["pc","pc","Str0ng!"]); ok(Bench.remoteTo(B,"pc")==="192.168.1.2" && B.devs.sw.env.mode==="user","ssh login lands at user EXEC");
-ok(/SW1>/.test(B.devs.sw.env.prompt()),"remote prompt is SW1>");
+ok(/^\(admin@192\.168\.1\.2\) Password: $/.test(out(B,["pc","pc","ssh -l admin 192.168.1.2"])),"ssh asks for the password (keyboard-interactive prompt)");
+out(B,["pc","pc","Str0ng!"]); ok(Bench.remoteTo(B,"pc")==="192.168.1.2" && Bench.sessionMode(B,"pc")==="user","ssh login lands at user EXEC");
+ok(Bench.sessionPrompt(B,"pc")==="SW1>","remote prompt is SW1>");
 ok(/Connection to 192.168.1.2 closed/.test(out(B,["pc","pc","exit"])) && !Bench.remoteTo(B,"pc"),"exit closes ssh session");
-out(B,["pc","pc","ssh -l admin 192.168.1.2"]); ok(/please try again/.test(out(B,["pc","pc","wrong"])),"wrong ssh password asks again");
-out(B,["pc","pc","wrong2"]); ok(/admin@192\.168\.1\.2: Permission denied \(password\)/.test(out(B,["pc","pc","wrong3"])) && !Bench.remoteTo(B,"pc"),"third wrong ssh password closes the attempt");
+out(B,["pc","pc","ssh -l admin 192.168.1.2"]); ok(/^\(admin@192\.168\.1\.2\) Password: $/.test(out(B,["pc","pc","wrong"])),"wrong ssh password asks again");
+out(B,["pc","pc","wrong2"]); ok(/admin@192\.168\.1\.2: Permission denied \(publickey,keyboard-interactive,password\)\./.test(out(B,["pc","pc","wrong3"])) && !Bench.remoteTo(B,"pc"),"third wrong ssh password closes the attempt");
 run(B,["term",""]); run(B,["term","en"]);
 const rc=out(B,["term","show run"]); ok(/username admin secret 9 \$9\$/.test(rc)&&/transport input ssh/.test(rc)&&/login local/.test(rc)&&/ip domain name lab.local/.test(rc),"running-config reflects SSH setup");
 // 6 duplex mismatch

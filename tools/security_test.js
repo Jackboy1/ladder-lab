@@ -31,7 +31,7 @@ const mk = (r1x, r2x) => { const B = Bench.create({ devices: [
   ok(/Reply from 192\.168\.50\.20: bytes=32/.test(pc(B, "p1", "ping 192.168.50.20")), "baseline: PC1 pings WEB");
   ok(/<title>Payroll portal<\/title>/.test(pc(B, "p1", "curl http://192.168.50.20")), "baseline: curl gets the web page", pc(B, "p1", "curl http://192.168.50.20"));
   ok(/curl: \(7\) Failed to connect to 192\.168\.50\.20:8080 after \d+ ms: Could not connect to server/.test(pc(B, "p1", "curl http://192.168.50.20:8080")), "nothing listens on 8080: connection refused (curl 7)");
-  ok(/password: $/.test(pc(B, "p1", "ssh -l netops 192.168.50.1")), "baseline: SSH to R2 asks for the password", pc(B, "p1", "ssh -l netops 192.168.50.1")); }
+  ok(/Password: $/.test(pc(B, "p1", "ssh -l netops 192.168.50.1")), "baseline: SSH to R2 asks for the password", pc(B, "p1", "ssh -l netops 192.168.50.1")); }
 
 { // a standard ACL near the destination: block one host, allow the rest
   const B = mk(null, ["access-list 10 deny host 192.168.10.11", "access-list 10 permit any", "int g0/0", "ip access-group 10 out", "end"]);
@@ -65,7 +65,7 @@ const mk = (r1x, r2x) => { const B = Bench.create({ devices: [
 { // VTY access-class
   const B = mk(null, ["access-list 15 permit host 192.168.10.10", "line vty 0 4", "access-class 15 in", "end"]);
   ok(/line vty 0 4\n access-class 15 in/.test(cli(B, "r2", "show running-config")), "running-config: access-class under line vty", cli(B, "r2", "show running-config"));
-  ok(/password: $/.test(pc(B, "p1", "ssh -l netops 192.168.50.1")), "access-class 15: PC1 (permitted) gets the password prompt");
+  ok(/Password: $/.test(pc(B, "p1", "ssh -l netops 192.168.50.1")), "access-class 15: PC1 (permitted) gets the password prompt");
   ok(/^ssh: connect to host 192\.168\.50\.1 port 22: Connection refused$/.test(pc(B, "p2", "ssh -l netops 192.168.50.1")) && /access-class 15 in/.test(log(B)), "PC2 is refused by the VTY access-class", pc(B, "p2", "ssh -l netops 192.168.50.1"));
   ok(/Reply from 192\.168\.50\.1/.test(pc(B, "p2", "ping 192.168.50.1")), "access-class only guards the VTY lines — pings still work"); }
 
@@ -188,31 +188,61 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   ok(B.devs.r2.env.users.guest && /username guest secret 9 \$9\$/.test(cli(B, "r2", "show running-config")) && /security passwords min-length 10/.test(cli(B, "r2", "show running-config")), "username … algorithm-type scrypt secret → stored as type 9", cli(B, "r2", "show running-config"));
   const B2 = mk(null, ["login block-for 120 attempts 3 within 60", "login on-failure log", "login on-success log", "ip access-list standard ADMINS", "permit host 192.168.10.10", "exit", "login quiet-mode access-class ADMINS"]);
   ok(/Router enabled to watch for login Attacks\.\n     If more than 3 login failures occur in 60 seconds or less,\n     logins will be disabled for 120 seconds\./.test(cli(B2, "r2", "show login")) && /Router presently in Normal-Mode\./.test(cli(B2, "r2", "show login")), "show login: watching, normal mode", cli(B2, "r2", "show login"));
-  pc(B2, "p2", "ssh -l netops 192.168.50.1"); pc(B2, "p2", "bad1"); ok(/please try again/.test(pc(B2, "p2", "bad2")), "a wrong SSH password asks again");
+  pc(B2, "p2", "ssh -l netops 192.168.50.1"); pc(B2, "p2", "bad1"); ok(/^\(netops@192\.168\.50\.1\) Password: $/.test(pc(B2, "p2", "bad2")), "a wrong SSH password asks again");
   const third = pc(B2, "p2", "bad3");
-  ok(/netops@192\.168\.50\.1: Permission denied \(password\)/.test(third) && Bench.loginFailures(B2, "r2")===3 && Bench.quietMode(B2, "r2"), "three wrong SSH passwords → quiet mode", third + "\nfails=" + Bench.loginFailures(B2, "r2"));
+  ok(/netops@192\.168\.50\.1: Permission denied \(publickey,keyboard-interactive,password\)\./.test(third) && Bench.loginFailures(B2, "r2")===3 && Bench.quietMode(B2, "r2"), "three wrong SSH passwords → quiet mode", third + "\nfails=" + Bench.loginFailures(B2, "r2"));
   const lg = cli(B2, "r2", "show logging");
-  ok(/%SEC_LOGIN-4-LOGIN_FAILED: Login failed \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] at \d\d:\d\d:\d\d UTC Mon Oct 12 2026/.test(lg) && /%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is \d+ secs, \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] \[ACL: sl_def_acl\] at /.test(lg), "syslog: LOGIN_FAILED ×3 then QUIET_MODE_ON", lg);
+  ok(/%SEC_LOGIN-4-LOGIN_FAILED: Login failed \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] at \d\d:\d\d:\d\d UTC Mon Oct 12 2026/.test(lg) && /%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is \d+ secs, \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] \[ACL: ADMINS\] at /.test(lg), "syslog: LOGIN_FAILED ×3 then QUIET_MODE_ON", lg);
   ok(/ssh: connect to host 192\.168\.50\.1 port 22: Connection refused/.test(pc(B2, "p2", "ssh -l netops 192.168.50.1")), "quiet mode: PC2 is refused");
-  ok(/password: $/.test(pc(B2, "p1", "ssh -l netops 192.168.50.1")), "quiet mode: PC1 is permitted by the quiet-mode access-class ADMINS");
+  ok(/Password: $/.test(pc(B2, "p1", "ssh -l netops 192.168.50.1")), "quiet mode: PC1 is permitted by the quiet-mode access-class ADMINS");
   pc(B2, "p1", "Adm1n!"); cli(B2, "r2", "en"); ok(Bench.remoteTo(B2, "p1")==="192.168.50.1" && /%SEC_LOGIN-5-LOGIN_SUCCESS: Login Success \[user: netops\] \[Source: 192\.168\.10\.10\] \[localport: 22\] at /.test(cli(B2, "r2", "show logging")), "PC1 logs in; LOGIN_SUCCESS logged");
   pc(B2, "p1", "exit"); cli(B2, "r2", "en");
-  ok(/Router presently in Quiet-Mode\./.test(cli(B2, "r2", "show login")) && /Restricted logins filtered by applied ACL ADMINS\./.test(cli(B2, "r2", "show login")) && /Total login failures: 3\./.test(cli(B2, "r2", "show login")), "show login: quiet mode", cli(B2, "r2", "show login"));
+  ok(/Router presently in Quiet-Mode\./.test(cli(B2, "r2", "show login")) && /Restricted logins filtered by applied ACL ADMINS\./.test(cli(B2, "r2", "show login")), "show login: quiet mode", cli(B2, "r2", "show login"));
   ok(/login block-for 120 attempts 3 within 60\nlogin quiet-mode access-class ADMINS\nlogin on-failure log\nlogin on-success log/.test(cli(B2, "r2", "show running-config")), "running-config: login lines", cli(B2, "r2", "show running-config"));
-  B2.now += 121000; ok(!Bench.quietMode(B2, "r2") && /password: $/.test(pc(B2, "p2", "ssh -l netops 192.168.50.1")), "after the block period: PC2 may try again"); pc(B2, "p2", "Adm1n!"); pc(B2, "p2", "exit"); }
+  B2.now += 121000; ok(!Bench.quietMode(B2, "r2") && /Password: $/.test(pc(B2, "p2", "ssh -l netops 192.168.50.1")), "after the block period: PC2 may try again"); pc(B2, "p2", "Adm1n!"); pc(B2, "p2", "exit"); }
 { // AAA: method list with RADIUS first, local as the fallback when no server answers
   const B = mk(null, ["aaa new-model", "radius server RAD1", "address ipv4 192.168.50.30 auth-port 1812 acct-port 1813", "key R4diusK3y", "exit", "aaa authentication login VTY-AUTH group radius local", "line vty 0 4", "login authentication VTY-AUTH", "exit"]);
   const rc = cli(B, "r2", "show running-config");
-  ok(/aaa new-model\naaa authentication login VTY-AUTH group radius local/.test(rc) && /radius server RAD1\n address ipv4 192\.168\.50\.30 auth-port 1812 acct-port 1813\n key R4diusK3y/.test(rc) && /line vty 0 4[\s\S]*login authentication VTY-AUTH/.test(rc), "running-config: aaa new-model, method list, radius server, line login authentication", rc);
+  ok(/hostname R2\n!\naaa new-model\n!\n!\naaa authentication login VTY-AUTH group radius local\n!\n!\n!\naaa session-id common/.test(rc) && /radius server RAD1\n address ipv4 192\.168\.50\.30 auth-port 1812 acct-port 1813\n key R4diusK3y\n!/.test(rc) && /line vty 0 4\n login authentication VTY-AUTH\n transport input ssh/.test(rc) && rc.indexOf("radius server") > rc.indexOf("router ospf"), "running-config: aaa new-model, method list, radius server, line login authentication", rc);
   pc(B, "p1", "ssh -l netops 192.168.50.1"); pc(B, "p1", "Adm1n!");
   ok(Bench.remoteTo(B, "p1")==="192.168.50.1", "RADIUS server doesn't answer → falls back to the local user list → SSH works"); pc(B, "p1", "exit");
   ok(/Invalid input/.test(cli(mk(), "r2", "conf t") + cli(mk(), "r2", "aaa authentication login default local")), "aaa authentication needs aaa new-model first");
   const C = mk(null, ["aaa new-model"]), c0 = C.devs.r2.env.connect("con");
   ok(/Press RETURN to get started/.test(c0.text) && !c0.ask, "aaa new-model, no default list: the console asks for nothing", JSON.stringify(c0));
   const D = mk(null, ["aaa new-model", "aaa authentication login default local", "banner login #Authorised staff only#"]), c1 = D.devs.r2.env.connect("con");
-  ok(c1.ask==="Username: " && /Authorised staff only\nUser Access Verification/.test(c1.text), "aaa authentication login default local: the console asks Username/Password, banner login shown first", JSON.stringify(c1));
+  ok(c1.ask==="Username: " && /^Authorised staff only\n\nUser Access Verification\n\n$/.test(c1.text), "aaa authentication login default local: the console asks Username/Password, banner login shown first", JSON.stringify(c1));
   ok(/% Authentication failed/.test(JSON.stringify(D.devs.r2.env.exec("netops") && D.devs.r2.env.exec("nope"))), "wrong console password: % Authentication failed");
   ok(/banner login \^CAuthorised staff only\^C/.test((D.devs.r2.env.exec("netops"), D.devs.r2.env.exec("Adm1n!"), D.devs.r2.env.exec("en"), out({out:D.devs.r2.env.exec("show running-config")}))), "running-config: banner login"); }
+
+{ // stage D review fixes
+  const B = mk(null, ["security passwords min-length 8", "username ops privilege 15 algorithm-type sha256 secret L0ngPassw0rd", "username old algorithm-type md5 secret L0ngPassw0rd", "enable algorithm-type sha256 secret En4bleSecret"]);
+  const rc = cli(B, "r2", "show running-config");
+  ok(/enable secret 8 \$8\$\S{14}\$\S{43}\n/.test(rc) && /username ops privilege 15 secret 8 \$8\$/.test(rc) && /username old secret 5 \$1\$\S{4}\$\S{22}\n/.test(rc) && rc.indexOf("ip domain name") < rc.indexOf("username netops"), "algorithm-type md5/sha256 → types 5/8, privilege shown, usernames after ip domain name", rc);
+  cli(B, "r2", "conf t");
+  ok(/Password too short/.test(cli(B, "r2", "enable password abc")) && /Password too short/.test(cli(B, "r2", "username x password abc")) && /Password too short/.test(cli(B, "r2", "username y privilege 5 secret abc")), "min-length also covers enable password, username password, username privilege secret");
+  cli(B, "r2", "end");
+  // the console keeps its own mode while a PC is in an SSH session (and its pending prompt can't eat console input)
+  const C = mk(); C.devs.r2.env.exec("en"); pc(C, "p1", "ssh -l netops 192.168.50.1");
+  ok(/^Building configuration/.test(cli(C, "r2", "show running-config")) && C.devs.r2.env.mode==="priv", "a PC at R2's SSH password prompt doesn't capture the console's commands");
+  pc(C, "p1", "Adm1n!"); ok(Bench.sessionMode(C, "p1")==="user" && C.devs.r2.env.mode==="priv" && Bench.sessionPrompt(C, "p1")==="R2>", "SSH session in user EXEC, console still privileged");
+  ok(/% No password set/.test(pc(C, "p1", "enable")), "enable from a VTY with no enable secret: % No password set");
+  pc(C, "p1", "exit");
+  // Telnet: three wrong line passwords close the connection
+  const T = mk(null, ["line vty 0 4", "no login local", "login", "password Vty-Pa55", "transport input telnet ssh", "exit"]);
+  pc(T, "p1", "telnet 192.168.50.1"); pc(T, "p1", "nope1"); pc(T, "p1", "nope2");
+  ok(/% Bad passwords\n\n\[Connection to 192\.168\.50\.1 closed by foreign host\]/.test(pc(T, "p1", "nope3")) && !Bench.remoteTo(T, "p1"), "Telnet: three wrong passwords → % Bad passwords, connection closed");
+  // AAA: no login local shown once aaa new-model is on; keys shown as type 7 with service password-encryption; tacacs block before radius
+  const A = mk(null, ["service password-encryption", "aaa new-model", "tacacs server TAC1", "address ipv4 192.168.50.31", "key T4cK3y", "exit", "radius server RAD1", "address ipv4 192.168.50.30", "key R4diusK3y", "exit", "banner motd #Authorised use only#", "banner login #Staff only#"]);
+  const ar = cli(A, "r2", "show running-config");
+  ok(!/ login local/.test(ar) && /tacacs server TAC1\n address ipv4 192\.168\.50\.31\n key 7 [0-9A-F]+\nradius server RAD1\n address ipv4 192\.168\.50\.30\n key 7 [0-9A-F]+\n/.test(ar) && /banner login \^CStaff only\^C\nbanner motd \^CAuthorised use only\^C/.test(ar), "aaa new-model hides login local; key 7 …; tacacs before radius; banner login before motd", ar);
+  // show login wording, login delay, every N
+  const L2 = mk(null, ["login block-for 90 attempts 4 within 30", "login on-failure log every 2"]);
+  const sl = cli(L2, "r2", "show login");
+  ok(/^     A default login delay of 1 seconds is applied\.\n     No Quiet-Mode access list has been configured\.\n     Every 2 failed login is logged and generate SNMP traps\.\n\n     Router enabled to watch for login Attacks\.\n     If more than 4 login failures occur in 30 seconds or less,\n     logins will be disabled for 90 seconds\.\n\n     Router presently in Normal-Mode\.\n     Current Watch Window remaining time 30 seconds\.\n     Present login failure count 0\.$/.test(sl), "show login (normal mode) — real wording", sl);
+  cli(L2, "r2", "conf t"); cli(L2, "r2", "login delay 3"); cli(L2, "r2", "end");
+  ok(/A login delay of 3 seconds is applied\./.test(cli(L2, "r2", "show login")) && /login delay 3\nlogin on-failure log every 2/.test(cli(L2, "r2", "show running-config")), "login delay N; on-failure log every N in the running-config");
+  for (let k = 0; k < 4; k++){ pc(L2, "p2", "ssh -l netops 192.168.50.1"); pc(L2, "p2", "x"); pc(L2, "p2", "y"); pc(L2, "p2", "z"); if (Bench.quietMode(L2, "r2")) break; }
+  ok(Bench.quietMode(L2, "r2") && /Denying logins from all sources\./.test(cli(L2, "r2", "show login")) && (cli(L2, "r2", "show logging").match(/LOGIN_FAILED/g)||[]).length===Math.floor(Bench.loginFailures(L2, "r2")/2), "quiet mode with no access-class: Denying logins from all sources; every 2nd failure logged", cli(L2, "r2", "show login")); }
 
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

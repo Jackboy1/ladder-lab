@@ -158,7 +158,7 @@ const isRouterDev = d => d && (d.kind==="router" || (d.kind==="switch" && d.env.
 const LMON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function syslog(B, d, msg, force){ const L = B.syslog[d.id] = B.syslog[d.id] || []; if (!force && L.some(x=>x.msg===msg)) return; B.clock = (B.clock||0) + 1;
   const tm = new Date((B.now || Date.UTC(2026, 9, 12, 8, 30)) + B.clock*7000 + (B.clock*137)%1000), two = x=>String(x).padStart(2,"0");
-  const t = `${LMON[tm.getUTCMonth()]} ${two(tm.getUTCDate())} ${two(tm.getUTCHours())}:${two(tm.getUTCMinutes())}:${two(tm.getUTCSeconds())}.${String(tm.getUTCMilliseconds()).padStart(3,"0")}`;
+  const t = `${LMON[tm.getUTCMonth()]} ${String(tm.getUTCDate()).padStart(2, " ")} ${two(tm.getUTCHours())}:${two(tm.getUTCMinutes())}:${two(tm.getUTCSeconds())}.${String(tm.getUTCMilliseconds()).padStart(3,"0")}`;
   const sv = (msg.match(/^%[A-Z0-9_]+-([0-7])-/)||[])[1], sev = sv==null ? 6 : +sv, E = d.env;
   const to = E && E.logHosts && sev <= (E.logTrap==null ? 6 : E.logTrap) ? E.logHosts.slice() : [];
   const trap = E && E.snmp && E.snmp.traps && /%LINK-3-UPDOWN|%LINEPROTO-5-UPDOWN/.test(msg) ? E.snmp.hosts.map(h=>h.ip) : [];
@@ -1322,12 +1322,21 @@ function makeHooks(B, d){
 }
 
 /* ---- PC command prompt (and remote ssh/telnet sessions) ---- */
-function pcPrompt(B, d){ const r = B.remote[d.id]; if (r){ if (r.env.pending) return ""; return r.env.prompt(); } return `C:\\Users\\${d.label}>`; }
+// one device CLI, several sessions: the console uses the device's own fields; a remote session keeps its context in r.ctx
+const CTXK = env => [...new Set(["mode", "pending", "noEcho", "cur", "curList", "curLine", "curVlan", ...Object.keys(env).filter(k=>/^cur[A-Z]/.test(k))])];
+const ctxSave = env => { const o = {}; for (const k of CTXK(env)) o[k] = env[k]; return o; };
+const ctxLoad = (env, o) => { for (const k of CTXK(env)) env[k] = o && k in o ? o[k] : k==="mode" ? "user" : k==="noEcho" ? false : null; };
+function inSession(B, id, fn){ const r = B.remote[id]; if (!r) return fn(null); const env = r.env, con = ctxSave(env); ctxLoad(env, r.ctx);
+  try { return fn(env); } finally { if (B.remote[id]===r) r.ctx = ctxSave(env); ctxLoad(env, con); } }
+// start a session: run its opening steps in a fresh context, keep that context for the session, give the console its own back
+function openSession(B, id, fn){ const r = B.remote[id], env = r.env, con = ctxSave(env); ctxLoad(env, {mode:"user"});
+  try { return fn(env); } finally { if (B.remote[id]===r) r.ctx = ctxSave(env); ctxLoad(env, con); } }
+function pcPrompt(B, d){ const r = B.remote[d.id]; if (r) return inSession(B, d.id, env => env.pending ? "" : env.prompt()); return `C:\\Users\\${d.label}>`; }
 function pcExec(B, d, line){
   const r = B.remote[d.id];
   if (r){
-    r.env.viaVty = {user: r.user || "", ip: d.ip}; let out; try { out = r.env.exec(line); } finally { r.env.viaVty = null; }
-    if (out && out.logout){ delete B.remote[d.id]; return `\n[Connection to ${r.host} closed by foreign host]`; }
+    let out = inSession(B, d.id, env => { env.viaVty = {user: r.user || "", ip: d.ip}; try { return env.exec(line); } finally { env.viaVty = null; } });
+    if (out && out.logout){ delete B.remote[d.id]; return (out.text ? out.text + "\n" : "") + `\n[Connection to ${r.host} closed by foreign host]`; }
     if (out && out.reload){ delete B.remote[d.id]; return (out.text||"") + `\n[Connection to ${r.host} closed by foreign host]`; }
     return out;
   }
@@ -1446,22 +1455,22 @@ function pcExec(B, d, line){
     if (ssh){
       if (!env.rsa) return `ssh: connect to host ${ip} port 22: Connection refused`;
       if (!/ssh|all/.test(vty.transport)) return `ssh: connect to host ${ip} port 22: Connection refused`;
-      if (!(env.aaa && env.aaa.on) && !vty.loginLocal) return `${user}@${ip}: Permission denied (password).\n(the switch's VTY lines aren't using local usernames — 'login local' is missing)`;
+      if (!(env.aaa && env.aaa.on) && !vty.loginLocal) return `${user}@${ip}: Permission denied (publickey,keyboard-interactive,password).\n(the switch's VTY lines aren't using local usernames — 'login local' is missing)`;
       B.remote[d.id] = {env, host:ip, proto:"ssh", user, from:d.ip, pendingAuth:true}; env.loginCtx = {src:tcp.src || d.ip, port:22};
-      let tries = 0; const prompt = `${user}@${ip}'s password: `;
+      let tries = 0; const prompt = `(${user}@${ip}) Password: `;
       const handle = pw => { env.noEcho = false;
-        if (env.loginCheck("vty", user, pw, env.loginCtx)){ env.mode = "user"; if (B.remote[d.id]) B.remote[d.id].pendingAuth = false; return (env.bannerLogin!=null ? env.bannerLogin + "\n" : "") + (env.banner!=null ? env.banner : ""); }
-        if (++tries < 3){ env.noEcho = true; env.pending = {prompt, handle}; return {text:"Permission denied, please try again.", ask:prompt}; }
-        delete B.remote[d.id]; return `${user}@${ip}: Permission denied (password).`; };
-      env.pending = {prompt, handle}; env.noEcho = true;
+        if (env.loginCheck("vty", user, pw, env.loginCtx)){ env.mode = "user"; if (B.remote[d.id]) B.remote[d.id].pendingAuth = false; return env.banner!=null ? env.banner : ""; }
+        if (++tries < 3){ env.noEcho = true; env.pending = {prompt, handle}; return {text:"", ask:prompt}; }
+        delete B.remote[d.id]; return `${user}@${ip}: Permission denied (publickey,keyboard-interactive,password).`; };
+      openSession(B, d.id, e => { e.pending = {prompt, handle}; e.noEcho = true; });
       return {ask:prompt, text: env.bannerLogin!=null ? env.bannerLogin : ""};
     }
     if (!/telnet|all/.test(vty.transport)) return `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`;
     const aaaOn = env.aaa && env.aaa.on; env.loginCtx = {src:tcp.src || d.ip, port:23};
     if (!aaaOn && vty.login && !vty.loginLocal && !vty.password) return `\nPassword required, but none set\n\n[Connection to ${ip} closed by foreign host]`;
-    if (aaaOn ? env.loginMethods("vty")[0]==="none" : !vty.login) { B.remote[d.id] = {env, host:ip, proto:"telnet", from:d.ip}; env.mode="user"; return `Trying ${ip} ... Open\n\n` + (env.banner!=null?env.banner+"\n":""); }
+    if (aaaOn ? env.loginMethods("vty")[0]==="none" : !vty.login) { B.remote[d.id] = {env, host:ip, proto:"telnet", from:d.ip}; openSession(B, d.id, ()=>{}); return `Trying ${ip} ... Open\n\n` + (env.banner!=null?env.banner+"\n":""); }
     B.remote[d.id] = {env, host:ip, proto:"telnet", from:d.ip};
-    const c = env.connect("vty");
+    const c = openSession(B, d.id, e => e.connect("vty"));
     return {ask: c.ask, text: `Trying ${ip} ... Open\n\n${c.text}`};
   }
   return `'${t[0]}' is not recognized as an internal or external command,\noperable program or batch file.`;
@@ -1777,7 +1786,7 @@ function mount(el, cfg, tasks, onWin){
   }
   function after(r){ if (r && r.msg) say(r.msg, r.ok?"":"bad"); animKey++; changed(); draw(); }
   function runPc(id, v){
-    const d = B.devs[id], rem = B.remote[id], env = rem && rem.env;
+    const d = B.devs[id], rem = B.remote[id], env = rem && inSession(B, id, e => ({pending: e.pending, noEcho: e.noEcho}));
     const L = pcLines[id] = pcLines[id] || [{t:"Microsoft Windows [Version 10.0.22631]\n(c) Microsoft Corporation. All rights reserved.", cls:""}];
     if (!v.trim() && !(env && env.pending)) { if (rem) L.push({t:pcPrompt(B,d), cls:"in"}); return; }
     K.termEcho(L, env, v, pcPrompt(B,d));
@@ -1895,6 +1904,8 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
   snoopBound: (B, sw, mac) => { const d = B.devs[sw]; return !!(d && d.env && d.env.snoopBind && Object.values(d.env.snoopBind).some(b=>!mac || b.mac===mac)); },
   daiDrops: (B, sw, vlan) => { const d = B.devs[sw]; const x = d && d.env && d.env.daiStats && d.env.daiStats[vlan]; return x ? x.drop : 0; },
+  sessionMode: (B, pc) => B.remote[pc] ? inSession(B, pc, e => e.mode) : null,
+  sessionPrompt: (B, pc) => B.remote[pc] ? inSession(B, pc, e => e.prompt()) : null,
   quietMode: (B, dev) => { const e = B.devs[dev] && B.devs[dev].env; return !!(e && e.quietUntil && B.now < e.quietUntil); },
   loginFailures: (B, dev) => { const e = B.devs[dev] && B.devs[dev].env; return e ? (e.loginTotalFails||0) : 0; },
   psecViolations: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i ? (i.psecViolCount||0) : 0; },
