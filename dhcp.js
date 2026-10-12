@@ -125,17 +125,18 @@ DHCP.showBinding = st => ["Bindings from all pools not associated with VRF:",
 DHCP.ciscoCid = (mac, shortIf) => { const h = "00" + [..."cisco-" + mac + "-" + shortIf].map(c=>c.charCodeAt(0).toString(16).padStart(2,"0")).join(""); return h.match(/.{1,4}/g).join("."); };
 DHCP.showConflict = st => ["IP address        Detection method   Detection time          VRF",
   ...st.conflicts.map(c=>`${pad(c.ip,18)}${pad(c.method,19)}${when(c.at)}`)].join("\n");
-DHCP.showPool = (st, only) => Object.values(st.pools).filter(p=>!only || p.name===only).map(p=>{
+DHCP.showPool = (st, only, own) => Object.values(st.pools).filter(p=>!only || p.name===only).map(p=>{
   if (p.net==null) return `\nPool ${p.name} :\n Utilization mark (high/low)    : 100 / 0\n Subnet size (first/next)       : 0 / 0\n Total addresses                : 0\n Leased addresses               : 0\n Pending event                  : none\n 0 subnet is currently in the pool :`;
   const first = p.net + 1, last = p.net + 2**(32-p.len) - 2, total = last - first + 1;
   let ex = 0; for (let n = first; n <= last; n++) if (excluded(st, n) || st.conflicts.some(c=>c.ip===toIp(n))) ex++;   // ping conflicts count as excluded
   const leased = st.bindings.filter(b=>b.pool===p.name).length;
-  const idx = p.index==null ? first : p.index;   // the next-allocation pointer, not "the lowest free address"
+  let anyFree = false; for (let n = first; n <= last && !anyFree; n++){ const ip = toIp(n); if (!excluded(st, n) && !st.bindings.some(b=>b.ip===ip) && !st.conflicts.some(c=>c.ip===ip) && !(own||[]).includes(ip)) anyFree = true; }
+  const idx = !anyFree ? null : p.index==null ? first : p.index;   // the next-allocation pointer, not "the lowest free address"; 0.0.0.0 when the pool is full
   return [``, `Pool ${p.name} :`, ` Utilization mark (high/low)    : 100 / 0`, ` Subnet size (first/next)       : 0 / 0`,
     ` Total addresses                : ${total}`, ` Leased addresses               : ${leased}`, ` Excluded addresses             : ${ex}`,
     ` Pending event                  : none`, ` 1 subnet is currently in the pool :`,
     ` Current index        IP address range                    Leased/Excluded/Total`,
-    ` ${pad(idx > last ? "0.0.0.0" : toIp(idx), 21)}${pad(toIp(first),17)}- ${pad(toIp(last),18)}${pad(leased,6)}/ ${pad(ex,6)}/ ${total}`].join("\n"); }).join("\n");
+    ` ${pad(idx==null || idx > last ? "0.0.0.0" : toIp(idx), 21)}${pad(toIp(first),17)}- ${pad(toIp(last),18)}${pad(leased,6)}/ ${pad(ex,6)}/ ${total}`].join("\n"); }).join("\n");
 
 window.DHCP = DHCP;
 })();

@@ -32,13 +32,15 @@ NAT.globalCmd = (st, line, opt) => {
   const r = t.slice(4);
   if (r[0]==="static"){
     let s;
-    if (r[1]==="tcp" || r[1]==="udp"){ if (r.length < 6) return INC; if (!ipRe.test(r[2]) || !ipRe.test(r[4]) || !/^\d+$/.test(r[3]) || !/^\d+$/.test(r[5])) return BAD; s = { proto: r[1], local: r[2], lport: +r[3], global: r[4], gport: +r[5] }; }
+    if ((r[1]==="tcp" || r[1]==="udp") && r[4]==="interface"){ if (r.length < 7) return INC; const ifn = opt && opt.ifName ? opt.ifName(r[5]) : r[5]; if (!ipRe.test(r[2]) || !/^\d+$/.test(r[3]) || !ifn || !/^\d+$/.test(r[6])) return BAD;
+      s = { proto: r[1], local: r[2], lport: +r[3], intf: ifn, global: (opt && opt.ifAddr && opt.ifAddr(ifn)) || "0.0.0.0", gport: +r[6] }; }
+    else if (r[1]==="tcp" || r[1]==="udp"){ if (r.length < 6) return INC; if (!ipRe.test(r[2]) || !ipRe.test(r[4]) || !/^\d+$/.test(r[3]) || !/^\d+$/.test(r[5])) return BAD; s = { proto: r[1], local: r[2], lport: +r[3], global: r[4], gport: +r[5] }; }
     else { if (r.length < 3) return INC; if (!ipRe.test(r[1]) || !ipRe.test(r[2]) || r[3]) return BAD; s = { local: r[1], global: r[2] }; }
-    const key = x => [x.proto||"", x.local, x.lport||"", x.global, x.gport||""].join("|");
+    const key = x => [x.proto||"", x.local, x.lport||"", x.intf || x.global, x.gport||""].join("|");
     if (neg){ st.statics = st.statics.filter(x=>key(x)!==key(s)); st.table = st.table.filter(e=>!(e.static && e.il===s.local)); return {}; }
     if (st.statics.some(x=>key(x)===key(s))) return {};
     const ex = !s.proto && st.statics.find(x=>!x.proto && (x.local===s.local || x.global===s.global));
-    if (ex) return { err: `% ${ex.local} already mapped (${ex.local} -> ${ex.global})` };
+    if (ex) return { err: `% ${s.local} already mapped (${ex.local} -> ${ex.global})` };
     st.statics.push(s); return {};
   }
   if (r[0]==="list"){
@@ -56,7 +58,7 @@ NAT.running = (st, opt) => {
   const out = [];
   for (const p of Object.values(st.pools)) out.push(`ip nat pool ${p.name} ${toIp(p.start)} ${toIp(p.end)} ${p.asPrefix ? "prefix-length " + p.len : "netmask " + toIp(p.len ? (0xFFFFFFFF << (32-p.len)) >>> 0 : 0)}`);
   for (const r of st.rules) out.push(`ip nat inside source list ${r.acl} ${r.pool ? "pool " + r.pool : "interface " + r.intf}${r.overload ? " overload" : ""}`);
-  for (const s of st.statics) out.push(s.proto ? `ip nat inside source static ${s.proto} ${s.local} ${s.lport} ${s.global} ${s.gport}` : `ip nat inside source static ${s.local} ${s.global}`);
+  for (const s of st.statics) out.push(s.proto ? (s.intf ? `ip nat inside source static ${s.proto} ${s.local} ${s.lport} interface ${s.intf} ${s.gport}` : `ip nat inside source static ${s.proto} ${s.local} ${s.lport} ${s.global} ${s.gport}`) : `ip nat inside source static ${s.local} ${s.global}`);
   return out;
 };
 
@@ -66,7 +68,7 @@ const portsInUse = (st, gip, proto) => new Set(st.table.filter(e=>e.ig===gip && 
 const findFlow = (st, proto, il, ilp, ol, olp) => st.table.find(e=>e.proto===proto && e.il===il && e.ilp===ilp && e.ol===ol && e.olp===olp);
 const simple = (st, il) => st.table.find(e=>!e.proto && e.il===il);
 // ctx: { acl: <ACL store>, ACL: window.ACL, ifAddr: name → primary IPv4 }
-NAT.outbound = (st, pkt, ctx) => {
+NAT.outbound = (st, pkt, ctx) => { bindIf(st, ctx);
   const proto = pkt.proto, flowKey = L4(proto);
   // an existing extended entry for this exact flow
   if (flowKey){ const f = findFlow(st, proto, pkt.src, pkt.sport, pkt.dst, pkt.dport); if (f){ st.hits++; return { pkt: {...pkt, src: f.ig, sport: f.igp}, entry: f }; } }
@@ -83,7 +85,7 @@ NAT.outbound = (st, pkt, ctx) => {
   // dynamic rules, in configured order; the first whose ACL permits the inside source
   for (const r of st.rules){
     const acl = ctx && ctx.acl && ctx.acl.lists[r.acl];
-    if (!acl || !ctx.ACL.check(ctx.acl, r.acl, { src: pkt.src, dst: pkt.dst, proto, sport: pkt.sport, dport: pkt.dport }).permit) continue;
+    if (!acl || !ctx.ACL.check(ctx.acl, r.acl, { src: pkt.src, dst: pkt.dst, proto, sport: pkt.sport, dport: pkt.dport }, ctx.noCount ? false : undefined).permit) continue;
     if (!r.overload){
       const p = st.pools[r.pool]; if (!p){ st.misses++; return { drop: "no-pool" }; }
       let sm = simple(st, pkt.src);
@@ -96,14 +98,16 @@ NAT.outbound = (st, pkt, ctx) => {
     const gip = r.pool ? (st.pools[r.pool] ? toIp(st.pools[r.pool].start) : null) : (ctx.ifAddr && ctx.ifAddr(r.intf));
     if (!gip){ st.misses++; return { drop: "no-address" }; }
     if (!flowKey){ st.misses++; return { drop: "not-translatable" }; }
-    const used = portsInUse(st, gip, proto); let port = pkt.sport;
-    if (used.has(port)){ port = 1024; while (used.has(port)) port++; }   // IOS XE keeps the port if free, else allocates from 1024 up
+    const mine = st.table.find(e=>e.proto===proto && e.ig===gip && e.il===pkt.src && e.ilp===pkt.sport);
+    const used = new Set(st.table.filter(e=>e.ig===gip && e.proto===proto && !(e.il===pkt.src && e.ilp===pkt.sport)).map(e=>e.igp)); let port = mine ? mine.igp : pkt.sport;
+    if (!mine && used.has(port)){ port = 1024; while (used.has(port)) port++; }   // IOS XE keeps the port if free, else allocates from 1024 up
     return addFlow(gip, port, false, { pool: r.pool || null, rule: r.acl });
   }
   return { pkt, entry: null, untranslated: true };    // not covered by NAT: leaves with its private source (and won't come back)
 };
 // a packet arriving on an outside interface: rewrite the destination if it matches an inside global we own
-NAT.inbound = (st, pkt) => {
+const bindIf = (st, ctx) => { for (const s of st.statics) if (s.intf) s.global = (ctx && ctx.ifAddr && ctx.ifAddr(s.intf)) || "0.0.0.0"; };
+NAT.inbound = (st, pkt, ctx) => { bindIf(st, ctx);
   const proto = pkt.proto;
   // an ICMP error (Time Exceeded, Unreachable) from any router on the way: IOS finds the flow from the packet quoted inside it
   if (pkt.err){ const f = st.table.find(e=>e.proto===proto && e.ig===pkt.dst && e.igp===pkt.dport); if (f){ st.hits++; return { pkt: {...pkt, dst: f.il, dport: f.ilp}, entry: f }; } }
@@ -124,7 +128,7 @@ NAT.clear = st => { st.table = st.table.filter(e=>e.static && (!e.proto || e.fwd
 
 const pad = (s, n) => String(s).padEnd(n);
 const ep = (ip, port) => ip==null ? "---" : port==null ? ip : `${ip}:${port}`;
-NAT.show = st => {
+NAT.show = (st, ctx) => { bindIf(st, ctx);
   syncStatics(st);
   const rows = st.table.slice().sort((a,b)=>(!!b.proto - !!a.proto) || (toInt(a.il)-toInt(b.il)));
   return ["Pro  Inside global         Inside local          Outside local         Outside global",

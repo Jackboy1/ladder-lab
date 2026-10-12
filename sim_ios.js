@@ -13,6 +13,7 @@ const maskLen = m => m.split(".").reduce((a,o)=>a+((+o).toString(2).match(/1/g)|
 const netOf = (ip,m) => { const a = toInt(ip), b = toInt(m); return [24,16,8,0].map(s=>Math.floor(((a & b)>>>0)/2**s)%256).join("."); };
 const sameNet = (a,b,m) => netOf(a,m)===netOf(b,m);
 const pad = (s,n) => String(s).padEnd(n);
+const HASHREV = {};   // every hash this engine prints → the secret it came from (so a restored backup still logs in)
 const fakeHash = (s, t) => t==="7" ? [...String(s)].map((c,i)=>((c.charCodeAt(0)^(0x1F+i))&255).toString(16).toUpperCase().padStart(2,"0")).join("").slice(0,22).padEnd(14,"0")
   : "$9$" + [...String(s)+"salt"].map((c,i)=>"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./"[(c.charCodeAt(0)*7+i*13)%64]).join("").slice(0,14) + "$" + [...String(s)].map((c,i)=>"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[(c.charCodeAt(0)*31+i*17)%62]).join("").padEnd(43,"x").slice(0,43);
 
@@ -74,6 +75,9 @@ function ios2Env(opts){
   // IOS DHCP client identifier "cisco-<mac>-<short interface>"; show dhcp lease dumps it as upper-case hex, 16 bytes a line
   const cidText = n => "cisco-" + st.intfs[n].mac + "-" + short(n);
   const cidHex = n => [...cidText(n)].map(c=>c.charCodeAt(0).toString(16).toUpperCase().padStart(2,"0")).join("").match(/.{1,32}/g).join("\n" + " ".repeat(23));
+  const ownIps = () => ifNames().map(n=>st.intfs[n].ip).filter(Boolean);
+  const natCtx = () => ({ ifAddr: n => (st.intfs[n]||{}).ip || null });
+  st.natCtx = natCtx;
   st.liveSig = () => JSON.stringify(Object.entries(st.intfs).filter(([,i])=>i.dhcpClient).map(([n,i])=>[n, i.ip, i.mask, i.dhcpGw||null]));
   st.natIfs = () => ({ ins: ifNames().filter(n=>st.intfs[n].natIn), outs: ifNames().filter(n=>st.intfs[n].natOut) });
   const snapshot = () => stripLive(JSON.parse(JSON.stringify(cfgKeys.reduce((o,k)=>(o[k]=st[k],o),{}))));
@@ -118,7 +122,9 @@ function ios2Env(opts){
   const isTrunk = n => st.opMode(n)==="trunk";
   function svIUp(v){ if (!st.vlans[v]) return false; return physical.some(n=>{ const i = st.intfs[n]; return !i.shut && !i.errdis && hooks.linkUp(n) && (isTrunk(n) ? (!i.allowed || i.allowed.includes(v)) : st.opMode(n)==="access" && (i.vlan===v || i.voiceVlan===v)); }); }
   const hasVlan = v => kind==="switch" && !!st.vlans[v];
-  const pw = (p, type7) => p==null ? null : st.servicePwEnc ? `7 ${fakeHash(p,"7")}` : p;
+  const hashOf = (p, t) => { const h = fakeHash(p, t); HASHREV[h] = p; return h; };
+  const unhash = v => { const m = String(v).match(/^([05789]) (\S+)$/); return m ? (HASHREV[m[2]]!=null ? HASHREV[m[2]] : m[2]) : v; };
+  const pw = (p, type7) => p==null ? null : st.servicePwEnc ? `7 ${hashOf(p,"7")}` : p;
 
   const compactList = arr => { const a = [...arr].sort((x,y)=>x-y), out = []; for (let k=0;k<a.length;k++){ let j = k; while (j+1<a.length && a[j+1]===a[j]+1) j++; out.push(j>k ? `${a[k]}-${a[j]}` : `${a[k]}`); k = j; } return out.join(","); };
   const activeVlans = () => Object.keys(st.vlans).map(Number).filter(v=>v<1002||v>1005).sort((a,b)=>a-b);
@@ -171,10 +177,10 @@ function ios2Env(opts){
   /* ---------- output builders ---------- */
   function runningCfg(){
     const L = ["Building configuration...","","Current configuration : 2104 bytes","!","version 17.9", st.servicePwEnc?"service password-encryption":"no service password-encryption","!",`hostname ${st.host}`,"!"];
-    if (st.enableSecret) L.push(`enable secret 9 ${fakeHash(st.enableSecret)}`);
+    if (st.enableSecret) L.push(`enable secret 9 ${hashOf(st.enableSecret)}`);
     if (st.enablePassword) L.push(`enable password ${pw(st.enablePassword)}`);
     if (st.enableSecret || st.enablePassword) L.push("!");
-    for (const [u,v] of Object.entries(st.users)) L.push(`username ${u} ${v.secret?`secret 9 ${fakeHash(v.secret)}`:`password ${pw(v.password)}`}`);
+    for (const [u,v] of Object.entries(st.users)) L.push(`username ${u} ${v.secret?`secret 9 ${hashOf(v.secret)}`:`password ${pw(v.password)}`}`);
     if (st.tz) L.push(`clock timezone ${st.tz.name} ${st.tz.h} ${st.tz.m}`);
     if (!st.domainLookup) L.push("no ip domain lookup");
     if (st.domain) L.push(`ip domain name ${st.domain}`);
@@ -655,13 +661,17 @@ function ios2Env(opts){
   // pattern tokens: keywords (lowercase) or A:WORD A:IP A:MASK A:NUM A:IF A:LINE (rest of line)
   const X = (p, run, help) => ({ p: p.split(" ").map(t=>t.startsWith("A:")?t:t.toLowerCase()), run, help });   // keywords match case-insensitively (dot1Q = dot1q)
   const execShow = [
-    X("show running-config", ()=>runningCfg()), X("show startup-config", ()=>st.startup ? runningCfgFrom(st.startup) : "startup-config is not present"),
+    X("show running-config", ()=>runningCfg()),
+    X("show running-config interface A:IF", a=>{ const n = parseIf(a[0]); if (!n || !st.intfs[n]) return "% Invalid input detected at '^' marker.";
+      const L = runningCfg().split("\n"), k = L.indexOf("interface " + n); if (k < 0) return "% Invalid input detected at '^' marker.";
+      let e = k + 1; while (e < L.length && L[e].startsWith(" ")) e++; const blk = L.slice(k, e);
+      return `Building configuration...\n\nCurrent configuration : ${blk.join("\n").length + 6} bytes\n!\n${blk.join("\n")}\nend`; }), X("show startup-config", ()=>st.startup ? runningCfgFrom(st.startup) : "startup-config is not present"),
     X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()),
     X("show interfaces", ()=>ifNames().filter(n=>!st.intfs[n].loop||true).map(showInt).join("\n")),
     X("show ip interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return "% Invalid input detected at '^' marker."; const i = st.intfs[n], l = up(n);
       const L = [`${n} is ${i.shut?"administratively down":(l||(i.mode==="svi"&&st.vlans[i.vlan]))?"up":"down"}, line protocol is ${l?"up":"down"}`];
       if (!i.ip) L.push("  Internet protocol processing disabled");
-      else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", "  MTU is 1500 bytes", "  Helper address is not set",
+      else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", "  MTU is 1500 bytes", ...(i.helpers && i.helpers.length ? (i.helpers.length===1 ? ["  Helper address is " + i.helpers[0]] : ["  Helper addresses are " + i.helpers[0], ...i.helpers.slice(1).map(h=>"                       " + h)]) : ["  Helper address is not set"]),
         "  Directed broadcast forwarding is disabled", "  Outgoing Common access list is not set", "  Outgoing access list is not set", "  Inbound Common access list is not set", "  Inbound  access list is not set",
         `  Proxy ARP is ${i.proxyArp===false?"disabled":"enabled"}`, "  Local Proxy ARP is disabled", "  Security level is default", "  Split horizon is enabled", "  ICMP redirects are always sent", "  ICMP unreachables are always sent", "  ICMP mask replies are never sent");
       return L.join("\n"); }),
@@ -682,7 +692,7 @@ function ios2Env(opts){
     X("show vtp status", ()=>kind!=="switch"?inv():`VTP Version capable             : 1 to 3\nVTP version running             : 1\nVTP Domain Name                 : ${st.vtpDomain}\nVTP Pruning Mode                : Disabled\nVTP Traps Generation            : Disabled\nDevice ID                       : ${baseMac}.0000\nVTP Operating Mode              : ${st.vtpMode[0].toUpperCase()+st.vtpMode.slice(1)}\nMaximum VLANs supported locally : 1005\nNumber of existing VLANs        : ${Object.keys(st.vlans).length}`),
     X("show logging", ()=>{ const L = hooks.logs ? hooks.logs(st) : [], n = L.length, sync = ntpState().synced;
       const hostsTxt = st.logHosts.map(h=>`        Logging to ${h}  (udp port 514, audit disabled,\n              link up),\n              ${L.filter(x=>x.sev<=st.logTrap && (x.to||[]).includes(h)).length} message lines logged,\n              0 message lines rate-limited,\n              0 message lines dropped-by-MD,\n              xml disabled, sequence number disabled\n              filtering disabled`).join("\n");
-      return `Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, 0 flushes, 0 overruns, xml disabled, filtering disabled)\n\nNo Active Message Discriminator.\n\n\nNo Inactive Message Discriminator.\n\n\n    Console logging: level ${SEV[st.logConsole!=null ? st.logConsole : 7]}, ${n} messages logged, xml disabled,\n                     filtering disabled\n    Monitor logging: level debugging, 0 messages logged, xml disabled,\n                     filtering disabled\n    Buffer logging:  level debugging, ${n} messages logged, xml disabled,\n                    filtering disabled\n    Exception Logging: size (4096 bytes)\n    Count and timestamp logging messages: disabled\n    Persistent logging: disabled\n\nNo active filter modules.\n\n    Trap logging: level ${SEV[st.logTrap]}, ${L.filter(x=>x.sev<=st.logTrap).length} message lines logged\n${hostsTxt}${hostsTxt ? "\n" : ""}        Logging Source-Interface:       VRF Name:\n\nLog Buffer (8192 bytes):\n\n` + L.map(x=>(sync ? "" : "*") + x.t + ": " + x.msg).join("\n"); }),
+      return `Syslog logging: enabled (0 messages dropped, 0 messages rate-limited, 0 flushes, 0 overruns, xml disabled, filtering disabled)\n\nNo Active Message Discriminator.\n\n\nNo Inactive Message Discriminator.\n\n\n    Console logging: level ${SEV[st.logConsole!=null ? st.logConsole : 7]}, ${n} messages logged, xml disabled,\n                     filtering disabled\n    Monitor logging: level debugging, 0 messages logged, xml disabled,\n                     filtering disabled\n    Buffer logging:  level debugging, ${n} messages logged, xml disabled,\n                    filtering disabled\n    Exception Logging: size (4096 bytes)\n    Count and timestamp logging messages: disabled\n    Persistent logging: disabled\n\nNo active filter modules.\n\n    Trap logging: level ${SEV[st.logTrap]}, ${L.filter(x=>x.trapped!=null ? x.trapped : x.sev<=st.logTrap).length} message lines logged\n${hostsTxt}${hostsTxt ? "\n" : ""}        Logging Source-Interface:       VRF Name:\n\nLog Buffer (8192 bytes):\n\n` + L.map(x=>(sync ? "" : "*") + x.t + ": " + x.msg).join("\n"); }),
     X("show mac address-table", ()=>macTable()||inv()), X("show mac address-table dynamic", ()=>macTable({type:"dynamic"})||inv()),
     X("show mac address-table address A:WORD", a=>macTable({addr:a[0].toLowerCase()})||inv()), X("show mac address-table interface A:IF", a=>{ const n = parseIf(a[0]); return n ? macTable({intf:n}) : "% Invalid interface"; }),
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
@@ -690,7 +700,12 @@ function ios2Env(opts){
     X("show lldp neighbors", ()=>lldpNeighbors()),
     X("show access-lists", ()=>window.ACL.show(st.acl)), X("show access-lists A:WORD", a=>window.ACL.show(st.acl, a[0])),
     X("show ip access-lists", ()=>window.ACL.show(st.acl)), X("show ip access-lists A:WORD", a=>window.ACL.show(st.acl, a[0])),
-    X("show ip nat translations", ()=>window.NAT.show(st.nat)), X("show ip nat statistics", ()=>{ const f = st.natIfs(); return window.NAT.stats(st.nat, f.ins, f.outs); }),
+    X("show ip nat translations", ()=>window.NAT.show(st.nat, natCtx())), X("show ip nat translations verbose", ()=>window.NAT.show(st.nat, Object.assign(natCtx(), {verbose:true}))),
+    X("show ip aliases", ()=>{ const rows = [];
+      for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && !i.shut) rows.push(["Interface", i.ip]); }
+      for (const x of st.nat.statics) if (x.global && ifNames().some(n=>{ const i = st.intfs[n]; return i.ip && sameNet(i.ip, x.global, i.mask); })) rows.push(["Dynamic", x.global]);
+      for (const pl of Object.values(st.nat.pools)) for (let a = pl.start; a <= pl.end; a++){ const ip = [24,16,8,0].map(k=>Math.floor(a/2**k)%256).join("."); if (ifNames().some(n=>{ const i = st.intfs[n]; return i.ip && sameNet(i.ip, ip, i.mask); })) rows.push(["Dynamic", ip]); }
+      return "Address Type             IP Address      Port\n" + rows.map(r=>pad(r[0], 25) + r[1]).join("\n"); }), X("show ip nat statistics", ()=>{ const f = st.natIfs(); return window.NAT.stats(st.nat, f.ins, f.outs); }),
     X("show dhcp lease", ()=>{ const L = ifNames().filter(n=>st.intfs[n].dhcpClient); if (!L.length) return "";
       return L.map(n=>{ const i = st.intfs[n], z = i.dhcpLease; if (!i.ip || !z) return `Temp IP addr: 0.0.0.0  for peer on Interface: ${n}\n   State is Selecting`;
         return `Temp IP addr: ${i.ip}  for peer on Interface: ${n}\nTemp  sub net mask: ${i.mask}\n   DHCP Lease server: ${z.server}, state: 3 Bound\n   DHCP transaction id: 1A2B\n   Lease: ${z.secs} secs,  Renewal: ${Math.floor(z.secs/2)} secs,  Rebind: ${Math.floor(z.secs*7/8)} secs\nTemp default-gateway addr: ${i.dhcpGw||"0.0.0.0"}\n   Next timer fires after: 11:59:38\n   Retry count: 0   Client-ID: ${cidText(n)}\n   Client-ID hex dump: ${cidHex(n)}\n   Hostname: ${st.host}`; }).join("\n"); }),
@@ -716,13 +731,13 @@ function ios2Env(opts){
     X("show snmp location", ()=>st.snmp.location || ""), X("show snmp contact", ()=>st.snmp.contact || ""),
   ];
   const execCommon = [
-    X("show ip dhcp binding", ()=>window.DHCP.showBinding(st.dhcp)), X("show ip dhcp pool", ()=>window.DHCP.showPool(st.dhcp)), X("show ip dhcp pool A:WORD", a=>window.DHCP.showPool(st.dhcp, a[0])),
+    X("show ip dhcp binding", ()=>window.DHCP.showBinding(st.dhcp)), X("show ip dhcp pool", ()=>window.DHCP.showPool(st.dhcp, null, ownIps())), X("show ip dhcp pool A:WORD", a=>window.DHCP.showPool(st.dhcp, a[0], ownIps())),
     X("show ip dhcp conflict", ()=>window.DHCP.showConflict(st.dhcp)),
-    X("ping A:WORD", a=>doPing(a[0])), X("ping ipv6 A:WORD", a=>I6.valid(a[0]) ? doPing6(a[0], null) : inv()), X("traceroute ipv6 A:WORD", a=>I6.valid(a[0]) ? doTrace6(a[0]) : inv()), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
+    X("ping A:WORD", a=>doPing(a[0])), X("ping ipv6 A:WORD", a=>I6.valid(a[0]) ? doPing6(a[0], null) : inv()), X("traceroute ipv6 A:WORD", a=>I6.valid(a[0]) ? doTrace6(a[0]) : inv()), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("ping A:WORD source A:WORD A:WORD", a=>doPing(a[0], a[1] + a[2])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("traceroute A:WORD source A:WORD A:WORD", a=>doTrace(a[0], a[1] + a[2])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
     X("terminal length A:NUM", ()=>""), X("terminal no monitor", ()=>""),
   ];
   const T = {
-    user: [ X("enable", ()=>goEnable()), ...execCommon, X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()), X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show clock", ()=>"*10:14:07.312 WAT Sun Oct 11 2026") ],
+    user: [ X("enable", ()=>goEnable()), ...execCommon, X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()), X("show history", ()=>st.history.slice(-20).map(h=>"  "+h).join("\n")), X("show clock", ()=>clockText()) ],
     priv: [ X("disable", ()=>{ st.mode="user"; return ""; }), X("configure terminal", ()=>{ st.mode="config"; return "Enter configuration commands, one per line.  End with CNTL/Z."; }),
       ...execShow, ...execCommon,
       X("copy running-config startup-config", ()=>ask("Destination filename [startup-config]? ", ()=>save())),
@@ -750,8 +765,8 @@ function ios2Env(opts){
     ],
     config: [
       X("hostname A:WORD", a=>{ if (!/^[A-Za-z][\w-]{0,62}$/.test(a[0])) return "% Hostname contains one or more illegal characters."; st.host = a[0]; return ""; }),
-      X("enable secret A:LINE", a=>{ const p = a[0].replace(/^[05789] /,""); st.enableSecret = p; return ""; }),
-      X("enable password A:LINE", a=>{ st.enablePassword = a[0].replace(/^[07] /,""); return st.enableSecret ? "% The enable password you have chosen is the same as your enable secret.\n% This is not recommended.  Re-enter the enable password.".replace(/.*/s, m=> a[0]===st.enableSecret?m:"") : ""; }),
+      X("enable secret A:LINE", a=>{ st.enableSecret = unhash(a[0]); return ""; }),
+      X("enable password A:LINE", a=>{ st.enablePassword = unhash(a[0]); return st.enableSecret ? "% The enable password you have chosen is the same as your enable secret.\n% This is not recommended.  Re-enter the enable password.".replace(/.*/s, m=> a[0]===st.enableSecret?m:"") : ""; }),
       X("no enable secret", ()=>{ st.enableSecret=null; return ""; }), X("no enable password", ()=>{ st.enablePassword=null; return ""; }),
       X("service password-encryption", ()=>{ st.servicePwEnc=true; return ""; }), X("no service password-encryption", ()=>{ st.servicePwEnc=false; return ""; }),
       X("banner motd A:LINE", a=>{ const s = a[0]; const d = s[0]; const end = s.indexOf(d,1); if (end<0) return ask(`Enter TEXT message.  End with the character '${d}'.`, l=>{ st.banner = (s.slice(1)+"\n"+l).replace(new RegExp("\\"+d+".*$"),""); return ""; }); st.banner = s.slice(1,end); return ""; }),
@@ -767,12 +782,12 @@ function ios2Env(opts){
       X("no vlan A:WORD", a=>{ if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(a[0])) return inv(); const vs = vlist(a[0]); const bad = vs.find(v=>v===1 || (v>=1002&&v<=1005)); if (bad) return `%Default VLAN ${bad} may not be deleted.`; for (const v of vs) delete st.vlans[v]; return ""; }),
       X("line console A:NUM", a=>{ if (a[0]!=="0") return "% Invalid input detected at '^' marker."; st.mode="config-line"; st.curLine="con"; return ""; }),
       X("line vty A:NUM A:NUM", a=>{ st.mode="config-line"; st.curLine="vty"; return ""; }),
-      X("username A:WORD secret A:LINE", a=>{ st.users[a[0]] = {secret:a[1].replace(/^[05789] /,"")}; return ""; }),
-      X("username A:WORD password A:LINE", a=>{ st.users[a[0]] = {password:a[1].replace(/^[07] /,"")}; return ""; }),
-      X("username A:WORD privilege A:NUM secret A:LINE", a=>{ st.users[a[0]] = {secret:a[2], priv:+a[1]}; return ""; }),
+      X("username A:WORD secret A:LINE", a=>{ st.users[a[0]] = {secret:unhash(a[1])}; return ""; }),
+      X("username A:WORD password A:LINE", a=>{ st.users[a[0]] = {password:unhash(a[1])}; return ""; }),
+      X("username A:WORD privilege A:NUM secret A:LINE", a=>{ st.users[a[0]] = {secret:unhash(a[2]), priv:+a[1]}; return ""; }),
       X("no username A:WORD", a=>{ delete st.users[a[0]]; return ""; }),
       X("ip domain-name A:WORD", a=>{ st.domain=a[0]; return ""; }), X("ip domain name A:WORD", a=>{ st.domain=a[0]; return ""; }),
-      X("no ip domain-lookup", ()=>{ st.domainLookup=false; return ""; }), X("no ip domain lookup", ()=>{ st.domainLookup=false; return ""; }), X("ip domain-lookup", ()=>{ st.domainLookup=true; return ""; }),
+      X("no ip domain-lookup", ()=>{ st.domainLookup=false; return ""; }), X("ip domain lookup", ()=>{ st.domainLookup=true; return ""; }), X("no ip domain lookup", ()=>{ st.domainLookup=false; return ""; }), X("ip domain-lookup", ()=>{ st.domainLookup=true; return ""; }),
       X("crypto key generate rsa", ()=>{ if (st.host==="Switch"||st.host==="Router") return "% Please define a hostname other than "+st.host+"."; if (!st.domain) return "% Please define a domain-name first."; return ask(`The name for the keys will be: ${st.host}.${st.domain}\nChoose the size of the key modulus in the range of 512 to 4096 for your\n  General Purpose Keys. Choosing a key modulus greater than 512 may take\n  a few minutes.\n\nHow many bits in the modulus [2048]: `, l=>{ const b = +(l.trim()||2048); if (!(b>=512&&b<=4096)) return "% Invalid modulus"; st.rsa=b; return `% The key modulus size is ${b} bits\n% Generating ${b} bit RSA keys, keys will be non-exportable...\n[OK] (elapsed time was 1 seconds)\n%SSH-5-ENABLED: SSH 1.99 has been enabled`; }); }),
       X("crypto key generate rsa modulus A:NUM", a=>{ if (st.host==="Switch"||st.host==="Router") return "% Please define a hostname other than "+st.host+"."; if (!st.domain) return "% Please define a domain-name first."; const b=+a[0]; if (!(b>=512&&b<=4096)) return "% Invalid modulus"; st.rsa=b; return `The name for the keys will be: ${st.host}.${st.domain}\n% The key modulus size is ${b} bits\n% Generating ${b} bit RSA keys, keys will be non-exportable...\n[OK] (elapsed time was 1 seconds)\n%SSH-5-ENABLED: SSH 1.99 has been enabled`; }),
       X("crypto key zeroize rsa", ()=>{ st.rsa=0; return "% All keys will be removed.\n%SSH-5-DISABLED: SSH 1.99 has been disabled"; }),
@@ -815,7 +830,7 @@ function ios2Env(opts){
       // ---- DHCP server ----
       X("ip dhcp excluded-address A:LINE", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "ip dhcp excluded-address " + a[0]); return r.err || ""; }),
       X("no ip dhcp excluded-address A:LINE", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "no ip dhcp excluded-address " + a[0]); return r.err || ""; }),
-      X("ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "ip dhcp pool " + a[0]); if (r.err) return r.err; st.mode = "dhcp-config"; st.curPool = r.ctx; return ""; }),
+      X("ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "ip dhcp pool " + a[0]); if (r.err) return r.err; st.mode = "config-dhcp"; st.curPool = r.ctx; return ""; }),
       X("no ip dhcp pool A:WORD", a=>{ const r = window.DHCP.globalCmd(st.dhcp, "no ip dhcp pool " + a[0]); return r.err || ""; }),
       // ---- syslog ----
       X("logging host A:IP", a=>{ if (!st.logHosts.includes(a[0])) st.logHosts.push(a[0]); return ""; }), X("logging A:IP", a=>{ if (!st.logHosts.includes(a[0])) st.logHosts.push(a[0]); return ""; }),
@@ -846,7 +861,7 @@ function ios2Env(opts){
       X("no ip name-server", ()=>{ st.nameServers = []; return ""; }), X("no ip name-server A:LINE", a=>{ const t = a[0].trim().split(/\s+/); st.nameServers = st.nameServers.filter(x=>!t.includes(x)); return ""; }),
       X("ip dns server", ()=>{ st.dnsServer = true; return ""; }), X("no ip dns server", ()=>{ st.dnsServer = false; return ""; }),
       // ---- NAT/PAT ----
-      X("ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
+      X("ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "ip nat " + a[0], {ifName: n=>parseIf(n), ifAddr: n => (st.intfs[n]||{}).ip || null}); return r.err || ""; }),
       X("no ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "no ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
       X("service dhcp", ()=>{ st.serviceDhcp = true; return ""; }), X("no service dhcp", ()=>{ st.serviceDhcp = false; return ""; }),
       X("ipv6 unicast-routing", ()=>{ st.v6routing = true; return ""; }), X("ipv6 route static resolve default", ()=>{ st.v6resolveDefault = true; return ""; }), X("no ipv6 route static resolve default", ()=>{ st.v6resolveDefault = false; return ""; }), X("no ipv6 unicast-routing", ()=>{ st.v6routing = false; return ""; }),
@@ -964,7 +979,7 @@ function ios2Env(opts){
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
     ],
     "config-line": [
-      X("password A:LINE", a=>{ st.lines[st.curLine].password=a[0].replace(/^[07] /,""); return ""; }), X("no password", ()=>{ st.lines[st.curLine].password=null; return ""; }),
+      X("password A:LINE", a=>{ st.lines[st.curLine].password=unhash(a[0]); return ""; }), X("no password", ()=>{ st.lines[st.curLine].password=null; return ""; }),
       X("login", ()=>{ const L = st.lines[st.curLine]; L.login=true; L.loginLocal=false; return L.password ? "" : "% Login disabled on line "+(st.curLine==="con"?0:1)+", until 'password' is set"; }),
       X("login local", ()=>{ const L = st.lines[st.curLine]; L.loginLocal=true; L.login=true; return ""; }), X("no login", ()=>{ const L = st.lines[st.curLine]; L.login=false; L.loginLocal=false; return ""; }),
       X("transport input A:LINE", a=>{ if (st.curLine!=="vty") return inv(); const v = a[0].trim().toLowerCase(); if (!/^(ssh|telnet|all|none|telnet ssh|ssh telnet)$/.test(v)) return "% Invalid input detected at '^' marker."; st.lines.vty.transport = /telnet ssh|ssh telnet/.test(v) ? "telnet ssh" : v; return ""; }),
@@ -972,7 +987,7 @@ function ios2Env(opts){
       X("logging synchronous", ()=>{ st.lines[st.curLine].sync=true; return ""; }),
     ],
     "config-std-nacl": aclMode(), "config-ext-nacl": aclMode(),
-    "dhcp-config": ["network","default-router","dns-server","domain-name","lease"].flatMap(k=>[
+    "config-dhcp": ["network","default-router","dns-server","domain-name","lease"].flatMap(k=>[
       X(k + " A:LINE", a=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, k + " " + a[0]); return r.err || ""; }),
       X("no " + k, ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }),
       X("no " + k + " A:LINE", ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }) ]),
@@ -998,7 +1013,7 @@ function ios2Env(opts){
   };
   const cfgDone = () => `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
-  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","dhcp-config"]) T[m].push(...cfgCommon);
+  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
   const SEV = ["emergencies","alerts","critical","errors","warnings","notifications","informational","debugging"];
@@ -1012,17 +1027,17 @@ function ios2Env(opts){
   function clockText(detail){ const t = new Date(clockMs()), n = ntpState(), two = x=>String(x).padStart(2,"0");
     const line = `${n.synced?"":st.ntpWas?".":"*"}${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())}.${String(t.getUTCMilliseconds()).padStart(3,"0")} ${st.tz?st.tz.name:"UTC"} ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`;
     return detail ? line + "\nTime source is " + (n.synced || st.ntpWas ? "NTP" : st.clockSetAt!=null ? "user configuration" : "hardware calendar") : line; }
-  const ntpHex = () => (Math.floor(clockMs()/1000) + 2208988800).toString(16).toUpperCase().padStart(8, "0") + ".3F5C28F6";   // NTP time = seconds since 1900
+  const ntpHex = () => (Math.floor((st.clockSetAt!=null ? st.clockSetAt : hooks.now())/1000) + 2208988800).toString(16).toUpperCase().padStart(8, "0") + ".3F5C28F6";   // NTP time = seconds since 1900
   function ntpStatus(){ if (!ntpOn()) return "%NTP is not enabled."; const n = ntpState();
     if (!n.synced) return "Clock is unsynchronized, stratum 16, no reference clock\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 0 (1/100 of seconds), resolution is 4000\nreference time is 00000000.00000000 (00:00:00.000 UTC Mon Jan 1 1900)\nclock offset is 0.0000 msec, root delay is 0.00 msec\nroot dispersion is 0.00 msec, peer dispersion is 0.00 msec\nloopfilter state is 'FSET' (Drift set from file), drift is 0.000000000 s/s\nsystem poll interval is 8, never updated.";
     return `Clock is synchronized, stratum ${n.stratum}, reference is ${n.ref}\nnominal freq is 250.0000 Hz, actual freq is 250.0000 Hz, precision is 2**10\nntp uptime is 1500 (1/100 of seconds), resolution is 4000\nreference time is ${ntpHex()} (${clockText().replace(/^[*.]/,"")})\nclock offset is 0.0000 msec, root delay is ${n.ref==="127.127.1.1" ? "0.00" : "1.00"} msec\nroot dispersion is 7.55 msec, peer dispersion is 0.12 msec\nloopfilter state is 'CTRL' (Normal Controlled Loop), drift is 0.000000000 s/s\nsystem poll interval is 64, last update was 10 sec ago.`; }
   function ntpAssoc(){ if (!ntpOn()) return "%NTP is not enabled."; const n = ntpState(), rows = [];
     if (st.ntpMaster!=null) rows.push({mark: n.ref==="127.127.1.1" ? "*" : " ", addr:"127.127.1.1", ref:".LOCL.", st: st.ntpMaster - 1, reach: 377, delay:"0.000"});
-    for (const pe of (n.peers||[])) rows.push({mark: pe.sys ? "*" : pe.reach ? "+" : " ", addr: pe.ip, ref: pe.ref || ".INIT.", st: pe.reach ? pe.stratum : 16, reach: pe.reach ? 377 : 0, delay: pe.reach ? "1.000" : "0.000"});
+    for (const pe of (n.peers||[])) rows.push({mark: pe.sys ? "*" : pe.reach && pe.stratum < 16 ? "+" : " ", addr: pe.ip, ref: pe.ref || ".INIT.", st: pe.reach ? pe.stratum : 16, reach: pe.reach ? 377 : 0, delay: pe.reach ? "1.000" : "0.000"});
     return "  address         ref clock       st   when   poll reach  delay  offset   disp\n" + rows.map(r=>`${r.mark}~${pad(r.addr,16)}${pad(r.ref,16)}${String(r.st).padStart(2)}  ${String(r.reach ? 14 : "-").padStart(5)}  ${String(64).padStart(5)}  ${String(r.reach).padStart(4)}  ${r.delay.padStart(5)}   0.000  ${r.reach ? "0.123" : "15937."}`).join("\n") + (rows.length ? "\n" : "") + " * sys.peer, # selected, + candidate, - outlyer, x falseticker, ~ configured"; }
   // name → address: the host table first, then the configured name servers (the default domain is added to a name without a dot)
   function resolveName(name){ const nm = name.toLowerCase(), fq = !nm.includes(".") && st.domain ? nm + "." + st.domain : nm;
-    if (st.iosHosts[nm]) return {ip: st.iosHosts[nm], how:"table"};
+    if (st.iosHosts[nm] || st.iosHosts[fq]) return {ip: st.iosHosts[nm] || st.iosHosts[fq], how:"table"};
     if (!st.domainLookup) return {ip:null, how:"nolookup"};
     if (!st.nameServers.length) return {ip:null, how:"broadcast", tried: fq};
     const r = hooks.dns ? hooks.dns(fq, st.nameServers) : null;
@@ -1184,7 +1199,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-ext-nacl":h+"(config-ext-nacl)#", "dhcp-config":h+"(dhcp-config)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;

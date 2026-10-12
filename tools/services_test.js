@@ -275,5 +275,66 @@ const mkSvc = (r1x, r2x) => Bench.create({ devices: [
   ok(Bench.trapGot(B, "srv", /GigabitEthernet0\/0, changed state to down/) || Bench.trapGot(B, "srv", /administratively down/) || Bench.trapGot(B, "srv", /LINEPROTO.*down/), "traps: the interface going down reaches the manager", JSON.stringify(B.syslog.r2.map(x=>x.msg)));
   ok(/snmp-server community LabRO RO\nsnmp-server community LabRW RW\nsnmp-server community Locked RO 5\nsnmp-server location Kano rack 3\nsnmp-server contact noc@example\.com\nsnmp-server enable traps snmp authentication linkdown linkup coldstart warmstart\nsnmp-server enable traps config\nsnmp-server host 192\.168\.50\.10 version 2c LabRO/.test(cli(B, "r2", "show running-config")), "running-config: snmp-server lines", cli(B, "r2", "show running-config")); }
 
+// ---- fixes from the Module 7 writers and fact-checks ----
+{ // (dhcp-config)# is a config sub-mode: do, a second pool, any global command
+  const e = SIM.ios2Env({kind:"router"}); for (const c of ["en","conf t","int g0/0","ip address 10.1.1.1 255.255.255.0","no shut","exit","ip dhcp pool A","network 10.1.1.0 255.255.255.0"]) e.exec(c);
+  ok(/Pool A :/.test(e.exec("do show ip dhcp pool")), "do show … works inside (dhcp-config)#");
+  e.exec("ip dhcp pool B"); ok(e.prompt()==="Router(dhcp-config)#", "a second ip dhcp pool typed inside the first switches pools", e.prompt());
+  e.exec("network 10.2.2.0 255.255.255.0"); e.exec("interface g0/1"); ok(e.prompt()==="Router(config-if)#", "a global command typed in (dhcp-config)# drops to global config and runs", e.prompt());
+  e.exec("end"); ok(/ip dhcp pool B\n network 10\.2\.2\.0 255\.255\.255\.0/.test(e.exec("show running-config")), "pool B got its network");
+  // hashed secrets restored from a backup still log in
+  for (const c of ["conf t","enable secret Lagos#Core1","username netops secret N0c!pass","end"]) e.exec(c);
+  const run = e.exec("show running-config"), sec = run.match(/enable secret 9 (\S+)/)[1], us = run.match(/username netops secret 9 (\S+)/)[1];
+  const e2 = SIM.ios2Env({kind:"router"}); for (const c of ["en","conf t","enable secret 9 " + sec,"username netops secret 9 " + us,"end","disable"]) e2.exec(c);
+  const a = e2.exec("enable"); ok(a && a.ask && /Password/.test(a.ask) && (e2.exec("Lagos#Core1"), e2.prompt()==="Router#"), "enable secret 9 <hash> merged from a backup: the original secret works", e2.prompt());
+  ok(/^\*?\.?\d\d:\d\d:\d\d\.\d{3} UTC /.test((e2.exec("disable"), e2.exec("show clock"))), "show clock at the user prompt shows the real clock", e2.exec("show clock")); }
+{ const B = mk();
+  ok(/  Helper address is 10\.0\.12\.1\n/.test(cli(B, "r2", "show ip interface g0/0")), "show ip interface: Helper address is 10.0.12.1", cli(B, "r2", "show ip interface g0/0"));
+  ok(/^Building configuration\.\.\.\n\nCurrent configuration : \d+ bytes\n!\ninterface GigabitEthernet0\/0\n ip address 192\.168\.20\.1 255\.255\.255\.0\n ip helper-address 10\.0\.12\.1\nend$/.test(cli(B, "r2", "show running-config interface g0/0")), "show running-config interface g0/0", cli(B, "r2", "show running-config interface g0/0"));
+  cfg(["no ip domain-lookup", "ip domain lookup"])(B.devs.r1.env); ok(!/no ip domain lookup/.test(cli(B, "r1", "show running-config")), "ip domain lookup (with a space) turns lookups back on");
+  ok(/Packet sent with a source address of 192\.168\.20\.1/.test(cli(B, "r2", "ping 192.168.10.1 source gigabitethernet 0/0")), "ping … source <type> <number> (with a space)", cli(B, "r2", "ping 192.168.10.1 source gigabitethernet 0/0"));
+  pc(B, "p1", "ipconfig /release"); Bench.act(B, ["dhcp", "p3"]); const r = pc(B, "p3", "ipconfig /renew");
+  ok(!/PC1/.test(log(B)), "/renew logs only its own attempt (not the previous action's frames)", log(B)); }
+{ // NAT: reply source after a static translation, traceroute's last hop, PAT keeps a socket's port, alias without ip nat outside, interface port forward
+  const srv = { id:"cam", kind:"server", label:"NVR", x:200, y:350, ip:"192.168.10.80", mask:"255.255.255.0", gw:"192.168.10.1" };
+  const B = mkNat(["ip nat inside source static 192.168.10.80 203.0.113.5", ...NATX.pat, "ip nat inside source static tcp 192.168.10.80 443 interface g0/1 8443"], [srv]);
+  pc(B, "web", "ping 203.0.113.5");
+  ok(!/isn't matched by any NAT rule/.test(log(B)) && /source 192\.168\.10\.80:\d+ → 203\.0\.113\.5/.test(log(B)), "an outside ping of a static global: the reply is translated back on the way out (frame log)", log(B));
+  ok(/\s203\.0\.113\.5\n\nTrace complete\./.test(pc(B, "web", "tracert 203.0.113.5")), "tracert from outside to a static global ends at the global address", pc(B, "web", "tracert 203.0.113.5"));
+  pc(B, "p1", "ping 198.51.100.10"); pc(B, "p1", "ping 198.51.100.1");
+  const t = cli(B, "edge", "show ip nat translations");
+  ok(/icmp 203\.0\.113\.2:1\s+192\.168\.10\.10:1\s+198\.51\.100\.1:1/.test(t) && !/:1026/.test(t), "PAT: the same PC socket to a second destination keeps its global port", t);
+  ok(/tcp  203\.0\.113\.2:8443\s+192\.168\.10\.80:443\s+---\s+---/.test(t) && /ip nat inside source static tcp 192\.168\.10\.80 443 interface GigabitEthernet0\/1 8443/.test(cli(B, "edge", "show running-config")), "port forward to the interface address", t);
+  ok(!/\(\d+ match/.test(cli(B, "edge", "show access-lists")), "NAT lookups don't count as ACL matches (IOS XE)", cli(B, "edge", "show access-lists"));
+  ok(/Dynamic\s+203\.0\.113\.5/.test(cli(B, "edge", "show ip aliases")), "show ip aliases lists the static global", cli(B, "edge", "show ip aliases"));
+  const B2 = mkNat(["ip nat inside source static 192.168.10.80 203.0.113.5", "int g0/0", "ip nat inside", "exit"], [srv]);
+  ok(/Request timed out/.test(pc(B2, "web", "ping 203.0.113.5")) && /ARP reply[^\n]*EDGE/.test(log(B2)), "the alias answers ARP even before ip nat outside (the ping still fails until it is set)", log(B2)); }
+{ // DNS server details, Windows resolver cache
+  const B = mkSvc(["ip dns server", "ip host files 192.168.50.20", "ip name-server 192.168.50.10", "ip domain name hq.example.com", "ip host kano-prn.hq.example.com 192.168.20.30"]);
+  ok(/Translating "kano-prn"|Sending 5, 100-byte ICMP Echos to 192\.168\.20\.30/.test(cli(B, "r1", "ping kano-prn")) && !/Unrecognized/.test(cli(B, "r1", "ping kano-prn")), "a short name matches a dotted ip host entry with the default domain", cli(B, "r1", "ping kano-prn"));
+  cfg(["ip dns server", "ip name-server 192.168.50.10"])(B.devs.r2.env);
+  ok(/Non-authoritative answer:/.test(pc(B, "p2", "nslookup portal.hq.example.com")), "forwarded answer: non-authoritative");
+  cfg(["ip host branch-prn 192.168.20.30"])(B.devs.r2.env);
+  ok(/Non-authoritative answer:\nName:    branch-prn/.test(pc(B, "p2", "nslookup branch-prn")), "host-table answer from an IOS DNS server: also non-authoritative", pc(B, "p2", "nslookup branch-prn"));
+  cfg(["no ip domain-lookup"])(B.devs.r2.env);
+  ok(/Non-existent domain|can't find/.test(pc(B, "p2", "nslookup portal.hq.example.com")), "with no ip domain lookup the IOS DNS server stops forwarding", pc(B, "p2", "nslookup portal.hq.example.com"));
+  pc(B, "p1", "ping portal"); ok(/Record Name . . . . . : portal\.hq\.example\.com\n[\s\S]*A \(Host\) Record . . . : 192\.168\.50\.20/.test(pc(B, "p1", "ipconfig /displaydns")), "ipconfig /displaydns lists the cached answer", pc(B, "p1", "ipconfig /displaydns"));
+  pc(B, "p1", "ipconfig /flushdns"); ok(/Could not display the DNS Resolver Cache\./.test(pc(B, "p1", "ipconfig /displaydns")), "/flushdns empties it"); }
+{ // link changes are logged on both ends; SNMP details
+  const B = mkSvc(null, ["snmp-server community LabRO RO", "snmp-server host 192.168.50.10 version 2c LabRO", "snmp-server enable traps"]);
+  cfg(["int g0/1", "shutdown"])(B.devs.r1.env); cli(B, "r2", "show clock");
+  ok(Bench.logged(B, "r2", /%LINK-3-UPDOWN: Interface GigabitEthernet0\/1, changed state to down/) && Bench.logged(B, "r2", /%LINEPROTO-5-UPDOWN: Line protocol on Interface GigabitEthernet0\/1, changed state to down/), "R1 shuts its side: R2 logs its own link going down");
+  Bench.act(B, ["unplug", "p2:eth"]);
+  ok(Bench.logged(B, "r2", /Interface GigabitEthernet0\/0, changed state to down/), "pulling a cable: the router logs the link down");
+  cfg(["int g0/1", "no shutdown"])(B.devs.r1.env); Bench.act(B, ["plug", "cat6", "p2:eth", "r2:g0"]);
+  ok(Bench.trapGot(B, "srv", /GigabitEthernet0\/0, changed state to down/), "… and the manager gets the linkDown trap");
+  ok(/^DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks:/.test(pc(B, "srv", "snmpget -v2c -c LabRO 10.0.12.2 sysUpTime.0")), "sysUpTimeInstance has no .0", pc(B, "srv", "snmpget -v2c -c LabRO 10.0.12.2 sysUpTime.0"));
+  const w = pc(B, "srv", "snmpwalk -v2c -c LabRO 10.0.12.2");
+  ok(/sysName\.0 = STRING: R2/.test(w) && /IF-MIB::ifOperStatus/.test(w), "snmpwalk with no object walks mib-2 (system and interfaces)", w); }
+{ const B = Bench.create({ devices: [
+    { id:"r1", kind:"router", label:"R1", x:0, y:0, config: cfg(["int g0/0","ip address 10.5.5.1 255.255.255.252","no shut","exit","ip dhcp pool T","network 10.5.5.0 255.255.255.252"]) },
+    { id:"p1", kind:"pc", label:"PC1", x:0, y:300, dhcp:true } ], cables: [{type:"cat6",a:"r1:g0",b:"p1:eth"}] });
+  ok(/^ 0\.0\.0\.0\s+10\.5\.5\.1/m.test(cli(B, "r1", "show ip dhcp pool")), "a full pool shows Current index 0.0.0.0", cli(B, "r1", "show ip dhcp pool")); }
+
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;
