@@ -214,6 +214,37 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   ok(/% Authentication failed/.test(JSON.stringify(D.devs.r2.env.exec("netops") && D.devs.r2.env.exec("nope"))), "wrong console password: % Authentication failed");
   ok(/banner login \^CAuthorised staff only\^C/.test((D.devs.r2.env.exec("netops"), D.devs.r2.env.exec("Adm1n!"), D.devs.r2.env.exec("en"), out({out:D.devs.r2.env.exec("show running-config")}))), "running-config: banner login"); }
 
+{ // port security: dynamic addresses age out with the link; no … sticky → dynamic; clear port-security; err-disabled views; recovery
+  const B = mkSw(["int g0/2", "switchport mode access", "switchport port-security", "switchport port-security maximum 2"]);
+  pc(B, "p1", "ping 192.168.10.1"); ok(Bench.secureMacs(B, "sw", "g2").length===1, "dynamic secure MAC learned");
+  Bench.act(B, ["unplug", "p1:eth"]); pc(B, "lap", "ipconfig"); ok(Bench.secureMacs(B, "sw", "g2").length===0, "link down: the dynamic secure address is forgotten", JSON.stringify(Bench.secureMacs(B, "sw", "g2")));
+  Bench.act(B, ["plug", "cat6", "p1:eth", "sw:g2"]); cfg(["int g0/2", "switchport port-security mac-address sticky"])(B.devs.sw.env); pc(B, "p1", "ping 192.168.10.1");
+  cfg(["int g0/2", "no switchport port-security mac-address sticky"])(B.devs.sw.env);
+  ok(Bench.secureMacs(B, "sw", "g2").join()===B.devs.p1.mac + ":dynamic" && !/mac-address sticky/.test(cli(B, "sw", "show running-config")), "no switchport port-security mac-address sticky: sticky addresses become dynamic", JSON.stringify(Bench.secureMacs(B, "sw", "g2")));
+  cli(B, "sw", "clear port-security dynamic interface g0/2"); ok(Bench.secureMacs(B, "sw", "g2").length===0, "clear port-security dynamic interface g0/2");
+  const C = mkSw(["errdisable recovery cause psecure-violation", "errdisable recovery interval 120", "int g0/2", "switchport mode access", "switchport port-security", "switchport port-security mac-address sticky"]);
+  pc(C, "p1", "ping 192.168.10.1"); Bench.act(C, ["unplug", "p1:eth"]); Bench.act(C, ["plug", "cat6", "lap:eth", "sw:g2"]); pc(C, "lap", "ping 192.168.10.1");
+  const se = cli(C, "sw", "show interfaces status err-disabled");
+  ok(/^\nPort      Name               Status       Reason               Err-disabled Vlans\nGi0\/2\s+err-disabled psecure-violation$/.test(se), "show interfaces status err-disabled", se);
+  const er = cli(C, "sw", "show errdisable recovery");
+  ok(/psecure-violation            Enabled/.test(er) && /bpduguard                    Disabled/.test(er) && /Timer interval: 120 seconds/.test(er) && /Gi0\/2           psecure-violation\s+120/.test(er), "show errdisable recovery: timer enabled, Gi0/2 waiting", er);
+  C.now += 121000; pc(C, "lap", "ipconfig");
+  ok(!Bench.errdis(C, "sw", "g2") && /%PM-4-ERR_RECOVER: Attempting to recover from psecure-violation err-disable state on Gi0\/2/.test(cli(C, "sw", "show logging")), "after the interval the switch re-enables the port (%PM-4-ERR_RECOVER)", cli(C, "sw", "show logging"));
+  pc(C, "lap", "ping 192.168.10.1"); ok(Bench.errdis(C, "sw", "g2")==="psecure-violation", "…and the visitor's MAC err-disables it again (the cause is still there)"); }
+{ // DHCP snooping also checks renewals; DAI explicit deny / static
+  const B = mkSnoop([]); Bench.act(B, ["dhcp", "p1"]); const rogueIp = B.devs.p1.ip;
+  if (/^10\.99\.99\./.test(rogueIp||"")){ cfg(["ip dhcp snooping", "ip dhcp snooping vlan 1", "no ip dhcp snooping information option", "int g0/8", "ip dhcp snooping trust"])(B.devs.sw.env);
+    pc(B, "p1", "ipconfig /renew");
+    ok(B.devs.p1.ip===rogueIp && /DHCP snooping<\/b>: a DHCP Ack is a SERVER message and this port is untrusted → dropped/.test(B.log.join("\n")), "snooping on: the rogue's unicast renewal Ack is dropped too", B.log.join("\n")); }
+  else ok(false, "test setup: PC1 should start on the home router's address", rogueIp);
+  const B2 = mkSnoop(["ip dhcp snooping", "ip dhcp snooping vlan 1", "no ip dhcp snooping information option", "int g0/8", "ip dhcp snooping trust"]); Bench.act(B2, ["dhcp", "p1"]);
+  cli(B2, "sw", "clear ip dhcp snooping binding *"); ok(!Bench.snoopBound(B2, "sw", B2.devs.p1.mac), "binding cleared");
+  pc(B2, "p1", "ipconfig /renew"); ok(Bench.snoopBound(B2, "sw", B2.devs.p1.mac), "a renewal through the trusted uplink re-creates the binding", log(B2));
+  cfg(["ip arp inspection vlan 1", "int g0/8", "ip arp inspection trust", "exit", "arp access-list BLOCK", "deny ip host " + B2.devs.p1.ip + " mac host " + B2.devs.p1.mac, "exit", "ip arp inspection filter BLOCK vlan 1"])(B2.devs.sw.env);
+  pc(B2, "p1", "arp -d");
+  ok(!/Reply from 192\.168\.10\.1: bytes/.test(pc(B2, "p1", "ping 192.168.10.1")) && /%SW_DAI-4-ACL_DENY: 1 Invalid ARPs \(Req\) on Gi0\/3/.test(cli(B2, "sw", "show logging")), "an explicit deny in the ARP ACL drops PC1 although it has a binding (ACL_DENY)", cli(B2, "sw", "show logging"));
+  Bench.act(B2, ["dhcp", "p2"]); cfg(["ip arp inspection filter BLOCK vlan 1 static"])(B2.devs.sw.env); pc(B2, "p2", "arp -d");
+  ok(!/Reply from 192\.168\.10\.1: bytes/.test(pc(B2, "p2", "ping 192.168.10.1")) && /%SW_DAI-4-ACL_DENY: 1 Invalid ARPs \(Req\) on Gi0\/4/.test(cli(B2, "sw", "show logging")), "filter … static: no ACL match → ACL_DENY (bindings not consulted)"); }
 { // stage D review fixes
   const B = mk(null, ["security passwords min-length 8", "username ops privilege 15 algorithm-type sha256 secret L0ngPassw0rd", "username old algorithm-type md5 secret L0ngPassw0rd", "enable algorithm-type sha256 secret En4bleSecret"]);
   const rc = cli(B, "r2", "show running-config");

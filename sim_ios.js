@@ -738,12 +738,21 @@ function ios2Env(opts){
       if (q) L.push("     Router presently in Quiet-Mode.", `     Will remain in Quiet-Mode for ${Math.max(1, Math.round((st.quietUntil - hooks.now())/1000))} seconds.`, st.loginQuietAcl ? `     Restricted logins filtered by applied ACL ${st.loginQuietAcl}.` : "     Denying logins from all sources.");
       else { const fl = (st.loginFails||[]).filter(t=>hooks.now() - t < b.within*1000); L.push("     Router presently in Normal-Mode.", `     Current Watch Window remaining time ${fl.length ? Math.max(1, b.within - Math.round((hooks.now() - fl[0])/1000)) : b.within} seconds.`, `     Present login failure count ${fl.length}.`); }
       return L.join("\n"); }),
-    X("show ip dhcp snooping", ()=>kind==="switch" ? snoopShow() : inv()), X("show ip dhcp snooping binding", ()=>kind==="switch" ? snoopBind() : inv()),
+    X("show ip dhcp snooping", ()=>kind==="switch" ? snoopShow() : inv()),
+    X("show interfaces status err-disabled", ()=>{ if (kind!=="switch") return inv(); const E = physical.filter(n=>st.intfs[n].errdis); if (!E.length) return "";
+      return ["", "Port      Name               Status       Reason               Err-disabled Vlans", ...E.map(n=>`${pad(short(n), 10)}${pad(st.intfs[n].desc||"", 19)}err-disabled ${st.intfs[n].errdis}`)].join("\n"); }),
+    X("show errdisable recovery", ()=>{ if (kind!=="switch") return inv(); const on = st.errRecovery || [], iv = st.errRecoveryInt || 300, now = hooks.now();
+      const R = ["arp-inspection","bpduguard","channel-misconfig (STP)","dhcp-rate-limit","dtp-flap","gbic-invalid","inline-power","l2ptguard","link-flap","mac-limit","link-monitor-failure","loopback","oam-remote-failure","pagp-flap","port-mode-failure","pppoe-ia-rate-limit","psecure-violation","security-violation","sfp-config-mismatch","small-frame","storm-control","udld","unicast-flood","vmps","psp"];
+      const L = ["ErrDisable Reason            Timer Status", "-----------------            --------------", ...R.map(r=>`${pad(r, 29)}${on.includes(r.split(" ")[0]) ? "Enabled" : "Disabled"}`), "", `Timer interval: ${iv} seconds`, "", "Interfaces that will be enabled at the next timeout:", ""];
+      const W = physical.filter(n=>st.intfs[n].errdis && on.includes(st.intfs[n].errdis));
+      if (W.length) L.push("Interface       Errdisable reason       Time left(sec)", "---------       -----------------       --------------", ...W.map(n=>{ const i = st.intfs[n], left = Math.max(0, Math.round(((i.errdisAt||now) + iv*1000 - now)/1000)); return `${pad(short(n), 16)}${pad(i.errdis, 24)}${String(left).padStart(5)}`; }));
+      return L.join("\n").replace(/\n+$/, ""); }), X("show ip dhcp snooping binding", ()=>kind==="switch" ? snoopBind() : inv()),
     X("show ip arp inspection", ()=>kind==="switch" ? daiShow() : inv()),
     X("show ip arp inspection vlan A:NUM", ()=>kind==="switch" ? daiShow() : inv()),
     X("show ip arp inspection statistics", ()=>kind==="switch" ? daiStatsTable(st.dai.vlans) : inv()),
     X("show ip arp inspection statistics vlan A:NUM", a=>kind==="switch" ? daiStatsTable([+a[0]]) : inv()),
-    X("clear ip arp inspection statistics", ()=>{ st.daiStats = {}; return ""; }), X("clear ip dhcp snooping binding A:WORD", ()=>{ st.snoopBind = {}; return ""; }),
+    X("clear ip arp inspection statistics", ()=>{ st.daiStats = {}; return ""; }),
+    X("clear port-security A:WORD", a=>clearPsec(a[0], null)), X("clear port-security A:WORD interface A:IF", a=>clearPsec(a[0], a[1])), X("clear ip dhcp snooping binding A:WORD", ()=>{ st.snoopBind = {}; return ""; }),
     X("show port-security", ()=>kind==="switch" ? psecShow() : inv()),
     X("show port-security interface A:IF", a=>{ const n = parseIf(a[0]); if (kind!=="switch" || !n || !st.intfs[n]) return inv(); return psecIf(n); }),
     X("show port-security address", ()=>kind==="switch" ? psecAddr() : inv()),
@@ -974,7 +983,7 @@ function ios2Env(opts){
     ],
     "config-if": [
       X("description A:LINE", a=>{ forCur(i=>i.desc=a[0].slice(0,240)); return ""; }), X("no description", ()=>{ forCur(i=>i.desc=""); return ""; }),
-      X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ i.errdis = null; if (!i.shut){ i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
+      X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ i.errdis = null; if (i.psecMacs) i.psecMacs = i.psecMacs.filter(m=>m.type!=="dynamic"); if (!i.shut){ i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
       X("no shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (i.shut){ i.shut=false; if (up(n)) out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to up`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to up`); else if (i.mode!=="svi") out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
       X("ip address A:IP A:MASK", a=>{ const i = st.intfs[st.cur]; if (i.sub && !i.encap) return "% Configuring IP routing on a LAN subinterface is only allowed if that\nsubinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q,\nor ISL vLAN."; if (kind==="switch" && i.mode!=="svi" && i.mode!=="routed" && !i.loop) return "                                   ^\n% Invalid input detected at '^' marker.\n(a Layer 2 switch port has no IP address — configure the management IP on interface vlan 1)"; if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; if (!maskOk(a[1])) return ipRe.test(a[1]) ? `% Bad mask 0x${toInt(a[1]).toString(16).toUpperCase().padStart(8,"0")} for address ${a[0]}` : "% Invalid input detected at '^' marker.";
         const len = maskLen(a[1]);
@@ -1035,7 +1044,8 @@ function ios2Env(opts){
       X("switchport port-security violation A:WORD", a=>{ const m = ["shutdown","restrict","protect"].find(x=>x.startsWith(a[0].toLowerCase())); if (!m) return inv(); return psec(i=>{ i.psecViol = m; }, true); }),
       X("no switchport port-security violation", ()=>psec(i=>{ delete i.psecViol; }, true)),
       X("switchport port-security mac-address sticky", ()=>psec(i=>{ i.psecSticky = true; for (const m of (i.psecMacs||[])) if (m.type==="dynamic") m.type = "sticky"; }, true)),
-      X("no switchport port-security mac-address sticky", ()=>psec(i=>{ delete i.psecSticky; i.psecMacs = (i.psecMacs||[]).filter(m=>m.type!=="sticky"); }, true)),
+      X("no switchport port-security mac-address sticky", ()=>psec(i=>{ delete i.psecSticky; for (const m of (i.psecMacs||[])) if (m.type==="sticky") m.type = "dynamic"; }, true)),
+      X("no switchport port-security mac-address sticky A:WORD", a=>{ const m = normMac(a[0]); if (!m) return inv(); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>!(x.mac===m && x.type==="sticky")); }, true); }),
       X("switchport port-security mac-address sticky A:WORD", a=>{ const m = normMac(a[0]); if (!m) return inv(); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>x.mac!==m); i.psecMacs.push({mac:m, type:"sticky", vlan:i.vlan}); }, true); }),
       X("switchport port-security mac-address A:WORD", a=>{ const m = normMac(a[0]); if (!m) return inv(); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>x.mac!==m); i.psecMacs.push({mac:m, type:"static", vlan:i.vlan}); }, true); }),
       X("no switchport port-security mac-address A:WORD", a=>{ const m = normMac(a[0]); return psec(i=>{ i.psecMacs = (i.psecMacs||[]).filter(x=>x.mac!==m); }, true); }),
@@ -1159,6 +1169,11 @@ function ios2Env(opts){
       ...vl.map(v=>{ const x = S0[v] || {}; return `${String(v).padStart(5)}${n(x.dhcpPermit,15)}${n(x.aclPermit,15)}${n(0,15)}${n(0,22)}`; }), "",
       " Vlan   Dest MAC Failures   IP Validation Failures   Invalid Protocol Data", " ----   -----------------   ----------------------   ---------------------",
       ...vl.map(v=>`${String(v).padStart(5)}${n(0,20)}${n(0,25)}${n(0,24)}`)].join("\n"); }
+  // clear port-security all|configured|dynamic|sticky [interface X] — removes secure addresses (configured/sticky also leave the running-config)
+  function clearPsec(what, ifn){ if (kind!=="switch") return inv(); const w = ["all","configured","dynamic","sticky"].find(x=>x.startsWith(String(what).toLowerCase())); if (!w) return inv();
+    const T0 = {configured:"static", dynamic:"dynamic", sticky:"sticky"}; let names = physical;
+    if (ifn){ const n = parseIf(ifn); if (!n || !st.intfs[n]) return inv(); names = [n]; }
+    for (const n of names){ const i = st.intfs[n]; if (i.psecMacs) i.psecMacs = w==="all" ? [] : i.psecMacs.filter(m=>m.type!==T0[w]); } return ""; }
   const normMac = m => { const h = String(m).toLowerCase().replace(/[^0-9a-f]/g, ""); return h.length===12 ? h.match(/.{4}/g).join(".") : null; };
   // port security works on static access (or trunk) ports only — a dynamic (DTP) port refuses it, like IOS
   function psec(fn, sub){ if (kind!=="switch") return inv();

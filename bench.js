@@ -247,7 +247,7 @@ function evaluateGuards(B, S){
       const fi = f.dev.env.intfs[f.port.ios]; if (!fi || fi.mode==="routed") continue;
       const sendsBpdu = Object.keys(f.dev.env.vlans).some(v=>(+v<1002||+v>1005) && !f.dev.env.stpOff[v]);
       if (!sendsBpdu) continue;
-      i.errdis = "bpduguard";
+      i.errdis = "bpduguard"; i.errdisAt = B.now;
       syslog(B, d, `%SPANTREE-2-BLOCK_BPDUGUARD: Received BPDU on port ${p.ios} with BPDU Guard enabled. Disabling port.`);
       syslog(B, d, `%PM-4-ERR_DISABLE: bpduguard error detected on ${shortIf(p.ios)}, putting ${shortIf(p.ios)} in err-disable state`);
     } }
@@ -341,12 +341,14 @@ function daiCheck(B, sw, ios, f, vlan, note){
   const aclName = E.dai.filters[vlan], acl = aclName && E.arpAcls[aclName], ae = acl && acl.find(e=>e.ip===f.arpIp && e.mac===f.src);
   if (ae && ae.action==="permit"){ st.fwd++; st.aclPermit++; return true; }
   const statik = aclName && (E.dai.statics||{})[vlan];   // "filter … static": the ARP ACL alone decides
-  if (!statik && bind && bind.ip===f.arpIp){ st.fwd++; st.dhcpPermit++; return true; }
-  st.drop++; if (ae) st.aclDrop++; else st.dhcpDrop++;
+  const aclDeny = !!(ae && ae.action==="deny") || !!statik;   // an explicit deny, or no match under "static"
+  if (!aclDeny && bind && bind.ip===f.arpIp){ st.fwd++; st.dhcpPermit++; return true; }
+  st.drop++; if (aclDeny) st.aclDrop++; else st.dhcpDrop++;
   const c1 = (B.clock||0) + 1, tm = new Date((B.now || Date.UTC(2026,9,12,8,30)) + c1*7000 + (c1*137)%1000), two = x=>String(x).padStart(2,"0");
   const when = `${two(tm.getUTCHours())}:${two(tm.getUTCMinutes())}:${two(tm.getUTCSeconds())} UTC ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][tm.getUTCDay()]} ${LMON[tm.getUTCMonth()]} ${tm.getUTCDate()} ${tm.getUTCFullYear()}`;
-  syslog(B, sw, `%SW_DAI-4-${ae ? "ACL_DENY" : "DHCP_SNOOPING_DENY"}: 1 Invalid ARPs (${f.arpOp==="req" ? "Req" : "Res"}) on ${shortIf(ios)}, vlan ${vlan}.([${f.src}/${f.arpIp}/${f.arpOp==="req" ? "0000.0000.0000" : f.dst}/${f.arpTarget||"0.0.0.0"}/${when}])`, true);
-  note(`${sw.label} ${shortIf(ios)} — <b>Dynamic ARP Inspection</b>: "${f.arpIp} is at ${f.src}" doesn't match any DHCP snooping binding${aclName ? " or ARP ACL " + aclName : ""} → dropped`);
+  syslog(B, sw, `%SW_DAI-4-${aclDeny ? "ACL_DENY" : "DHCP_SNOOPING_DENY"}: 1 Invalid ARPs (${f.arpOp==="req" ? "Req" : "Res"}) on ${shortIf(ios)}, vlan ${vlan}.([${f.src}/${f.arpIp}/${f.arpOp==="req" ? "0000.0000.0000" : f.dst}/${f.arpTarget||"0.0.0.0"}/${when}])`, true);
+  note(aclDeny ? `${sw.label} ${shortIf(ios)} — <b>Dynamic ARP Inspection</b>: "${f.arpIp} is at ${f.src}" is ${ae && ae.action==="deny" ? "denied by" : "not permitted by"} ARP ACL ${aclName}${statik ? " (applied with static, so bindings aren't consulted)" : ""} → dropped`
+    : `${sw.label} ${shortIf(ios)} — <b>Dynamic ARP Inspection</b>: "${f.arpIp} is at ${f.src}" doesn't match any DHCP snooping binding${aclName ? " or ARP ACL " + aclName : ""} → dropped`);
   return false;
 }
 function psecCheck(B, sw, ios, i, mac, vlan, note){
@@ -355,7 +357,7 @@ function psecCheck(B, sw, ios, i, mac, vlan, note){
   if (i.psecMacs.length < max){ const type = i.psecSticky ? "sticky" : "dynamic"; i.psecMacs.push({mac, type, vlan}); i.psecLast = {mac, vlan};
     note(`${sw.label} ${sh} port security: learned ${mac} as a secure ${type} address (${i.psecMacs.length} of ${max})${type==="sticky" ? " — written into the running-config" : ""}`); return true; }
   const mode = i.psecViol || "shutdown"; if (mode!=="protect") i.psecViolCount = (i.psecViolCount||0) + 1; i.psecLast = {mac, vlan};   // protect mode doesn't count
-  if (mode==="shutdown" && !i.errdis){ i.errdis = "psecure-violation";
+  if (mode==="shutdown" && !i.errdis){ i.errdis = "psecure-violation"; i.errdisAt = B.now;
     syslog(B, sw, `%PM-4-ERR_DISABLE: psecure-violation error detected on ${sh}, putting ${sh} in err-disable state`, true);
     syslog(B, sw, `%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address ${mac} on port ${ios}.`, true); }
   else if (mode==="restrict") syslog(B, sw, `%PORT_SECURITY-2-PSECURE_VIOLATION: Security violation occurred, caused by MAC address ${mac} on port ${ios}.`, true);
@@ -420,6 +422,10 @@ function deliver(B, from, frame, step0){
       if (stpStateOf(S, d, lp, v)!=="FWD"){ pushNote(`${d.label} ${lp.startsWith("po")?"Po"+lp.slice(2):shortIf(x.port.ios)} is blocking for VLAN ${v} (Spanning Tree) — frame discarded, no loop`); return; }
       if (i.psec && !lp.startsWith("po")){ const ok = psecCheck(B, d, x.port.ios, i, frame.src, v, pushNote); if (!ok) return; }
       const pi = lpIntf(d, lp) || i, sh = lp.startsWith("po") ? "Po"+lp.slice(2) : shortIf(x.port.ios);
+      const dl = frame.kind==="dhcp" ? frame.label : frame.kind==="ip" && /^DHCP (Offer|Ack|NAK|Request)\b/.test(frame.label||"") ? frame.label.split(" ")[1] : null;
+      if (dl && frame.kind==="ip" && d.env.snoop && d.env.snoop.on && d.env.snoop.vlans.includes(v)){
+        if (!pi.snoopTrust && /^(Offer|Ack|NAK)$/.test(dl)){ pushNote(`${d.label} ${sh} — <b>DHCP snooping</b>: a DHCP ${dl} is a SERVER message and this port is untrusted → dropped (only trusted ports may carry them)`); frame.snoopDropped = d.label; B._snoopDrop = d.label; return; }
+        if (!pi.snoopTrust && dl==="Request") B._snoopRenew = {sw:d, ios:x.port.ios, vlan:v, mac:frame.src}; }
       if (frame.kind==="dhcp" && d.env.snoop && d.env.snoop.on && d.env.snoop.vlans.includes(v) && !pi.snoopTrust){
         if (/^(Offer|Ack|NAK)$/.test(frame.label)){ pushNote(`${d.label} ${sh} — <b>DHCP snooping</b>: a DHCP ${frame.label} is a SERVER message and this port is untrusted → dropped (only trusted ports may carry them)`); frame.snoopDropped = d.label; return; }
         if (!frame.snoopClient) frame.snoopClient = {sw:d, ios:x.port.ios, vlan:v};
@@ -1054,6 +1060,7 @@ function doraCore(B, c, apply){
 }
 function dhcpRenew(B, d){
   B_ctx.B = B; B.step = 0; const frames = [], log = [], sv = B.devs[d.lease.srvId], D = window.DHCP;
+  B._snoopRenew = null; B._snoopDrop = null;
   const go = sendIp(B, hostNode(d), d.lease.server, "DHCP Request (renew)", {src:d.ip, proto:"udp", sport:68, dport:67}); frames.push(...go.frames);
   log.push(`<b>DHCP Request</b> (unicast renewal) from ${d.label} to ${d.lease.server}: "may I keep ${d.ip}?" — with a lease in hand there's no Discover or Offer`, ...go.log);
   if (!go.ok || !sv || !sv.env || !sv.env.dhcp || sv.env.serviceDhcp===false){ log.push("&nbsp;&nbsp;· no answer from the server — the PC keeps its address until the lease runs out"); return {ok:false, frames, log}; }
@@ -1066,7 +1073,10 @@ function dhcpRenew(B, d){
   const o = { ip:d.ip, mask:d.mask, routers:pool.routers.slice(), dns:pool.dns.slice(), domain:pool.domain, leaseMs: pool.lease==="infinite" ? null : ((pool.lease[0]*24 + pool.lease[1])*60 + pool.lease[2]) * 60000, pool:pool.name };
   D.bind(st, {mac:d.mac, iface: (st.bindings.find(b=>b.mac===d.mac)||{}).iface || "Unknown", now:B.now}, o);
   const back = sendIp(B, nodeFromFinal(B, go.final), d.ip, "DHCP Ack", {src:d.lease.server, proto:"udp", sport:67, dport:68}); frames.push(...back.frames);
+  if (!back.ok){ log.push(`<b>DHCP Ack</b> from ${sv.label} never reaches ${d.label}${B._snoopDrop ? " (" + B._snoopDrop + "'s DHCP snooping dropped it)" : ""} — the PC keeps its address and tries again later`, ...back.log); return {ok:false, frames, log}; }
   log.push(`<b>DHCP Ack</b> from ${sv.label}: lease renewed for ${leaseText(o.leaseMs)}`, ...back.log);
+  { const r0 = B._snoopRenew; if (r0 && r0.mac===d.mac){ const E = r0.sw.env; E.snoopBind = E.snoopBind || {}; E.snoopBind[d.mac] = {mac:d.mac, ip:d.ip, vlan:r0.vlan, iface:r0.ios, lease: o.leaseMs==null ? 4294967295 : Math.round(o.leaseMs/1000) - 98};
+      log.push(`&nbsp;&nbsp;· ${r0.sw.label} DHCP snooping refreshes its binding: ${d.ip} ↔ ${d.mac} on ${shortIf(r0.ios)}`); } }
   d.gw = o.routers[0] || null; d.dns = o.dns.slice(); d.domain = o.domain || null;
   d.lease = Object.assign({}, d.lease, {obtained:B.now, expires: o.leaseMs==null ? null : B.now + o.leaseMs});
   return {ok:true, frames, log};
@@ -1518,11 +1528,15 @@ function act(B, a){
 }
 // IOS logs its own interfaces going up/down; the device whose port was administratively shut already printed its own lines
 function linkLogs(B){
+  for (const id of B.order){ const d = B.devs[id]; if (!d.env || d.kind!=="switch") continue; const on = d.env.errRecovery || [], iv = (d.env.errRecoveryInt || 300)*1000;
+    for (const [n, i] of Object.entries(d.env.intfs)) if (i.errdis && on.includes(i.errdis) && i.errdisAt!=null && B.now >= i.errdisAt + iv){
+      syslog(B, d, `%PM-4-ERR_RECOVER: Attempting to recover from ${i.errdis} err-disable state on ${shortIf(n)}`, true); i.errdis = null; i.errdisAt = null; } }
   const prev = B._linkPrev, now = {};
   for (const id of B.order){ const d = B.devs[id]; if (!d.env || d.on===false) continue;
     for (const p of d.ports){ if (!p.ios || !d.env.intfs[p.ios]) continue; const i = d.env.intfs[p.ios]; now[id+"|"+p.ios] = {up: !i.shut && linkUpAt(B, id+":"+p.id), shut: !!i.shut}; } }
   if (prev) for (const [k, v] of Object.entries(now)){ const o = prev[k]; if (!o || o.up===v.up) continue; if (v.shut || o.shut) continue;   // admin changes: the CLI printed them
     const [id, ios] = k.split("|"), d = B.devs[id], st = v.up ? "up" : "down";
+    if (!v.up){ const ii = d.env.intfs[ios]; if (ii && ii.psecMacs) ii.psecMacs = ii.psecMacs.filter(m=>m.type!=="dynamic"); }   // dynamic secure addresses age out with the link
     const lk = `%LINK-3-UPDOWN: Interface ${ios}, changed state to ${st}`, lp = `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${ios}, changed state to ${st}`;
     for (const m of (v.up || d.kind!=="switch" ? [lk, lp] : [lp, lk])) syslog(B, d, m, true); }   // going down, a Catalyst logs line protocol first
   B._linkPrev = now;
