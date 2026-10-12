@@ -1080,13 +1080,13 @@ ${K.reveal("Show the reasoning",`<p><b>1. What is asked?</b> The command behind 
 <p>The ticket: <i>&ldquo;Yaba branch: add IPv6 to YABA-R1. Staff LAN 2001:db8:4a:10::/64, server LAN 2001:db8:4a:20::/64, router ::1 on each, link-locals fe80::1 (team standard — LOANS-SRV already uses gateway fe80::1). Keep IPv4 working.&rdquo;</i> The PCs are on the Windows default, &ldquo;Obtain an IPv6 address automatically&rdquo;.</p>
 ${K.svg("0 0 720 250",
   K.dev("pc",70,190,"PC1","SLAAC")+K.dev("pc",190,190,"PC2","SLAAC")+K.dev("switch",130,110,"YABA-SW","")+
-  K.dev("router",360,110,"YABA-R1","ipv6 unicast-routing")+K.dev("server",600,110,"LOANS-SRV","2001:db8:4a:20::10/64")+
+  K.dev("router",360,110,"YABA-R1","ipv6 routing on")+K.dev("server",600,110,"LOANS-SRV","2001:db8:4a:20::10/64")+
   K.link(130,122,70,170)+K.link(130,122,190,170)+K.link(156,110,336,110)+K.link(384,110,584,110)+
   K.txt(246,90,"G0/0",{c:"fg",s:11,mid:true})+K.txt(475,90,"G0/1",{c:"fg",s:11,mid:true})+
   K.txt(246,140,"2001:db8:4a:10::1/64",{c:"accent",s:10.5,mid:true})+K.txt(246,156,"fe80::1 link-local",{c:"accent",s:10.5,mid:true})+K.txt(246,172,"192.168.40.1/24",{c:"muted",s:10.5,mid:true})+
   K.txt(475,140,"2001:db8:4a:20::1/64",{c:"accent",s:10.5,mid:true})+K.txt(475,156,"fe80::1 link-local",{c:"accent",s:10.5,mid:true})+K.txt(475,172,"192.168.41.1/24",{c:"muted",s:10.5,mid:true})+
   K.txt(600,172,"gateway fe80::1 (static)",{c:"muted",s:10.5,mid:true})+
-  K.txt(360,240,"Dual stack: every IPv4 address stays; IPv6 is added beside it.",{c:"fg",s:11.5,mid:true,f:"body"}),
+  K.txt(390,240,"Dual stack: IPv4 stays, IPv6 is added beside it.",{c:"fg",s:11.5,mid:true,f:"body"}),
   "The Yaba build sheet. Accent = what you add; the server's static settings expect the router at fe80::1.")}
 ${K.hint(`Follow the task order even if you know a better one — the point is to <i>see</i> what each switch changes. When a ping fails, the frame log's unanswered Neighbor Solicitation names the missing address.`)}
 ${K.bench({id:"m6-dual-stack-branch", points:100, from:"CCNA · Module 6 · lesson 3", title:"Yaba branch: add IPv6 beside IPv4 and watch SLAAC start", viewBox:"0 0 900 430", ipv6:true, openLog:true,
@@ -1320,7 +1320,7 @@ ${K.svg("0 0 720 290",
   K.dev("pc",540,62,"PC-A","who has fe80::1?")+
   K.arrow(536,112,412,168)+K.arrow(538,112,495,168)+K.arrow(542,112,580,168)+K.arrow(544,112,664,168,"",true)+
   K.dev("pc",410,192,"PC-B")+K.dev("pc",495,192,"PC-C")+K.dev("pc",580,192,"PC-D")+K.dev("router",665,192,"R1","fe80::1")+
-  K.txt(410,262,"NIC drops it",{c:"muted",mid:true,s:10})+K.txt(495,262,"NIC drops it",{c:"muted",mid:true,s:10})+K.txt(580,262,"NIC drops it",{c:"muted",mid:true,s:10})+K.txt(665,262,"in group: answers",{c:"ok",mid:true,s:10})+
+  K.txt(410,262,"NIC drops it",{c:"muted",mid:true,s:10})+K.txt(495,262,"NIC drops it",{c:"muted",mid:true,s:10})+K.txt(580,262,"NIC drops it",{c:"muted",mid:true,s:10})+K.txt(665,262,"joined: answers",{c:"ok",mid:true,s:10})+
   K.txt(360,284,"A switch without MLD snooping floods both frames to every port. The difference is who has to look inside.",{c:"fg",s:11,mid:true,f:"body"}),
   "Left: an ARP broadcast interrupts every host's processor. Right: an NS goes to the target's solicited-node multicast MAC; hosts that haven't joined that group discard it in their network card.")}
 <p>IPv4's other broadcasts became multicasts too: all nodes <code>ff02::1</code> (mainly for RAs), all routers <code>ff02::2</code>, and DHCPv6 servers and relays <code>ff02::1:2</code>.</p>

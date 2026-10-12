@@ -18,7 +18,7 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 ⬜ M4 Networks for support: IP config, DHCP vs static, DNS, Wi-Fi, shared printers, mapped drives
 ⬜ M5 Active Directory & accounts: domains vs workgroups, joining a domain, users/groups/OUs, password resets, GPO basics, Microsoft 365/Entra ID
 ⬜ M6 Troubleshooting methodology & customer service: the CompTIA 7 steps, tickets, SLAs, talking to users
-⬜ M7 Security for support: malware removal, MFA, phishing, BitLocker, backups, least privilege
+✅ M7 IP services — 8 lessons (DHCP server and the Windows client; relay with ip helper-address and the router as DHCP client; DNS; NAT and static/dynamic NAT; PAT, port forwarding and NAT troubleshooting; NTP and syslog; SNMP and TFTP backups; QoS + 6-fault challenge + portfolio project); 16 benches, 8 terminals, 31 diagrams, all fact-checked; IP-services engine (DHCP/relay/client, NAT/PAT in the packet path, DNS, NTP, syslog servers, SNMP + Net-SNMP tools, TFTP)
 ⬜ M8 Number systems: binary, hex, how computers count (shared with CCNA M2)
 
 **2. Networking — CCNA 200-301** (v1.1 until 2 Feb 2027; v2.0 from 3 Feb 2027 — same code, more troubleshooting, new AI-in-network-operations domain ~10%: covered as it lands)
@@ -27,7 +27,7 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 ✅ M3 Binary, IPv4 addressing & subnetting — binary/hex, address classes & private ranges, masks & CIDR, subnetting the fast way, VLSM, drills
 ✅ M4 VLANs, trunks & Spanning Tree — 7 lessons (VLANs + voice VLAN, 802.1Q trunks/native/allowed/DTP/VTP, inter-VLAN routing ROAS + L3 switch, STP basics, Rapid PVST+ in practice with PortFast/BPDU guard/root guard, EtherChannel LACP/PAgP/on, troubleshooting + 8-fault challenge); 13 benches, 7 terminals, 25 diagrams, all fact-checked
 ✅ M5 Routing — 8 lessons (reading the routing table: longest match, AD, metric; static/default/host/floating routes and recursion; OSPF concepts; single-area OSPF config; DR/BDR and network types; OSPF cost and adjacency troubleshooting + multi-area first look; HSRP with VRRP/GLBP compared; end-to-end troubleshooting + 7-fault challenge + first portfolio project); 14 benches, 8 terminals, 27 diagrams, all fact-checked
-✅ M6 IPv6 — 6 lessons (reading/shortening addresses; address types and /48 subnet planning; router config, EUI-64, link-local; NDP, SLAAC vs DHCPv6, what Windows shows; static, default, floating and link-local-next-hop routes; dual-stack troubleshooting + 6-fault challenge + portfolio project); 9 benches, 15 terminals, 22 diagrams, all fact-checked; IPv6 engine (RA/SLAAC, ND, routing, traceroute return path, extended ping)
+✅ M6 IPv6 — 6 lessons (reading/shortening addresses; address types and /48 subnet planning; router config, EUI-64, link-local; NDP, SLAAC vs DHCPv6, what Windows shows; static, default, floating and link-local-next-hop routes; dual-stack troubleshooting + 6-fault challenge + portfolio project); 9 benches, 6 terminals, 22 diagrams, all fact-checked; IPv6 engine (RA/SLAAC, ND, routing, traceroute return path, extended ping)
 ⬜ M7 IP services — DHCP (and relay), DNS, NAT/PAT, NTP, SNMP, syslog, SSH, FTP/TFTP, QoS
 ⬜ M8 Security — CIA, threats & attacks (DoS/DDoS, spoofing, MITM, social engineering), AAA/RADIUS/TACACS+, standard & extended ACLs, port security, DHCP snooping, DAI, VPNs, wireless security
 ⬜ M9 Wireless — RF basics (reflection, refraction, absorption, diffraction, scattering), 802.11 standards, SSIDs/service sets, AP modes, autonomous vs lightweight vs cloud APs, WLC config, WPA2/WPA3
