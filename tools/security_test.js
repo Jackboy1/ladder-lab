@@ -168,5 +168,38 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   ok(/Reply from 192\.168\.10\.1: bytes=32/.test(pc(B, "prn", "ping 192.168.10.1")), "an ARP ACL entry for the printer (ip arp inspection filter): it works again");
   ok(/ip arp inspection vlan 1\nip arp inspection filter STATIC-HOSTS vlan 1/.test(cli(B, "sw", "show running-config")) && /arp access-list STATIC-HOSTS\n permit ip host 192\.168\.10\.5 mac host /.test(cli(B, "sw", "show running-config")) && / ip arp inspection trust/.test(cli(B, "sw", "show running-config")), "running-config: DAI lines and the ARP ACL", cli(B, "sw", "show running-config")); }
 
+{ // stage D — device access hardening
+  const B = mk(null, ["security passwords min-length 10"]);
+  ok(/% Password too short - must be at least 10 characters\. Password configuration failed/.test(cli(B, "r2", "conf t") + cli(B, "r2", "username guest secret short1")) && !B.devs.r2.env.users.guest, "security passwords min-length 10: a 6-character secret is refused");
+  cli(B, "r2", "username guest algorithm-type scrypt secret L0ngEnough!"); cli(B, "r2", "end");
+  ok(B.devs.r2.env.users.guest && /username guest secret 9 \$9\$/.test(cli(B, "r2", "show running-config")) && /security passwords min-length 10/.test(cli(B, "r2", "show running-config")), "username … algorithm-type scrypt secret → stored as type 9", cli(B, "r2", "show running-config"));
+  const B2 = mk(null, ["login block-for 120 attempts 3 within 60", "login on-failure log", "login on-success log", "ip access-list standard ADMINS", "permit host 192.168.10.10", "exit", "login quiet-mode access-class ADMINS"]);
+  ok(/Router enabled to watch for login Attacks\.\n     If more than 3 login failures occur in 60 seconds or less,\n     logins will be disabled for 120 seconds\./.test(cli(B2, "r2", "show login")) && /Router presently in Normal-Mode\./.test(cli(B2, "r2", "show login")), "show login: watching, normal mode", cli(B2, "r2", "show login"));
+  pc(B2, "p2", "ssh -l netops 192.168.50.1"); pc(B2, "p2", "bad1"); ok(/please try again/.test(pc(B2, "p2", "bad2")), "a wrong SSH password asks again");
+  const third = pc(B2, "p2", "bad3");
+  ok(/netops@192\.168\.50\.1: Permission denied \(password\)/.test(third) && Bench.loginFailures(B2, "r2")===3 && Bench.quietMode(B2, "r2"), "three wrong SSH passwords → quiet mode", third + "\nfails=" + Bench.loginFailures(B2, "r2"));
+  const lg = cli(B2, "r2", "show logging");
+  ok(/%SEC_LOGIN-4-LOGIN_FAILED: Login failed \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] at 08:30:00 UTC Mon Oct 12 2026/.test(lg) && /%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is \d+ secs, \[user: netops\] \[Source: 192\.168\.10\.11\] \[localport: 22\] \[Reason: Login Authentication Failed\] \[ACL: sl_def_acl\] at /.test(lg), "syslog: LOGIN_FAILED ×3 then QUIET_MODE_ON", lg);
+  ok(/ssh: connect to host 192\.168\.50\.1 port 22: Connection refused/.test(pc(B2, "p2", "ssh -l netops 192.168.50.1")), "quiet mode: PC2 is refused");
+  ok(/password: $/.test(pc(B2, "p1", "ssh -l netops 192.168.50.1")), "quiet mode: PC1 is permitted by the quiet-mode access-class ADMINS");
+  pc(B2, "p1", "Adm1n!"); cli(B2, "r2", "en"); ok(Bench.remoteTo(B2, "p1")==="192.168.50.1" && /%SEC_LOGIN-5-LOGIN_SUCCESS: Login Success \[user: netops\] \[Source: 192\.168\.10\.10\] \[localport: 22\] at /.test(cli(B2, "r2", "show logging")), "PC1 logs in; LOGIN_SUCCESS logged");
+  pc(B2, "p1", "exit"); cli(B2, "r2", "en");
+  ok(/Router presently in Quiet-Mode\./.test(cli(B2, "r2", "show login")) && /Restricted logins filtered by applied ACL ADMINS\./.test(cli(B2, "r2", "show login")) && /Total login failures: 3\./.test(cli(B2, "r2", "show login")), "show login: quiet mode", cli(B2, "r2", "show login"));
+  ok(/login block-for 120 attempts 3 within 60\nlogin quiet-mode access-class ADMINS\nlogin on-failure log\nlogin on-success log/.test(cli(B2, "r2", "show running-config")), "running-config: login lines", cli(B2, "r2", "show running-config"));
+  B2.now += 121000; ok(!Bench.quietMode(B2, "r2") && /password: $/.test(pc(B2, "p2", "ssh -l netops 192.168.50.1")), "after the block period: PC2 may try again"); pc(B2, "p2", "Adm1n!"); pc(B2, "p2", "exit"); }
+{ // AAA: method list with RADIUS first, local as the fallback when no server answers
+  const B = mk(null, ["aaa new-model", "radius server RAD1", "address ipv4 192.168.50.30 auth-port 1812 acct-port 1813", "key R4diusK3y", "exit", "aaa authentication login VTY-AUTH group radius local", "line vty 0 4", "login authentication VTY-AUTH", "exit"]);
+  const rc = cli(B, "r2", "show running-config");
+  ok(/aaa new-model\naaa authentication login VTY-AUTH group radius local/.test(rc) && /radius server RAD1\n address ipv4 192\.168\.50\.30 auth-port 1812 acct-port 1813\n key R4diusK3y/.test(rc) && /line vty 0 4[\s\S]*login authentication VTY-AUTH/.test(rc), "running-config: aaa new-model, method list, radius server, line login authentication", rc);
+  pc(B, "p1", "ssh -l netops 192.168.50.1"); pc(B, "p1", "Adm1n!");
+  ok(Bench.remoteTo(B, "p1")==="192.168.50.1", "RADIUS server doesn't answer → falls back to the local user list → SSH works"); pc(B, "p1", "exit");
+  ok(/Invalid input/.test(cli(mk(), "r2", "conf t") + cli(mk(), "r2", "aaa authentication login default local")), "aaa authentication needs aaa new-model first");
+  const C = mk(null, ["aaa new-model"]), c0 = C.devs.r2.env.connect("con");
+  ok(/Press RETURN to get started/.test(c0.text) && !c0.ask, "aaa new-model, no default list: the console asks for nothing", JSON.stringify(c0));
+  const D = mk(null, ["aaa new-model", "aaa authentication login default local", "banner login #Authorised staff only#"]), c1 = D.devs.r2.env.connect("con");
+  ok(c1.ask==="Username: " && /Authorised staff only\nUser Access Verification/.test(c1.text), "aaa authentication login default local: the console asks Username/Password, banner login shown first", JSON.stringify(c1));
+  ok(/% Authentication failed/.test(JSON.stringify(D.devs.r2.env.exec("netops") && D.devs.r2.env.exec("nope"))), "wrong console password: % Authentication failed");
+  ok(/banner login \^CAuthorised staff only\^C/.test((D.devs.r2.env.exec("netops"), D.devs.r2.env.exec("Adm1n!"), D.devs.r2.env.exec("en"), out({out:D.devs.r2.env.exec("show running-config")}))), "running-config: banner login"); }
+
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

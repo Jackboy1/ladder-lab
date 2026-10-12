@@ -1436,22 +1436,28 @@ function pcExec(B, d, line){
     const o = tcp.owner || ipOwner(B, ip), p = {ok: tcp.ok};
     if (o && o.dev.env && tcp.ok){ const acl = o.dev.env.lines.vty.acl;   // access-class: only these sources may open a VTY session
       if (acl && o.dev.env.acl.lists[acl] && !window.ACL.check(o.dev.env.acl, acl, {src:tcp.src}).permit){ B.log.push(`<b>access-class ${acl} in</b> on ${o.dev.label}'s VTY lines doesn't permit ${tcp.src} — the router refuses the session`);
+        return ssh ? `ssh: connect to host ${ip} port 22: Connection refused` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`; }
+      if (o.dev.env.loginAllowed && !o.dev.env.loginAllowed(tcp.src)){ B.log.push(`<b>${o.dev.label} is in quiet mode</b> (login block-for): too many failed logins, so it refuses every new VTY session${o.dev.env.loginQuietAcl ? " except from sources access-list " + o.dev.env.loginQuietAcl + " permits" : ""} until the block period ends`);
         return ssh ? `ssh: connect to host ${ip} port 22: Connection refused` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`; } }
     if (!p.ok || !o || !o.dev.env) return ssh ? `ssh: connect to host ${ip} port 22: Connection timed out` : `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`;
     const env = o.dev.env, vty = env.lines.vty;
     if (ssh){
       if (!env.rsa) return `ssh: connect to host ${ip} port 22: Connection refused`;
       if (!/ssh|all/.test(vty.transport)) return `ssh: connect to host ${ip} port 22: Connection refused`;
-      if (!vty.loginLocal) return `${user}@${ip}: Permission denied (password).\n(the switch's VTY lines aren't using local usernames — 'login local' is missing)`;
-      const rec = env.users[user];
-      B.remote[d.id] = {env, host:ip, proto:"ssh", user, from:d.ip, pendingAuth:true};
-      env.pending = {prompt:"Password: ", handle: pw => { env.noEcho = false; if (rec && (rec.secret===pw || rec.password===pw)){ env.mode = "user"; if (B.remote[d.id]) B.remote[d.id].pendingAuth = false; return env.banner!=null ? env.banner : ""; } delete B.remote[d.id]; return `${user}@${ip}: Permission denied (password).`; }};
-      env.noEcho = true;
-      return {ask:`${user}@${ip}'s password: `, text:""};
+      if (!(env.aaa && env.aaa.on) && !vty.loginLocal) return `${user}@${ip}: Permission denied (password).\n(the switch's VTY lines aren't using local usernames — 'login local' is missing)`;
+      B.remote[d.id] = {env, host:ip, proto:"ssh", user, from:d.ip, pendingAuth:true}; env.loginCtx = {src:tcp.src || d.ip, port:22};
+      let tries = 0; const prompt = `${user}@${ip}'s password: `;
+      const handle = pw => { env.noEcho = false;
+        if (env.loginCheck("vty", user, pw, env.loginCtx)){ env.mode = "user"; if (B.remote[d.id]) B.remote[d.id].pendingAuth = false; return (env.bannerLogin!=null ? env.bannerLogin + "\n" : "") + (env.banner!=null ? env.banner : ""); }
+        if (++tries < 3){ env.noEcho = true; env.pending = {prompt, handle}; return {text:"Permission denied, please try again.", ask:prompt}; }
+        delete B.remote[d.id]; return `${user}@${ip}: Permission denied (password).`; };
+      env.pending = {prompt, handle}; env.noEcho = true;
+      return {ask:prompt, text: env.bannerLogin!=null ? env.bannerLogin : ""};
     }
     if (!/telnet|all/.test(vty.transport)) return `Connecting To ${ip}...Could not open connection to the host, on port 23: Connect failed`;
-    if (vty.login && !vty.loginLocal && !vty.password) return `\nPassword required, but none set\n\n[Connection to ${ip} closed by foreign host]`;
-    if (!vty.login) { B.remote[d.id] = {env, host:ip, proto:"telnet", from:d.ip}; env.mode="user"; return `Trying ${ip} ... Open\n\n` + (env.banner!=null?env.banner+"\n":""); }
+    const aaaOn = env.aaa && env.aaa.on; env.loginCtx = {src:tcp.src || d.ip, port:23};
+    if (!aaaOn && vty.login && !vty.loginLocal && !vty.password) return `\nPassword required, but none set\n\n[Connection to ${ip} closed by foreign host]`;
+    if (aaaOn ? env.loginMethods("vty")[0]==="none" : !vty.login) { B.remote[d.id] = {env, host:ip, proto:"telnet", from:d.ip}; env.mode="user"; return `Trying ${ip} ... Open\n\n` + (env.banner!=null?env.banner+"\n":""); }
     B.remote[d.id] = {env, host:ip, proto:"telnet", from:d.ip};
     const c = env.connect("vty");
     return {ask: c.ask, text: `Trying ${ip} ... Open\n\n${c.text}`};
@@ -1886,6 +1892,8 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
   snoopBound: (B, sw, mac) => { const d = B.devs[sw]; return !!(d && d.env && d.env.snoopBind && Object.values(d.env.snoopBind).some(b=>!mac || b.mac===mac)); },
   daiDrops: (B, sw, vlan) => { const d = B.devs[sw]; const x = d && d.env && d.env.daiStats && d.env.daiStats[vlan]; return x ? x.drop : 0; },
+  quietMode: (B, dev) => { const e = B.devs[dev] && B.devs[dev].env; return !!(e && e.quietUntil && B.now < e.quietUntil); },
+  loginFailures: (B, dev) => { const e = B.devs[dev] && B.devs[dev].env; return e ? (e.loginTotalFails||0) : 0; },
   psecViolations: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i ? (i.psecViolCount||0) : 0; },
   secureMacs: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i && i.psecMacs ? i.psecMacs.map(m=>m.mac + ":" + m.type) : []; },
   aclHits: (B, r, name, seq) => { const d = B.devs[r]; const l = d && d.env && d.env.acl.lists[name]; const e = l && l.entries.find(x=>!x.remark && x.seq===seq); return e ? e.hits : 0; },

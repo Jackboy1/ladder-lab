@@ -61,7 +61,8 @@ ok(/password/.test(out(B,["pc","pc","ssh -l admin 192.168.1.2"])),"ssh asks for 
 out(B,["pc","pc","Str0ng!"]); ok(Bench.remoteTo(B,"pc")==="192.168.1.2" && B.devs.sw.env.mode==="user","ssh login lands at user EXEC");
 ok(/SW1>/.test(B.devs.sw.env.prompt()),"remote prompt is SW1>");
 ok(/Connection to 192.168.1.2 closed/.test(out(B,["pc","pc","exit"])) && !Bench.remoteTo(B,"pc"),"exit closes ssh session");
-out(B,["pc","pc","ssh -l admin 192.168.1.2"]); ok(/Permission denied/.test(out(B,["pc","pc","wrong"])),"wrong ssh password denied");
+out(B,["pc","pc","ssh -l admin 192.168.1.2"]); ok(/please try again/.test(out(B,["pc","pc","wrong"])),"wrong ssh password asks again");
+out(B,["pc","pc","wrong2"]); ok(/admin@192\.168\.1\.2: Permission denied \(password\)/.test(out(B,["pc","pc","wrong3"])) && !Bench.remoteTo(B,"pc"),"third wrong ssh password closes the attempt");
 run(B,["term",""]); run(B,["term","en"]);
 const rc=out(B,["term","show run"]); ok(/username admin secret 9 \$9\$/.test(rc)&&/transport input ssh/.test(rc)&&/login local/.test(rc)&&/ip domain name lab.local/.test(rc),"running-config reflects SSH setup");
 // 6 duplex mismatch

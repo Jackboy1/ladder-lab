@@ -55,6 +55,8 @@ function ios2Env(opts){
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
       stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[], serviceDhcp:true,
+      secMinLen:0, loginBlock:null, loginQuietAcl:null, loginLogFail:false, loginLogOk:false, bannerLogin:null,
+      aaa:{on:false, lists:{}, radius:{}, tacacs:{}},
       snoop:{on:false, vlans:[], opt82:true}, dai:{vlans:[], validate:[], filters:{}}, arpAcls:{}, relayTrustAll:false,
       logHosts:[], logTrap:6, logBuffered:null, logConsole:null, ntpServers:[], ntpMaster:null, tz:null, iosHosts:{}, nameServers:[], dnsServer:false,
       snmp:{communities:{}, location:null, contact:null, hosts:[], traps:false},
@@ -70,7 +72,7 @@ function ios2Env(opts){
   const stripLive = o => { if (o.dhcp){ o.dhcp.bindings = []; o.dhcp.conflicts = []; for (const p of Object.values(o.dhcp.pools||{})) delete p.index; }
     if (o.nat){ o.nat.table = []; o.nat.hits = 0; o.nat.misses = 0; o.nat.expired = 0; for (const p of Object.values(o.nat.pools||{})){ p.used = {}; p.misses = 0; } }
     if (o.acl) for (const l of Object.values(o.acl.lists||{})) for (const e of l.entries) if (e.hits) e.hits = 0;
-    delete o.snoopBind; delete o.daiStats;
+    delete o.snoopBind; delete o.daiStats; delete o.loginFails; delete o.quietUntil; delete o.loginTotalFails;
     for (const i of Object.values(o.intfs||{})){ if (i.psecMacs) i.psecMacs = i.psecMacs.filter(m=>m.type!=="dynamic"); delete i.psecViolCount; delete i.psecLast; }
     for (const i of Object.values(o.intfs||{})) if (i.dhcpClient){ i.ip = null; i.mask = null; delete i.dhcpGw; delete i.dhcpLease; }
     return o; };
@@ -126,6 +128,7 @@ function ios2Env(opts){
   function svIUp(v){ if (!st.vlans[v]) return false; return physical.some(n=>{ const i = st.intfs[n]; return !i.shut && !i.errdis && hooks.linkUp(n) && (isTrunk(n) ? (!i.allowed || i.allowed.includes(v)) : st.opMode(n)==="access" && (i.vlan===v || i.voiceVlan===v)); }); }
   const hasVlan = v => kind==="switch" && !!st.vlans[v];
   const hashOf = (p, t) => { const h = fakeHash(p, t); HASHREV[h] = p; return h; };
+  const tooShort = v => { const plain = !/^[05789] \S+$/.test(String(v)); const pwd = String(v).replace(/^0 /, ""); return plain && st.secMinLen && pwd.length < st.secMinLen ? `% Password too short - must be at least ${st.secMinLen} characters. Password configuration failed` : null; };
   const unhash = v => { const m = String(v).match(/^([05789]) (\S+)$/); return m ? (HASHREV[m[2]]!=null ? HASHREV[m[2]] : m[2]) : v; };
   const pw = (p, type7) => p==null ? null : st.servicePwEnc ? `7 ${hashOf(p,"7")}` : p;
 
@@ -185,6 +188,7 @@ function ios2Env(opts){
     if (st.enableSecret || st.enablePassword) L.push("!");
     for (const [u,v] of Object.entries(st.users)) L.push(`username ${u} ${v.secret?`secret 9 ${hashOf(v.secret)}`:`password ${pw(v.password)}`}`);
     if (st.tz) L.push(`clock timezone ${st.tz.name} ${st.tz.h} ${st.tz.m}`);
+    if (st.aaa.on){ L.push("aaa new-model"); for (const [n, m] of Object.entries(st.aaa.lists)) L.push(`aaa authentication login ${n} ${m.join(" ")}`); }
     if (!st.domainLookup) L.push("no ip domain lookup");
     if (st.domain) L.push(`ip domain name ${st.domain}`);
     for (const [n, ip] of Object.entries(st.iosHosts)) L.push(`ip host ${n} ${ip}`);
@@ -195,6 +199,11 @@ function ios2Env(opts){
     if (st.dai.vlans.length) L.push(`ip arp inspection vlan ${compactList(st.dai.vlans)}`); if (st.dai.validate.length) L.push(`ip arp inspection validate ${st.dai.validate.join(" ")}`);
     for (const [v, n] of Object.entries(st.dai.filters)) L.push(`ip arp inspection filter ${n} vlan ${v}`);
     if (st.relayTrustAll) L.push("ip dhcp relay information trust-all");
+    if (st.secMinLen) L.push(`security passwords min-length ${st.secMinLen}`);
+    if (st.loginBlock) L.push(`login block-for ${st.loginBlock.for} attempts ${st.loginBlock.attempts} within ${st.loginBlock.within}`); if (st.loginQuietAcl) L.push(`login quiet-mode access-class ${st.loginQuietAcl}`);
+    if (st.loginLogFail) L.push("login on-failure log"); if (st.loginLogOk) L.push("login on-success log");
+    for (const [n, x] of Object.entries(st.aaa.radius)){ L.push(`radius server ${n}`); if (x.ip) L.push(` address ipv4 ${x.ip}${x.ports ? " " + x.ports : ""}`); if (x.key) L.push(` key ${x.key}`); }
+    for (const [n, x] of Object.entries(st.aaa.tacacs)){ L.push(`tacacs server ${n}`); if (x.ip) L.push(` address ipv4 ${x.ip}`); if (x.key) L.push(` key ${x.key}`); }
     for (const c of (st.errRecovery||[])) L.push(`errdisable recovery cause ${c}`); if (st.errRecoveryInt) L.push(`errdisable recovery interval ${st.errRecoveryInt}`);
     { const D = window.DHCP ? window.DHCP.running(st.dhcp) : []; if (D.length) L.push("!", ...D, "!"); }
     if (st.v6routing) L.push("ipv6 unicast-routing"); if (st.v6resolveDefault) L.push("ipv6 route static resolve default");
@@ -270,16 +279,16 @@ function ios2Env(opts){
     if (st.snmp.traps) L.push("snmp-server enable traps snmp authentication linkdown linkup coldstart warmstart", "snmp-server enable traps config");   // IOS expands the bare command
     for (const h of st.snmp.hosts) L.push(`snmp-server host ${h.ip}${h.ver!=="1" ? " version " + h.ver : ""} ${h.community}`);
     L.push("!");
-    if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`);
+    if (st.banner!=null) L.push(`banner motd ^C${st.banner}^C`); if (st.bannerLogin!=null) L.push(`banner login ^C${st.bannerLogin}^C`);
     L.push("!", "line con 0"); const c = st.lines.con;
     if (c.timeout && c.timeout!=="10 0") L.push(` exec-timeout ${c.timeout}`);   // 10 0 is the default, which IOS hides
-    if (c.password) L.push(` password ${pw(c.password)}`); if (c.sync) L.push(" logging synchronous"); if (c.loginLocal) L.push(" login local"); else if (c.login) L.push(" login");
+    if (c.password) L.push(` password ${pw(c.password)}`); if (c.sync) L.push(" logging synchronous"); if (c.authList) L.push(` login authentication ${c.authList}`); if (c.loginLocal) L.push(" login local"); else if (c.login) L.push(" login");
     const v = st.lines.vty;
     // Catalyst switches show the 16 VTY lines as two blocks (0 4 and 5 15); routers have 0 4
     for (const blk of (kind==="switch" ? ["0 4","5 15"] : ["0 4"])){
       L.push(`line vty ${blk}`);
       if (v.acl) L.push(` access-class ${v.acl} in`);
-      if (v.timeout && v.timeout!=="10 0") L.push(` exec-timeout ${v.timeout}`); if (v.password) L.push(` password ${pw(v.password)}`); if (v.loginLocal) L.push(" login local"); else if (v.login) L.push(" login"); if (v.transport!=="all") L.push(` transport input ${v.transport}`);
+      if (v.timeout && v.timeout!=="10 0") L.push(` exec-timeout ${v.timeout}`); if (v.password) L.push(` password ${pw(v.password)}`); if (v.authList) L.push(` login authentication ${v.authList}`); if (v.loginLocal) L.push(" login local"); else if (v.login) L.push(" login"); if (v.transport!=="all") L.push(` transport input ${v.transport}`);
     }
     if (st.ntpMaster!=null) L.push(st.ntpMaster===8 ? "ntp master" : `ntp master ${st.ntpMaster}`); for (const h of st.ntpServers) L.push(`ntp server ${h}`);
     L.push("!","end");
@@ -715,6 +724,14 @@ function ios2Env(opts){
     X("show mac address-table vlan A:NUM", a=>macTable({vlan:a[0]})||inv()),
     X("show cdp neighbors", ()=>cdpNeighbors(false)), X("show cdp neighbors detail", ()=>cdpNeighbors(true)),
     X("show lldp neighbors", ()=>lldpNeighbors()),
+    X("show login", ()=>{ const b = st.loginBlock, q = quietNow();
+      const L = [b ? "     A login delay of 1 seconds is applied." : "     No login delay has been applied.", st.loginQuietAcl ? `     Quiet-Mode access list ${st.loginQuietAcl} is applied.` : "     No Quiet-Mode access list has been configured.",
+        ...(st.loginLogOk ? ["     All successful login is logged."] : []), ...(st.loginLogFail ? ["     All failed login is logged."] : []), ""];
+      if (!b) return [...L, "     Router NOT enabled to watch for login Attacks"].join("\n");
+      L.push("     Router enabled to watch for login Attacks.", `     If more than ${b.attempts} login failures occur in ${b.within} seconds or less,`, `     logins will be disabled for ${b.for} seconds.`, "");
+      if (q) L.push("     Router presently in Quiet-Mode.", `     Will remain in Quiet-Mode for ${Math.max(1, Math.round((st.quietUntil - hooks.now())/1000))} seconds.`, `     Restricted logins filtered by applied ACL ${st.loginQuietAcl || "sl_def_acl"}.`);
+      else { const fl = (st.loginFails||[]).filter(t=>hooks.now() - t < b.within*1000); L.push("     Router presently in Normal-Mode.", "     Current Watch Window", `         Time remaining: ${fl.length ? Math.max(1, b.within - Math.round((hooks.now() - fl[0])/1000)) : b.within} seconds.`, `         Login failures for current window: ${fl.length}.`); }
+      L.push(`     Total login failures: ${st.loginTotalFails||0}.`); return L.join("\n"); }),
     X("show ip dhcp snooping", ()=>kind==="switch" ? snoopShow() : inv()), X("show ip dhcp snooping binding", ()=>kind==="switch" ? snoopBind() : inv()),
     X("show ip arp inspection", ()=>kind==="switch" ? daiShow() : inv()),
     X("show ip arp inspection vlan A:NUM", ()=>kind==="switch" ? daiShow() : inv()),
@@ -789,7 +806,8 @@ function ios2Env(opts){
     ],
     config: [
       X("hostname A:WORD", a=>{ if (!/^[A-Za-z][\w-]{0,62}$/.test(a[0])) return "% Hostname contains one or more illegal characters."; st.host = a[0]; return ""; }),
-      X("enable secret A:LINE", a=>{ st.enableSecret = unhash(a[0]); return ""; }),
+      X("enable secret A:LINE", a=>{ const e = tooShort(a[0]); if (e) return e; st.enableSecret = unhash(a[0]); return ""; }),
+      X("enable algorithm-type A:WORD secret A:LINE", a=>{ const e = tooShort(a[1]); if (e) return e; st.enableSecret = unhash(a[1]); return ""; }),
       X("enable password A:LINE", a=>{ st.enablePassword = unhash(a[0]); return st.enableSecret ? "% The enable password you have chosen is the same as your enable secret.\n% This is not recommended.  Re-enter the enable password.".replace(/.*/s, m=> a[0]===st.enableSecret?m:"") : ""; }),
       X("no enable secret", ()=>{ st.enableSecret=null; return ""; }), X("no enable password", ()=>{ st.enablePassword=null; return ""; }),
       X("service password-encryption", ()=>{ st.servicePwEnc=true; return ""; }), X("no service password-encryption", ()=>{ st.servicePwEnc=false; return ""; }),
@@ -806,7 +824,9 @@ function ios2Env(opts){
       X("no vlan A:WORD", a=>{ if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(a[0])) return inv(); const vs = vlist(a[0]); const bad = vs.find(v=>v===1 || (v>=1002&&v<=1005)); if (bad) return `%Default VLAN ${bad} may not be deleted.`; for (const v of vs) delete st.vlans[v]; return ""; }),
       X("line console A:NUM", a=>{ if (a[0]!=="0") return "% Invalid input detected at '^' marker."; st.mode="config-line"; st.curLine="con"; return ""; }),
       X("line vty A:NUM A:NUM", a=>{ st.mode="config-line"; st.curLine="vty"; return ""; }),
-      X("username A:WORD secret A:LINE", a=>{ st.users[a[0]] = {secret:unhash(a[1])}; return ""; }),
+      X("username A:WORD secret A:LINE", a=>{ const e = tooShort(a[1]); if (e) return e; st.users[a[0]] = {secret:unhash(a[1])}; return ""; }),
+      X("username A:WORD algorithm-type A:WORD secret A:LINE", a=>{ const e = tooShort(a[2]); if (e) return e; st.users[a[0]] = {secret:unhash(a[2])}; return ""; }),
+      X("username A:WORD privilege A:NUM algorithm-type A:WORD secret A:LINE", a=>{ const e = tooShort(a[3]); if (e) return e; st.users[a[0]] = {secret:unhash(a[3]), priv:+a[1]}; return ""; }),
       X("username A:WORD password A:LINE", a=>{ st.users[a[0]] = {password:unhash(a[1])}; return ""; }),
       X("username A:WORD privilege A:NUM secret A:LINE", a=>{ st.users[a[0]] = {secret:unhash(a[2]), priv:+a[1]}; return ""; }),
       X("no username A:WORD", a=>{ delete st.users[a[0]]; return ""; }),
@@ -887,6 +907,21 @@ function ios2Env(opts){
       // ---- NAT/PAT ----
       X("ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "ip nat " + a[0], {ifName: n=>parseIf(n), ifAddr: n => (st.intfs[n]||{}).ip || null}); return r.err || ""; }),
       X("no ip nat A:LINE", a=>{ const r = window.NAT.globalCmd(st.nat, "no ip nat " + a[0], {ifName: n=>parseIf(n)}); return r.err || ""; }),
+      // ---- device access hardening ----
+      X("security passwords min-length A:NUM", a=>{ const n = +a[0]; if (!(n>=0 && n<=16)) return inv(); st.secMinLen = n; return ""; }), X("no security passwords min-length", ()=>{ st.secMinLen = 0; return ""; }),
+      X("login block-for A:NUM attempts A:NUM within A:NUM", a=>{ st.loginBlock = {for:+a[0], attempts:+a[1], within:+a[2]}; return ""; }), X("no login block-for", ()=>{ st.loginBlock = null; st.quietUntil = null; return ""; }),
+      X("login quiet-mode access-class A:WORD", a=>{ st.loginQuietAcl = a[0]; return ""; }), X("no login quiet-mode access-class", ()=>{ st.loginQuietAcl = null; return ""; }),
+      X("login on-failure log", ()=>{ st.loginLogFail = true; return ""; }), X("no login on-failure log", ()=>{ st.loginLogFail = false; return ""; }),
+      X("login on-success log", ()=>{ st.loginLogOk = true; return ""; }), X("no login on-success log", ()=>{ st.loginLogOk = false; return ""; }),
+      X("banner login A:LINE", a=>{ const s = a[0]; const d = s[0]; const end = s.indexOf(d,1); if (end<0) return ask(`Enter TEXT message.  End with the character '${d}'.`, l=>{ st.bannerLogin = (s.slice(1)+"\n"+l).replace(new RegExp("\\"+d+".*$"),""); return ""; }); st.bannerLogin = s.slice(1,end); return ""; }), X("no banner login", ()=>{ st.bannerLogin = null; return ""; }),
+      X("aaa new-model", ()=>{ st.aaa.on = true; return ""; }), X("no aaa new-model", ()=>{ st.aaa.on = false; return ""; }),
+      X("aaa authentication login A:WORD A:LINE", a=>{ if (!st.aaa.on) return inv(); const m = a[1].trim().split(/\s+/), out = [];
+        for (let k = 0; k < m.length; k++){ if (m[k]==="group"){ if (!m[k+1]) return "% Incomplete command."; out.push("group " + m[++k]); } else if (["local","enable","none","line"].includes(m[k])) out.push(m[k]); else return inv(); }
+        st.aaa.lists[a[0]] = out; return ""; }),
+      X("no aaa authentication login A:WORD", a=>{ delete st.aaa.lists[a[0]]; return ""; }),
+      X("radius server A:WORD", a=>{ if (!st.aaa.on) return inv(); st.aaa.radius[a[0]] = st.aaa.radius[a[0]] || {}; st.mode = "config-radius-server"; st.curAaaSrv = a[0]; return ""; }),
+      X("tacacs server A:WORD", a=>{ if (!st.aaa.on) return inv(); st.aaa.tacacs[a[0]] = st.aaa.tacacs[a[0]] || {}; st.mode = "config-server-tacacs"; st.curAaaSrv = a[0]; return ""; }),
+      X("ip ssh time-out A:NUM", a=>{ st.sshTimeout = +a[0]; return ""; }), X("ip ssh authentication-retries A:NUM", a=>{ st.sshRetries = +a[0]; return ""; }),
       // ---- DHCP snooping (switch) ----
       X("ip dhcp snooping", ()=>{ if (kind!=="switch") return inv(); st.snoop.on = true; return ""; }), X("no ip dhcp snooping", ()=>{ st.snoop.on = false; return ""; }),
       X("ip dhcp snooping vlan A:LINE", a=>{ if (kind!=="switch") return inv(); const v = parseVlanList(a[0]); if (!v) return inv(); for (const x of v) if (!st.snoop.vlans.includes(x)) st.snoop.vlans.push(x); st.snoop.vlans.sort((x,y)=>x-y); return ""; }),
@@ -1042,7 +1077,8 @@ function ios2Env(opts){
       X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
     ],
     "config-line": [
-      X("password A:LINE", a=>{ st.lines[st.curLine].password=unhash(a[0]); return ""; }), X("no password", ()=>{ st.lines[st.curLine].password=null; return ""; }),
+      X("password A:LINE", a=>{ const e = tooShort(a[0]); if (e) return e; st.lines[st.curLine].password=unhash(a[0]); return ""; }),
+      X("login authentication A:WORD", a=>{ st.lines[st.curLine].authList = a[0]; return ""; }), X("no login authentication", ()=>{ delete st.lines[st.curLine].authList; return ""; }), X("no password", ()=>{ st.lines[st.curLine].password=null; return ""; }),
       X("login", ()=>{ const L = st.lines[st.curLine]; L.login=true; L.loginLocal=false; return L.password ? "" : "% Login disabled on line "+(st.curLine==="con"?0:1)+", until 'password' is set"; }),
       X("access-class A:WORD in", a=>{ st.lines[st.curLine].acl = a[0]; return ""; }), X("no access-class A:WORD in", ()=>{ delete st.lines[st.curLine].acl; return ""; }),
       X("access-class A:WORD in vrf-also", a=>{ st.lines[st.curLine].acl = a[0]; return ""; }),
@@ -1051,6 +1087,8 @@ function ios2Env(opts){
       X("exec-timeout A:NUM A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} ${a[1]}`; return ""; }), X("exec-timeout A:NUM", a=>{ st.lines[st.curLine].timeout=`${a[0]} 0`; return ""; }),
       X("logging synchronous", ()=>{ st.lines[st.curLine].sync=true; return ""; }),
     ],
+    "config-radius-server": [ X("address ipv4 A:IP A:LINE", a=>{ st.aaa.radius[st.curAaaSrv].ip = a[0]; st.aaa.radius[st.curAaaSrv].ports = a[1]; return ""; }), X("address ipv4 A:IP", a=>{ st.aaa.radius[st.curAaaSrv].ip = a[0]; return ""; }), X("key A:LINE", a=>{ st.aaa.radius[st.curAaaSrv].key = a[0].replace(/^[07] /,""); return ""; }) ],
+    "config-server-tacacs": [ X("address ipv4 A:IP", a=>{ st.aaa.tacacs[st.curAaaSrv].ip = a[0]; return ""; }), X("key A:LINE", a=>{ st.aaa.tacacs[st.curAaaSrv].key = a[0].replace(/^[07] /,""); return ""; }) ],
     "config-std-nacl": aclMode(), "config-ext-nacl": aclMode(),
     "config-arp-nacl": [ X("permit ip host A:IP mac host A:WORD", a=>{ const m = normMac(a[1]); if (!m) return inv(); st.arpAcls[st.curArpAcl].push({action:"permit", ip:a[0], mac:m}); return ""; }),
       X("deny ip host A:IP mac host A:WORD", a=>{ const m = normMac(a[1]); if (!m) return inv(); st.arpAcls[st.curArpAcl].push({action:"deny", ip:a[0], mac:m}); return ""; }) ],
@@ -1080,7 +1118,7 @@ function ios2Env(opts){
   };
   const cfgDone = () => st.viaVty ? `%SYS-5-CONFIG_I: Configured from console by ${st.viaVty.user} on vty0 (${st.viaVty.ip})` : `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
-  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp","config-arp-nacl"]) T[m].push(...cfgCommon);
+  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp","config-arp-nacl","config-radius-server","config-server-tacacs"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
   const parseVlanList = t => { const out = []; for (const part of String(t).replace(/\s+/g, "").split(",")){ const m = part.match(/^(\d+)(?:-(\d+))?$/); if (!m) return null; const a = +m[1], b = m[2] ? +m[2] : a; if (a<1 || b>4094 || b<a) return null; for (let v = a; v <= b; v++) out.push(v); } return out; };
@@ -1307,7 +1345,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-arp-nacl":h+"(config-arp-nacl)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-arp-nacl":h+"(config-arp-nacl)#", "config-radius-server":h+"(config-radius-server)#", "config-server-tacacs":h+"(config-server-tacacs)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;
@@ -1320,15 +1358,42 @@ function ios2Env(opts){
     return line;
   };
   // console/SSH session start: banner + login prompt when the line asks for it
+  const stamp = () => { const t = new Date(clockMs()), two = x=>String(x).padStart(2,"0"); return `${two(t.getUTCHours())}:${two(t.getUTCMinutes())}:${two(t.getUTCSeconds())} UTC ${DAY3[t.getUTCDay()]} ${MON3[t.getUTCMonth()]} ${t.getUTCDate()} ${t.getUTCFullYear()}`; };
+  const quietNow = () => { if (st.quietUntil && hooks.now() >= st.quietUntil){ st.quietUntil = null; hooks.emit(`%SEC_LOGIN-5-QUIET_MODE_OFF: Quiet Mode is OFF, because block period timed out at ${stamp()}`); } return !!st.quietUntil; };
+  // may <src> open a session now? (quiet mode refuses everyone the quiet-mode access-class doesn't permit)
+  st.loginAllowed = src => { if (!quietNow()) return true; const acl = st.loginQuietAcl; return !!(acl && st.acl.lists[acl] && window.ACL.check(st.acl, acl, {src}, false).permit); };
+  // which methods does this line use? → ["local"], ["line"], ["group radius","local"] …
+  st.loginMethods = lineName => { const L = st.lines[lineName||"vty"];
+    // with aaa new-model and no list for the line: the local user list — except the console, which then asks for nothing
+    if (st.aaa.on){ const nm = L.authList || "default"; return st.aaa.lists[nm] || ((lineName||"vty")==="con" ? ["none"] : ["local"]); }
+    return L.loginLocal ? ["local"] : L.login ? ["line"] : ["none"]; };
+  st.loginCheck = (lineName, user, pw, ctx) => { const L = st.lines[lineName||"vty"], ms = st.loginMethods(lineName); let ok = false, why = "Login Authentication Failed";
+    for (const m of ms){ if (m.startsWith("group ")){ const kind = m.slice(6), S0 = kind==="radius" ? st.aaa.radius : st.aaa.tacacs;
+        const reach = Object.values(S0).some(x=>x.ip && hooks.aaaReach && hooks.aaaReach(kind, x.ip)); if (!reach) continue; ok = false; break; }   // a server that answers decides (the lab has none that know users)
+      if (m==="local"){ const rec = st.users[user]; ok = !!(rec && (rec.secret===pw || rec.password===pw)); break; }
+      if (m==="line"){ ok = L.password!=null && pw===L.password; break; }
+      if (m==="enable"){ ok = pw===(st.enableSecret||st.enablePassword); break; }
+      if (m==="none"){ ok = true; break; } }
+    const tags = `[user: ${user||""}] [Source: ${(ctx&&ctx.src)||"0.0.0.0"}] [localport: ${(ctx&&ctx.port)||0}]`;
+    if (ok){ if (st.loginLogOk) hooks.emit(`%SEC_LOGIN-5-LOGIN_SUCCESS: Login Success ${tags} at ${stamp()}`); return true; }
+    if (st.loginLogFail) hooks.emit(`%SEC_LOGIN-4-LOGIN_FAILED: Login failed ${tags} [Reason: ${why}] at ${stamp()}`);
+    st.loginFails = (st.loginFails||[]).filter(t=>st.loginBlock && hooks.now() - t < st.loginBlock.within*1000); st.loginFails.push(hooks.now()); st.loginTotalFails = (st.loginTotalFails||0) + 1;
+    const b = st.loginBlock; if (b && !st.quietUntil && st.loginFails.length >= b.attempts){ st.quietUntil = hooks.now() + b.for*1000; const left = Math.max(1, b.within - Math.round((hooks.now() - st.loginFails[0])/1000));
+      hooks.emit(`%SEC_LOGIN-1-QUIET_MODE_ON: Still timeleft for watching failures is ${left} secs, ${tags} [Reason: ${why}] [ACL: sl_def_acl] at ${stamp()}`); st.loginFails = []; }
+    return false; };
   st.connect = (lineName) => {
     const L = st.lines[lineName||"con"]; st.mode = "user";
     const ban = st.banner!=null ? st.banner+"\n\n" : "";
-    if (L.login && (L.loginLocal ? Object.keys(st.users).length : L.password)){
+    const ban0 = st.bannerLogin!=null ? st.bannerLogin + "\n" : "";
+    if (st.aaa.on || (L.login && (L.loginLocal ? Object.keys(st.users).length : L.password))){
+      if (st.aaa.on && st.loginMethods(lineName)[0]==="none") return {text: ban + "Press RETURN to get started."};
+      if (st.aaa.on || L.loginLocal){ let user = null; const askUser = () => ask("Username: ", u=>{ user=u.trim(); st.noEcho=true; return ask("Password: ", p=>{ st.noEcho=false; if (st.loginCheck(lineName, user, p, st.loginCtx)) return ""; askUser(); return {text:(st.aaa.on ? "% Authentication failed" : "% Login invalid") + "\n", ask:"Username: "}; }); });
+        askUser(); return {text: ban+ban0+"User Access Verification\n", ask: "Username: "}; }
       if (L.loginLocal){ let user = null; const askUser = () => ask("Username: ", u=>{ user=u.trim(); st.noEcho=true; return ask("Password: ", p=>{ st.noEcho=false; const rec = st.users[user]; if (rec && (rec.secret===p || rec.password===p)) return ""; askUser(); return {text:"% Login invalid\n", ask:"Username: "}; }); });
         askUser(); return {text: ban+"User Access Verification\n", ask: "Username: "}; }
       st.noEcho = true;
-      const tryPw = p => { if (p===L.password){ st.noEcho=false; return ""; } st.noEcho=true; return ask("Password: ", tryPw); };
-      ask("Password: ", tryPw); return {text: ban+"User Access Verification\n", ask:"Password: "};
+      const tryPw = p => { if (st.loginCheck(lineName, "", p, st.loginCtx)){ st.noEcho=false; return ""; } st.noEcho=true; return ask("Password: ", tryPw); };
+      ask("Password: ", tryPw); return {text: ban+ban0+"User Access Verification\n", ask:"Password: "};
     }
     return {text: ban + "Press RETURN to get started."};
   };
