@@ -39,16 +39,17 @@ Status: ✅ rebuilt · 🔨 in progress · ⬜ planned (classic short lessons st
 **4. Git & GitHub** — how Git thinks · branching & merging · conflicts · remotes & PRs · rebase/reset/revert safely · GitHub Actions intro · team workflows
 **5. Python & network automation** — Python from zero (types, collections incl. sets, functions, scope, errors, OOP) · files & JSON · Paramiko/Netmiko · scaling to 500 routers · threading · regex/TextFSM · REST APIs/RESTCONF · Ansible · testing & packaging
 **6. AWS** — Cloud Practitioner foundations → Solutions Architect Associate (IAM, EC2, storage, ELB/ASG, S3, databases, Route 53/CloudFront, VPC, decoupling, serverless, containers, monitoring, security, DR, cost) → AI Practitioner
-**7. Cloud networking & BGP** *(new, 12 Oct 2026)* — BGP from zero (neighbours, AS numbers, path attributes, best-path choice, eBGP vs iBGP), hybrid connectivity (site-to-site VPN and AWS Direct Connect over BGP), VPC design and IP planning, Transit Gateway and route tables, hybrid DNS (Route 53 Resolver), load balancers, troubleshooting cloud and hybrid paths — the core of the Cloud Network Architect target
-**8. Security for network & cloud engineers** *(new, 12 Oct 2026; 6–8 lessons, builds on CCNA M8)* — stateful vs stateless filtering, zones and next-gen firewalls, hands-on IPsec site-to-site and remote-access VPNs, TLS and PKI (certificates, chains, why expiry breaks things), cloud IAM and least privilege, zero trust, logging and alerting (SIEM basics); Security+ stays optional (see Certs)
-**9. Databases & SQL** *(new)* — relational thinking, SQL from SELECT to joins/indexes, PostgreSQL admin, NoSQL, backups, on AWS (RDS/Aurora/DynamoDB)
+**7. Web & API engineering** *(new, 15 Oct 2026, owner-approved)* — how the web works (HTTP/HTTPS, methods, status codes, headers, URL anatomy, the request lifecycle, browser rendering; DNS/TCP/TLS basics refer back to CCNA), web security (authN vs authZ, sessions vs JWT, OAuth 2.0/OIDC, cookie flags, XSS, CSRF, SQL injection, CORS, CSP, HSTS, SSRF, clickjacking, hashing vs encryption, secrets management, input validation, the OWASP Top 10 as its own lesson, MFA/passkeys, least privilege), caching (Cache-Control, ETags/304, CDNs, Redis, invalidation, stale-while-revalidate, cache layers), APIs (REST, JSON, GraphQL, WebSockets, SSE, webhooks, rate limiting/429, pagination, idempotency, versioning, API gateways, OpenAPI); drills for status codes, cache headers, cookie/JWT flags and CORS decisions; the owner's real site (Vercel + Payload + Neon) as the portfolio project
+**8. Cloud networking & BGP** *(new, 12 Oct 2026)* — BGP from zero (neighbours, AS numbers, path attributes, best-path choice, eBGP vs iBGP), hybrid connectivity (site-to-site VPN and AWS Direct Connect over BGP), VPC design and IP planning, Transit Gateway and route tables, hybrid DNS (Route 53 Resolver), load balancers, troubleshooting cloud and hybrid paths — the core of the Cloud Network Architect target
+**9. Security for network & cloud engineers** *(new, 12 Oct 2026; 6–8 lessons, builds on CCNA M8)* — stateful vs stateless filtering, zones and next-gen firewalls, hands-on IPsec site-to-site and remote-access VPNs, TLS and PKI (certificates, chains, why expiry breaks things), cloud IAM and least privilege, zero trust, logging and alerting (SIEM basics); Security+ stays optional (see Certs); application security lives in course 7 and is linked, not repeated
+**10. Databases & SQL** *(new)* — relational thinking, SQL from SELECT to joins/indexes, ORMs and the N+1 trap, migrations, transactions/ACID, normalisation, connection pooling, replication/sharding, point-in-time recovery, PostgreSQL admin, NoSQL, backups, on AWS (RDS/Aurora/DynamoDB)
 
 ### Phase 2 · Platform
-**10. Docker** · **11. Terraform** · **12. CI/CD & GitHub Actions** · **13. Kubernetes** · **14. Observability, SRE & GitOps** · **15. DevSecOps** *(pipeline and supply-chain security, secrets, image scanning, policy as code — network and cloud security moved to course 8)*
+**11. Docker** · **12. Terraform** · **13. CI/CD & GitHub Actions** *(incl. the testing pyramid, linting/formatting, static typing, environments, 12-factor config, rollbacks, blue-green and feature flags, domains + TLS setup)* · **14. Kubernetes** · **15. Observability, SRE & GitOps** *(incl. reverse proxies, load balancing, scaling, message queues, health checks and graceful shutdown)* · **16. DevSecOps** *(pipeline and supply-chain security, secrets, image scanning, policy as code — network and cloud security moved to course 8)*
 
 ### Phase 3 · Builder & AI *(new)*
-**16. Full-stack web development** — HTML/CSS/JS, a backend API, databases, auth, deployment
-**17. AI, ML & generative AI** — ML fundamentals, deep learning, LLMs, prompting, RAG, fine-tuning, AI on AWS
+**17. Full-stack web development** *(incl. performance — Core Web Vitals, code splitting, compression, images, Lighthouse — and frontend architecture — SPA/MPA, CSR/SSR/SSG/ISR, hydration, state, a11y, SEO, PWAs)* — HTML/CSS/JS, a backend API, databases, auth, deployment
+**18. AI, ML & generative AI** — ML fundamentals, deep learning, LLMs, prompting, RAG, fine-tuning, AI on AWS
 
 ## Part B — Building real experience ("Work Experience" mode)
 
@@ -75,8 +76,9 @@ checked Oct 2026 (CCNA v2.0 from Feb 2027, DevNet Associate → CCNA Automation,
    Every module ends with a portfolio project (built for real, with a write-up template).
 2. Finish the platform: Work Experience mode (simulated job: tickets, change requests, incidents, STAR stories),
    portfolio projects for M1–M4, access points + firewalls in the topology builder, curated videos.
-3. The foundations ladder, rebuilt to the same standard: Git → Linux → AWS → Python, then Cloud networking & BGP →
-   Security for network & cloud engineers (both added 12 Oct 2026, approved by the owner).
+3. The foundations ladder, rebuilt to the same standard: Git → Linux → AWS → Python, then Web & API engineering (added
+   15 Oct 2026) → Cloud networking & BGP → Security for network & cloud engineers (added 12 Oct 2026) → Databases & SQL,
+   all owner-approved. Topics already taught in CCNA are referred back to, not repeated.
 4. Then DevOps: Docker → Terraform → CI/CD → Kubernetes → SRE.
 
 ## Part E — Next big builds (from the owner's testing)
