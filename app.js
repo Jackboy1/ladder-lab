@@ -1022,12 +1022,10 @@ function careerView(){
     ${C.projects.map(p=>`<div class="listrow"><span class="tag ${p.diff?"acc":""}">${p.n}</span><div class="grow"><b>${esc(p.t)}</b>${p.diff?' <span class="tag acc">DIFFERENTIATOR</span>':""}<div class="small muted">${esc(p.d)}</div></div></div>`).join("")}</div>
   <div class="card"><h2>What each stage opens</h2>
     ${C.stages.map(s=>`<p><b class="small">${esc(s.after)}</b><br><span class="small muted">${esc(s.roles)}</span></p>`).join("")}</div>
-  <div class="grid2">
-    <div class="card"><h2>Who hires in Nigeria</h2><ul class="small">${C.nigeria.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>
-    <div class="card"><h2>Certification verdicts</h2>
-      <div class="tablewrap"><table><tr><th>Cert</th><th>Verdict</th><th>Why</th></tr>
-      ${C.certs.map(c=>`<tr><td>${esc(c.c)}</td><td><b>${esc(c.v)}</b></td><td class="small">${esc(c.n)}</td></tr>`).join("")}</table></div></div>
-  </div>
+  <div class="card"><h2>Who hires in Nigeria</h2><ul class="small">${C.nigeria.map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>
+  <div class="card"><h2>Certification verdicts</h2>
+    <div class="tablewrap"><table><tr><th>Cert</th><th>Verdict</th><th>Why</th></tr>
+    ${C.certs.map(c=>`<tr><td>${esc(c.c)}</td><td><b>${esc(c.v)}</b></td><td class="small">${esc(c.n)}</td></tr>`).join("")}</table></div></div>
   <div class="card"><h2>Best practices that compound</h2>
     <ul class="small">${C.bestpractices.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>
     <p class="small muted">Case studies in practice: the AWS "survive the promo" design lab, the ticket queue, and every lab scenario here are the applied versions of this page.</p></div>`;
