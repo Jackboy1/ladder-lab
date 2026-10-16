@@ -20,7 +20,7 @@ const terms = K._terms(), benches = K._benches();
 
 const decode = s => s.replace(/<[^>]+>/g, "").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&nbsp;/g," ").replace(/&rarr;|→/g," ");
 const stripPrompt = l => l.replace(/^\s*[\w.\-]+(\([\w\-]+\))?[#>]\s?/, "").replace(/^\s*C:\\[^>]*>\s?/, "").replace(/^\s*\$\s/, "");
-const PCCMD = /^(ipconfig|ping|tracert|arp|ssh|telnet|nslookup|netstat|cls|ip|ifconfig|traceroute)\b/i;
+const PCCMD = /^(ipconfig|ping|tracert|arp|ssh|telnet|nslookup|netstat|netsh|cls|ip|ifconfig|traceroute)\b/i;
 // what a snippet of taught text counts as: canonical IOS forms of each line, plus PC commands by name
 function formsOf(line){
   const l = stripPrompt(decode(line)).trim(); if (!l || l.length > 120) return [];

@@ -44,7 +44,7 @@ W.setWlan = (st, id, f) => { const w = st.wlans[id]; if (!w) return {err:`No WLA
   if (f.ssid!=null && String(f.ssid).length > W.LIMITS.ssid) return {err:`SSID can be at most ${W.LIMITS.ssid} characters.`};
   if (f.iface!=null && f.iface!=="management" && !st.ifaces[f.iface]) return {err:`Interface ${f.iface} doesn't exist.`};
   if (f.security!=null && !W.SECURITY[f.security]) return {err:"Unknown security type."};
-  if (f.psk!=null && f.psk!==""){ const fmt = f.pskFormat || w.pskFormat, k = String(f.psk);
+  if (f.psk!=null && f.psk!==""){ const fmt = f.pskFormat || w.pskFormat || "ascii", k = String(f.psk);
     if (fmt==="ascii" && !(k.length>=W.LIMITS.pskAscii[0] && k.length<=W.LIMITS.pskAscii[1])) return {err:`An ASCII pre-shared key must be ${W.LIMITS.pskAscii[0]}–${W.LIMITS.pskAscii[1]} characters.`};
     if (fmt==="hex" && !new RegExp(`^[0-9a-fA-F]{${W.LIMITS.pskHex}}$`).test(k)) return {err:`A hex pre-shared key must be exactly ${W.LIMITS.pskHex} hex digits.`}; }
   if (f.qos!=null && !W.QOS[f.qos]) return {err:"Unknown QoS profile."};

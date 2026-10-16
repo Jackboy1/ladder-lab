@@ -157,7 +157,7 @@ if (K && K._benches && ctx.Bench){
 // bench layout: devices must not overlap or spill outside the viewBox (mirrors bench.js layout())
 if (ctx.Bench){
   const PORTW = { rj45:[22,17], console:[22,17], sfp:[30,14], usb:[18,9] };
-  const lay = d => { if (["switch","router","hub"].includes(d.kind)){ let x = 52; for (const p of d.ports){ const [w] = PORTW[p.type]; if (p.type==="console") x += 14; x += w + (p.type==="sfp"?10:7); } return {w:Math.max(x+14, d.kind==="hub"?170:200), h:78}; } return {w:108, h:96}; };
+  const lay = d => { if (["switch","router","hub","wlc"].includes(d.kind)){ let x = 52; for (const p of d.ports){ const [w] = PORTW[p.type]; if (p.type==="console") x += 14; x += w + (p.type==="sfp"?10:7); } return {w:Math.max(x+14, d.kind==="hub"?170:200), h:78}; } return {w:108, h:96}; };
   for (const [id,cfg] of Object.entries(LL.benches||{})){
     let B; try { B = ctx.Bench.create(cfg); } catch(e){ continue; }
     const vb = (cfg.viewBox||"0 0 900 360").split(/\s+/).map(Number);

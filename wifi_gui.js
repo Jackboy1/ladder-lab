@@ -89,8 +89,9 @@ const WLCGUI = {
 
 // the laptop's Wi-Fi panel: the networks its AP is broadcasting, a security key box, Connect / Disconnect
 const WIFIGUI = {
-  visible(B, d){ const out = []; for (const ap of Object.values(B.devs).filter(v=>v.kind==="ap" && v.joinedTo && v.on!==false)){ const w = B.devs[ap.joinedTo];
-      for (const wl of Object.values(w.wlc.wlans)) if (wl.enabled && wl.broadcast!==false && wl.id<=16 && !out.some(o=>o.ssid===wl.ssid)) out.push({ssid:wl.ssid, sec:wl.security}); } return out; },
+  visible(B, d){ const out = [], pin = d.wifi && d.wifi.ap;
+    for (const ap of Object.values(B.devs).filter(v=>v.kind==="ap" && v.joinedTo && v.on!==false && !["monitor","sniffer"].includes(v.apMode) && (!pin || v.id===pin))){ const w = B.devs[ap.joinedTo];
+      for (const wl of Object.values(w.wlc.wlans)) if (wl.enabled && wl.broadcast!==false && wl.id<=16 && !out.some(o=>o.ssid===wl.ssid)) out.push({ssid:wl.ssid, sec:wl.security, ap:ap.id, wlan:wl.id}); } return out; },
   render(B, d){ const nets = WIFIGUI.visible(B, d), cur = d.wifiAt, res = d.wifiRes;
     const lab = s => s==="none" ? "Open" : s==="wpa2-ent" ? "Secured (WPA2-Enterprise)" : s==="wpa3-sae" ? "Secured (WPA3-Personal)" : s==="wpa2-wpa3" ? "Secured (WPA2/WPA3-Personal)" : "Secured (WPA2-Personal)";
     return `<div class="bn-panel"><div class="mt-h">${esc(d.label)} · Wi-Fi</div>

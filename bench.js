@@ -40,6 +40,7 @@ function create(cfg){
   if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}
   if (B.order.some(id=>B.devs[id].env)) try { computeL3(B); } catch(e){}
   try { linkLogs(B); } catch(e){}   // the starting link states (nothing logged)
+  B._wifiReady = true; B._joinEvents = [];
   return B;
 }
 function addDevice(B, d0){
@@ -459,6 +460,10 @@ function deliver(B, from, frame, step0){
     if (tag!=null){ pushNote(`${d.label} received a frame with an 802.1Q tag and ignored it (a normal NIC expects untagged frames)`); return; }
     if (frame.dst===BCAST || frame.dst===d.mac || isV6Mc(frame.dst)) recv.push({dev:d, ref}); else if (frame.kind!=="arp") pushNote(`${d.label} saw a frame for ${frame.dst} and ignored it (not its MAC)`);
   };
+  { const fr = from && from.ref ? from.ref : (typeof from==="string" ? from : null), fx = fr && P(B, fr), ftag = from && from.ref ? (from.tag==null ? null : from.tag) : null;
+    if (fx && (fx.dev.kind==="wlc" || fx.dev.kind==="ap")) for (const id2 of B.order){ const c = B.devs[id2];
+      if (!c.wifiAt || c.on===false || c.mac===frame.src || c.wifiAt.ref!==fr || (c.wifiAt.tag==null ? null : c.wifiAt.tag)!==ftag) continue;
+      if (frame.dst===BCAST || frame.dst===c.mac || isV6Mc(frame.dst)){ recv.push({dev:c, ref:fr, tag:ftag}); pushNote(`${fx.dev.label} bridges the frame straight to ${c.label} (both are its Wi-Fi clients on the same VLAN)`); } } }
   if (from && from.svi){ const sw = B.devs[from.svi]; switchIn(sw, null, from.vlan, step0||0); }
   else if (from && from.ref) sendPhys(from.ref, from.tag==null?null:from.tag, step0||0);
   else sendPhys(from, null, step0||0);
@@ -1012,10 +1017,12 @@ function dlog(B, frames, log, r, text){ frames.push(...r.hops); log.push(text, .
 const fromOf = n => n.svi ? {svi:n.dev.id, vlan:n.vlan} : (n.tag!=null ? {ref:n.ref, tag:n.tag} : n.ref);
 function dora(B, d){
   if (d.wifiAt && !d.wifiAt.flex && !d.wifiAt.dhcpServer) return {ok:false, frames:[], why:"proxy", log:[`<b>DHCP Discover</b> from ${d.label} reaches the controller over CAPWAP, but interface <b>${d.wifiAt.ifaceName}</b> has no Primary DHCP Server — with DHCP proxy on (the AireOS default) the WLC has nowhere to relay it, so the client never gets an address`]};
-  const hn = hostNode(d);
-  return doraCore(B, {self:d, label:d.label, mac:d.mac, from: hn.tag!=null ? {ref:hn.ref, tag:hn.tag} : hn.ref, link:hn.ref, want:d.lastIp, who:"Windows"},
+  const hn = hostNode(d), proxy = d.wifiAt && !d.wifiAt.flex && B.devs[d.wifiAt.wlc] && B.devs[d.wifiAt.wlc].wlc;
+  const res0 = doraCore(B, {self:d, label:d.label, mac:d.mac, from: hn.tag!=null ? {ref:hn.ref, tag:hn.tag} : hn.ref, link:hn.ref, want:d.lastIp, who:"Windows"},
   (o, f) => { d.ip = o.ip; d.mask = o.mask; d.gw = o.routers[0] || null; d.dns = o.dns.slice(); d.domain = o.domain || null; d.lastIp = o.ip;
-    d.lease = {server:f.srvIp, srvId:f.srv.id, obtained:B.now, expires: o.leaseMs==null ? null : B.now + o.leaseMs}; B.arp[d.id] = {}; }); }
+    d.lease = {server:f.srvIp, srvId:f.srv.id, obtained:B.now, expires: o.leaseMs==null ? null : B.now + o.leaseMs}; B.arp[d.id] = {}; });
+  if (res0 && res0.ok && proxy && d.lease){ d.lease.shown = proxy.virtual || "192.0.2.1"; (res0.log = res0.log || []).push(`&nbsp;&nbsp;· the controller is a DHCP proxy: it relayed the client's request to ${d.wifiAt.dhcpServer} with giaddr = its ${d.wifiAt.ifaceName} interface, and answered the client from its virtual interface ${d.lease.shown} — that's the DHCP Server ipconfig /all shows`); }
+  return res0; }
 function routerDora(B, r, ifn){ const i = r.env.intfs[ifn], node = routerNodeFor(r, ifn), sh = shortIf(ifn);
   return doraCore(B, {self:r, label:r.label + " " + sh, mac:i.mac, from:fromOf(node), link:node.ref, want:i.dhcpLast, cid:window.DHCP.ciscoCid(i.mac, sh), who:"IOS"},
   (o, f) => { i.ip = o.ip; i.mask = o.mask; i.dhcpGw = o.routers[0] || null; i.dhcpLast = o.ip; i.dhcpLease = {server:f.srvIp, obtained:B.now, secs: o.leaseMs==null ? 4294967295 : Math.round(o.leaseMs/1000)};
@@ -1109,10 +1116,14 @@ function dhcpRelease(B, d){
 }
 // a PC set to "obtain automatically" asks again whenever the network changes (real Windows retries every few minutes)
 // Wi-Fi: which APs have joined a controller (CAPWAP discovery), and which clients are associated, on which VLAN
+// a radio's BSSID: derived from the AP's MAC (real APs use a base radio MAC, one BSSID per WLAN), not its Ethernet MAC
+function radioMac(ap, wlanId){ const h = (ap.mac||"").replace(/\./g,""); if (h.length!==12) return ""; const b = h.match(/../g).map(x=>parseInt(x, 16));
+  b[0] = (b[0] & 0xfe); b[4] = (b[4] + 0x30) & 255; b[5] = ((b[5] & 0xf0) + ((wlanId||1) - 1)) & 255; return b.map(x=>x.toString(16).padStart(2, "0")).join(":"); }
 function computeWifi(B){
   if (!window.WLAN) return;
   const devs = B.order.map(i=>B.devs[i]), wlcs = devs.filter(d=>d.kind==="wlc" && d.on!==false), aps = devs.filter(d=>d.kind==="ap");
-  for (const ap of aps){ ap.joinedTo = null; ap.joinLog = [];
+  B._joinEvents = B._joinEvents || [];
+  for (const ap of aps){ const was = ap.joinedTo || null; ap.joinedTo = null; ap.joinLog = [];
     if (ap.on===false || !linkUpAt(B, hostNode(ap).ref)){ ap.joinLog = ["The AP has no link or no power — it takes PoE from its switch port (or a power injector)."]; continue; }
     let opt43 = [];
     if (ap.lease && B.devs[ap.lease.srvId] && B.devs[ap.lease.srvId].env){ const pool = window.DHCP.poolFor(B.devs[ap.lease.srvId].env.dhcp, ap.ip); if (pool && pool.opt43) opt43 = window.DHCP.capwapWlcs(pool.opt43); }
@@ -1120,16 +1131,18 @@ function computeWifi(B){
       try { r = window.WLAN.discover({ap:{ip:ap.ip, mask:ap.mask, gw:ap.gw, primary:ap.primary}, dhcpOpt43:opt43, wlcMgmt:w.ip, reach: ip => sendIp(B, hostNode(ap), ip, "CAPWAP discovery", {src:ap.ip, proto:"udp", sport:5246, dport:5246}).ok}); }
       finally { [B.frames, B.log, B.step] = keep; }
       ap.joinLog = r.steps; if (r.joined){ ap.joinedTo = w.id; ap.joinVia = r.via; break; } }
-    for (const w of wlcs){ if (ap.joinedTo===w.id) w.wlc.aps[ap.label] = {mode:ap.apMode, ip:ap.ip, mac:ap.mac, model:ap.model}; else delete w.wlc.aps[ap.label]; } }
+    for (const w of wlcs){ if (ap.joinedTo===w.id) w.wlc.aps[ap.label] = {mode:ap.apMode, ip:ap.ip, mac:ap.mac, model:ap.model}; else delete w.wlc.aps[ap.label]; }
+    if (B._wifiReady && was!==(ap.joinedTo||null)) B._joinEvents.push(`<b>${ap.label} — CAPWAP</b>: ${ap.joinedTo ? "joined " + B.devs[ap.joinedTo].label + " (" + ap.joinVia + ")" : was ? "lost its controller" : "can't join a controller"}`, ...ap.joinLog.map(l=>"&nbsp;&nbsp;· " + l)); }
   for (const c of devs){ if (!c.wifi || c.on===false){ if (c.wifiAt){ c.wifiAt = null; c._wifiKey = ""; } continue; }
     const wired = c.ports.some(p=>p.type==="rj45" && cableAt(B, c.id+":"+p.id));
     const ap = c.wifi.ap ? B.devs[c.wifi.ap] : (aps.find(a=>a.joinedTo) || aps[0]), wlc = ap && ap.joinedTo ? B.devs[ap.joinedTo] : null;
-    const res = !c.wifi.ssid ? {ok:false, reason:"none", win:"Not connected", why:"No Wi-Fi network chosen."} : window.WLAN.associate(wlc ? wlc.wlc : window.WLAN.store(), !!wlc, {ssid:c.wifi.ssid, key:c.wifi.key, wpa3:c.wifi.wpa3, wpa2:c.wifi.wpa2});
+    const serving = ap && !["monitor","sniffer"].includes(ap.apMode);
+    const res = !c.wifi.ssid ? {ok:false, reason:"none", win:"Not connected", why:"No Wi-Fi network chosen."} : ap && !serving ? {ok:false, reason:"ap-mode", win:"The network isn't listed.", why:`${ap.label} is in ${ap.apMode} mode — its radios ${ap.apMode==="monitor" ? "scan every channel" : "capture frames on one channel"} instead of serving clients.`} : window.WLAN.associate(wlc ? wlc.wlc : window.WLAN.store(), !!wlc, {ssid:c.wifi.ssid, key:c.wifi.key, wpa3:c.wifi.wpa3, wpa2:c.wifi.wpa2});
     c.wifiRes = Object.assign({}, res, {ap: ap && ap.id}); let at = null;
     if (res.ok && !wired){ const iface = window.WLAN.ifaceOf(wlc.wlc, res.wlan), flex = ap.apMode==="flexconnect" && !!res.wlan.flexLocal;
       const up = wlc.ports.find(p=>cableAt(B, wlc.id+":"+p.id)) || wlc.ports[0];
       at = {ref: flex ? hostNode(ap).ref : wlc.id+":"+up.id, tag: iface.vlan ? iface.vlan : null, ap:ap.id, wlc:wlc.id, wlan:res.wlan.id, ssid:res.wlan.ssid, vlan:iface.vlan||0, dhcpServer:iface.dhcp||null, flex, ifaceName:iface.name, auth:res.auth, cipher:res.cipher}; }
-    const key = at ? [at.ref, at.tag, at.wlan].join("|") : "";
+    const key = at ? [at.ref, at.tag, at.wlan, at.dhcpServer||"", at.ifaceName].join("|") : "";
     if (key!==(c._wifiKey||"")){ c._wifiKey = key; if (c.dhcp){ c.ip = null; c.mask = null; c.gw = null; c.lease = null; } c._dhcpTried = null; B.arp[c.id] = {}; }
     c.wifiAt = at; }
 }
@@ -1399,14 +1412,16 @@ function pcExec(B, d, line){
   if (!raw) return "";
   if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ipconfig /flushdns · ping <ip|name> · tracert <ip|name> · nslookup <name> [server] · curl http://<ip|name>[:port] · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
   if (l==="cls") return {clear:true};
-  if (/^netsh\s+wlan\s+show\s+interfaces?$/.test(l)){ computeL3(B); const w = d.wifiAt, ap = w && B.devs[w.ap], ch = ap && ap.channel || 36, band = ch > 14 ? "5 GHz" : "2.4 GHz", mc = m => (m||"").replace(/\./g,"").match(/../g).join(":");
+  if (/^netsh\s+wlan\s+show\s+interfaces?$/.test(l)){ computeL3(B); const w = d.wifiAt, ap = w && B.devs[w.ap], ch = ap && ap.channel || 36, band = ch > 14 ? "5 GHz" : "2.4 GHz", mc = m => (m||"").replace(/\./g,"").match(/../g).join(":"),
+      radio = ch > 14 ? "802.11ac" : "802.11n", rate = ch > 14 ? "866.7" : "144.4", bssid = ap ? radioMac(ap, w.wlan) : "";
     if (d.kind!=="laptop") return "There is no wireless interface on the system.";
     const head = "There is 1 interface on the system: \n\n    Name                   : Wi-Fi\n    Description            : Intel(R) Wi-Fi 6E AX211 160MHz\n    GUID                   : 3f2a9c4e-1b7d-4e21-9a55-" + d.mac.replace(/\./g,"") + "\n    Physical address       : " + mc(d.mac) + "\n    Interface type         : Primary\n";
     if (!w) return head + "    State                  : disconnected\n    Radio status           : Hardware On\n                             Software On";
     const akm = w.auth==="WPA3-Personal" ? "00-0f-ac:08" : w.auth==="Open" ? "00-00-00:00" : "00-0f-ac:02", cipher = w.auth==="Open" ? "None" : "CCMP";
-    return head + `    State                  : connected\n    SSID                   : ${w.ssid}\n    AP BSSID               : ${mc(ap ? ap.mac : "")}\n    Band                   : ${band}\n    Channel                : ${ch}\n    Connected Akm-cipher   : [ akm = ${akm}, cipher =  ${w.auth==="Open" ? "00-00-00:00" : "00-0f-ac:04"} ]\n    Network type           : Infrastructure\n    Radio type             : 802.11ac\n    Authentication         : ${w.auth}\n    Cipher                 : ${cipher}\n    Connection mode        : Auto Connect\n    Receive rate (Mbps)    : 866.7\n    Transmit rate (Mbps)   : 866.7\n    Signal                 : 91% \n    Rssi                   : -44\n    Profile                : ${w.ssid} `; }
+    return head + `    State                  : connected\n    SSID                   : ${w.ssid}\n    AP BSSID               : ${bssid}\n    Band                   : ${band}\n    Channel                : ${ch}\n    Connected Akm-cipher   : [ akm = ${akm}, cipher =  ${w.auth==="Open" ? "00-00-00:00" : "00-0f-ac:04"} ]\n    Network type           : Infrastructure\n    Radio type             : ${radio}\n    Authentication         : ${w.auth}\n    Cipher                 : ${cipher}\n    Connection mode        : Auto Connect\n    Receive rate (Mbps)    : ${rate}\n    Transmit rate (Mbps)   : ${rate}\n    Signal                 : 91% \n    Rssi                   : -44\n    Profile                : ${w.ssid} `; }
   if (/^netsh\s+wlan\s+show\s+networks(\s+mode=bssid)?$/.test(l)){ computeL3(B); if (d.kind!=="laptop") return "There is no wireless interface on the system.";
     const nets = window.WIFIGUI ? window.WIFIGUI.visible(B, d) : [], auth = s0 => s0==="none" ? "Open" : s0==="wpa2-ent" ? "WPA2-Enterprise" : s0==="wpa3-sae" ? "WPA3-Personal" : "WPA2-Personal";
+    if (/mode=bssid/.test(l)) return `Interface name : Wi-Fi \nThere are ${nets.length} networks currently visible. \n\n` + nets.map((n,i)=>{ const ap = B.devs[n.ap], ch = ap && ap.channel || 36, b5 = ch > 14; return `SSID ${i+1} : ${n.ssid}\n    Network type            : Infrastructure\n    Authentication          : ${auth(n.sec)}\n    Encryption              : ${n.sec==="none" ? "None" : "CCMP"} \n    BSSID 1                 : ${ap ? radioMac(ap, n.wlan) : ""}\n         Signal             : 91%  \n         Radio type         : ${b5 ? "802.11ac" : "802.11n"}\n         Band               : ${b5 ? "5 GHz" : "2.4 GHz"}\n         Channel            : ${ch} \n         Basic rates (Mbps) : ${b5 ? "6 12 24" : "1 2 5.5 11"}\n         Other rates (Mbps) : ${b5 ? "9 18 36 48 54" : "6 9 12 18 24 36 48 54"}`; }).join("\n\n");
     return `Interface name : Wi-Fi \nThere are ${nets.length} networks currently visible. \n\n` + nets.map((n,i)=>`SSID ${i+1} : ${n.ssid}\n    Network type            : Infrastructure\n    Authentication          : ${auth(n.sec)}\n    Encryption              : ${n.sec==="none" ? "None" : "CCMP"} `).join("\n\n"); }
   if (l==="ipconfig /release" || l==="ipconfig /renew"){
     const head = "\nWindows IP Configuration\n\n";
@@ -1433,7 +1448,7 @@ function pcExec(B, d, line){
     const dl = (d.dns||[]).length ? d.dns : ["fec0:0:0:ffff::1%1", "fec0:0:0:ffff::2%1", "fec0:0:0:ffff::3%1"];
     const hx = d.mac.replace(/\./g, "").toUpperCase().match(/../g), iaid = 50000000 + (parseInt(d.mac.replace(/\./g, "").slice(-6), 16) % 9000000);
     const dnsLines = `\n   DHCPv6 IAID . . . . . . . . . . . : ${iaid}\n   DHCPv6 Client DUID. . . . . . . . : 00-01-00-01-2E-6B-1F-40-${hx.join("-")}\n   DNS Servers . . . . . . . . . . . : ${dl[0]}${dl.slice(1).map(x=>"\n                                       "+x).join("")}`;
-    const tail = all ? (d.dhcp && d.ip && d.lease ? `\n   DHCP Server . . . . . . . . . . . : ${d.lease.server}` : "") + dnsLines + "\n   NetBIOS over Tcpip. . . . . . . . : Enabled" : "";
+    const tail = all ? (d.dhcp && d.ip && d.lease ? `\n   DHCP Server . . . . . . . . . . . : ${d.lease.shown || d.lease.server}` : "") + dnsLines + "\n   NetBIOS over Tcpip. . . . . . . . : Enabled" : "";
     if (!d.ip && d.dhcp && d.released) return o + sfx + nic + v6 + gwLine(gw6 ? [gw6] : []) + tail;   // after ipconfig /release: no IPv4 address at all
     if (!d.ip) return o + sfx + nic + v6 + `   Autoconfiguration IPv4 Address. . : ${apipaOf(d)}${pref}\n   Subnet Mask . . . . . . . . . . . : 255.255.0.0\n` + gwLine(gw6 ? [gw6] : []) + tail;
     const lease = all && d.dhcp && d.lease ? `   Lease Obtained. . . . . . . . . . : ${winTime(d.lease.obtained)}\n   Lease Expires . . . . . . . . . . : ${d.lease.expires==null ? "Never" : winTime(d.lease.expires)}\n` : "";
@@ -1576,7 +1591,7 @@ function act(B, a){
       else if (sub==="wlandel"){ if (st.wlans[+x[2]]){ delete st.wlans[+x[2]]; o = {ok:true}; } else o = {err:"No such WLAN."}; }
       else if (sub==="access"){ Object.assign(st.access, x[2]||{}); o = {ok:true}; }
       else if (sub==="apmode"){ const ap = B.devs[x[2]] || Object.values(B.devs).find(v=>v.kind==="ap" && v.label===x[2]);
-        if (!ap || ap.kind!=="ap") o = {err:"No such AP."}; else { ap.apMode = x[3]; o = {ok:true, note:` — ${ap.label} reboots and rejoins in ${x[3]} mode`}; } }
+        if (!ap || ap.kind!=="ap") o = {err:"No such AP."}; else { const from0 = ap.apMode; ap.apMode = x[3]; o = {ok:true, note: from0==="local" && x[3]==="flexconnect" ? ` — ${ap.label} switches to FlexConnect without a reboot` : ` — ${ap.label} reboots and rejoins in ${x[3]} mode`}; } }
       else o = {err:"Unknown controller setting."};
       computeL3(B); r = {ok:!!o.ok, msg: o.ok ? `${d.label}: applied${o.note||""}.` : `${d.label}: ${o.err}`}; } }
   else if (op==="dhcp"){ const d = B.devs[x[0]];
@@ -1584,7 +1599,8 @@ function act(B, a){
     const res = dora(B, d); B.frames = res.frames; B.log = res.log;
     r = {ok:true, msg: res.ok ? `${d.label}: set to obtain an IP address automatically — got ${res.ip} from the DHCP server ${res.server}.` : `${d.label}: set to obtain an IP address automatically — but no DHCP server answered, so Windows uses an APIPA 169.254.x.x address. Open the frame log to see why.`}; }
   else if (op==="pc"){ B.frames = []; const dv = B.devs[x[0]], o0 = pcExec(B, dv, x[1]);
-    r = {ok:true, out: dv && dv.wifiAt && typeof o0==="string" ? o0.replace("Ethernet adapter Ethernet:", "Wireless LAN adapter Wi-Fi:").replace("Intel(R) Ethernet Connection I219-LM", "Intel(R) Wi-Fi 6E AX211 160MHz") : o0}; }
+    const wifiNic = dv && dv.kind==="laptop" && (dv.wifiAt || (dv.wifi && !cableAt(B, dv.id + ":eth")));
+    r = {ok:true, out: wifiNic && typeof o0==="string" ? o0.replace("Ethernet adapter Ethernet:", "Wireless LAN adapter Wi-Fi:").replace("Intel(R) Ethernet Connection I219-LM", "Intel(R) Wi-Fi 6E AX211 160MHz").split("renewing interface Ethernet").join("renewing interface Wi-Fi").split("releasing interface Ethernet").join("releasing interface Wi-Fi") : o0}; }
   else if (op==="power"){ const d = B.devs[x[0]]; d.on = x[1]!==false; if (!d.on && B.mac[d.id]) B.mac[d.id] = {}; r = {ok:true, msg:`${d.label} powered ${d.on?"on":"off"}.`}; }
   else if (op==="console"){ r = openConsole(B, x[0], x[1]||{}); }
   else if (op==="term"){ B.frames = []; r = {ok:true, out: termExec(B, x[0])}; }
@@ -1594,6 +1610,7 @@ function act(B, a){
   if (B.order.some(id=>isSw(B.devs[id]))) try { l2State(B); } catch(e){}   // link-up events log when they happen, like real switches
   if (B.order.some(id=>B.devs[id].env)) try { computeL3(B); } catch(e){}
   try { linkLogs(B); } catch(e){}
+  if (B._joinEvents && B._joinEvents.length){ B.log = (B.log||[]).concat(B._joinEvents); B._joinEvents = []; }
   return r;
 }
 // IOS logs its own interfaces going up/down; the device whose port was administratively shut already printed its own lines
