@@ -25,6 +25,21 @@ run("aclmatch", q => { const e = ctx.SIM.ios2Env("router", {}); e.exec("en"); e.
   const p = q.pkt, r = ctx.ACL.check(e.acl || e._st?.acl || e.state?.acl, q.acl.name, {src:p.src, dst:p.dst, proto:p.proto||"ip", sport:40000, dport:p.dport, icmp:p.icmp});
   const seq = r.entry ? String(r.entry.seq) : "none", act = r.permit ? "permit" : "deny";
   return q.fields[0].a===seq && q.fields[1].a===act; });
+run("aclmatchstd", q => { if (q.acl.ext) return false; const e = ctx.SIM.ios2Env("router", {}); e.exec("en"); e.exec("conf t");
+  e.exec(`ip access-list ${q.acl.ext ? "extended" : "standard"} ${q.acl.name}`);
+  for (const l of q.acl.lines){ const r = e.exec(l); if (r && /%/.test(typeof r === "string" ? r : r.text||"")) return false; }   // IOS must accept every line
+  e.exec("end");
+  const p = q.pkt, r = ctx.ACL.check(e.acl || e._st?.acl || e.state?.acl, q.acl.name, {src:p.src, dst:p.dst, proto:p.proto||"ip", sport:40000, dport:p.dport, icmp:p.icmp});
+  const seq = r.entry ? String(r.entry.seq) : "none", act = r.permit ? "permit" : "deny";
+  return q.fields[0].a===seq && q.fields[1].a===act; });
+run("aclmatchext", q => { if (!q.acl.ext) return false; const e = ctx.SIM.ios2Env("router", {}); e.exec("en"); e.exec("conf t");
+  e.exec(`ip access-list ${q.acl.ext ? "extended" : "standard"} ${q.acl.name}`);
+  for (const l of q.acl.lines){ const r = e.exec(l); if (r && /%/.test(typeof r === "string" ? r : r.text||"")) return false; }   // IOS must accept every line
+  e.exec("end");
+  const p = q.pkt, r = ctx.ACL.check(e.acl || e._st?.acl || e.state?.acl, q.acl.name, {src:p.src, dst:p.dst, proto:p.proto||"ip", sport:40000, dport:p.dport, icmp:p.icmp});
+  const seq = r.entry ? String(r.entry.seq) : "none", act = r.permit ? "permit" : "deny";
+  return q.fields[0].a===seq && q.fields[1].a===act; });
+run("aclplacestd", q => !q.ext && q.fields[0].a===q.dst && q.fields[2].a==="out");
 // wildcards — arithmetic from scratch
 run("aclwild", q => { const base = ipNum(q.base), wc = q.fields[1].a.split(".").reduce((a,o)=>a*256+(+o),0);
   return wc===q.size-1 && base % q.size===0 && q.fields[0].a===q.base; });
@@ -49,7 +64,7 @@ run("pwtype", q => { const m = q.line.match(/(?:secret|password) (\d) /), t = m 
 run("radtac", q => q.fields[0].a===q.ans && ["radius","tacacs+"].includes(q.ans));
 run("cia", q => q.fields[0].a===q.ans);
 // every drill type a Module 8 lesson asks for exists
-ok(["aclmatch","aclwild","aclplace","psecviol","snoopdrop","daicheck","pwtype","radtac","cia"].every(t=>D.GEN[t] && D.LABELS[t]), "all nine security drill types are registered with labels");
+ok(["aclmatch","aclmatchstd","aclmatchext","aclwild","aclplace","aclplacestd","psecviol","snoopdrop","daicheck","pwtype","radtac","cia"].every(t=>D.GEN[t] && D.LABELS[t]), "all twelve security drill types are registered with labels");
 D._secSeed(null);
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

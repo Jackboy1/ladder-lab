@@ -39,7 +39,7 @@ function whyAcl(L, ext, pk){ const rows = []; for (const e of L){ const miss = a
 /* ---------- the generators ---------- */
 const GEN = {
   // which line matches first, and permit or deny?
-  aclmatch(){ const ext = rnd(2)===0, A = 1 + rnd(200), site = ipNum(`10.${A}.0.0`);
+  aclmatch(force){ const ext = force==null ? rnd(2)===0 : force, A = 1 + rnd(200), site = ipNum(`10.${A}.0.0`);
     const lan = k => (site + (k<<8))>>>0, n = 3 + rnd(2), L = [];
     const rndSpec = (allowAny) => { const r = rnd(allowAny ? 6 : 5);
       if (r===0) return {kind:"host", ip:(lan(20 + rnd(10)) + 1 + rnd(250))>>>0};
@@ -55,8 +55,8 @@ const GEN = {
     if (!L.some(e=>e.action==="permit")) L[L.length-1].action = "permit";   // real lists permit something — an all-deny list blocks everything
     if (!ext){ // IOS refuses a host line that an earlier line already covers — real lists put host lines first
       L.sort((a,b)=>(a.src.kind==="host" ? 0 : 1) - (b.src.kind==="host" ? 0 : 1)); L.forEach((e,i)=>e.seq = (i+1)*10);
-      if (L.some((e,i)=>e.src.kind==="host" && L.slice(0,i).some(f=>f.src.kind==="host" && f.src.ip===e.src.ip))) return GEN.aclmatch(); }
-    if (new Set(L.map(e=>aceText(e, ext).slice(4))).size < L.length) return GEN.aclmatch();
+      if (L.some((e,i)=>e.src.kind==="host" && L.slice(0,i).some(f=>f.src.kind==="host" && f.src.ip===e.src.ip))) return GEN.aclmatch(force); }
+    if (new Set(L.map(e=>aceText(e, ext).slice(4))).size < L.length) return GEN.aclmatch(force);
     // a packet aimed at one line (it may still be caught by an earlier one — that's the point)
     const t = rnd(L.length + 1), pk = {};
     if (t < L.length){ const e = L[t]; pk.src = inSpec(e.src) ?? (site + rnd(65536))>>>0;
@@ -73,12 +73,14 @@ const GEN = {
       why:whyAcl(L, ext, pk) + (ext ? "" : " (A standard ACL looks only at the source address.)") }; },
   // one ACE for a range: address + wildcard
   aclwild(){ const k = 2 + rnd(11), size = 2**k, A = 1 + rnd(200), site = ipNum(`10.${A}.0.0`), base = (site + size*rnd(65536/size))>>>0, end = (base + size - 1)>>>0, wc = ipStr(size-1);
-    return { q:`Write the address and wildcard mask for one ACE that matches exactly ${ipStr(base)} – ${ipStr(end)} (${size} addresses).`, base:ipStr(base), size,
+    return { q:`Write the address and wildcard mask for one access-list line that matches exactly ${ipStr(base)} – ${ipStr(end)} (${size} addresses).`, base:ipStr(base), size,
       fields:[{label:"Address", a:ipStr(base), check:v=>{ const x = v.trim(); if (!/^\d+\.\d+\.\d+\.\d+$/.test(x)) return false; return ((ipNum(x) & ~(size-1))>>>0)===base && ipNum(x) <= end; }},
               {label:"Wildcard", a:wc, check:v=>v.trim()===wc}],
       why:`The range holds ${size} = 2^${k} addresses, so the wildcard is ${size} − 1 = ${size-1}, written across the octets as ${wc} (0 = must match, 255 = any). It works only because ${ipStr(base)} is a multiple of ${size} — the block starts on a boundary. Write the first address: ${ipStr(base)} ${wc}.` }; },
   // standard near the destination, extended near the source
-  aclplace(){ const city = [["R-LOS","R-IBD","R-ABJ"],["R-KAN","R-KAD","R-JOS"],["R-PHC","R-OWR","R-ENU"]][rnd(3)], ext = rnd(2)===0, fwd = rnd(2)===0;
+  aclmatchstd(){ const q = GEN.aclmatch(false); return q; },
+  aclmatchext(){ return GEN.aclmatch(true); },
+  aclplace(force){ const city = [["R-LOS","R-IBD","R-ABJ"],["R-KAN","R-KAD","R-JOS"],["R-PHC","R-OWR","R-ENU"]][rnd(3)], ext = force==null ? rnd(2)===0 : force, fwd = rnd(2)===0;
     const [a, , c] = city, src = fwd ? a : c, dst = fwd ? c : a, srcLan = fwd ? "LAN-A" : "LAN-C", dstLan = fwd ? "LAN-C" : "LAN-A";
     const router = ext ? src : dst, dir = ext ? "in" : "out";
     return { q:`Three routers in a line: ${city[0]} — ${city[1]} — ${city[2]}. LAN-A sits on ${city[0]} G0/0; LAN-C sits on ${city[2]} G0/0; the links between routers use G0/1 and G0/2. A ${ext ? "named extended" : "standard"} ACL must stop ${srcLan} hosts reaching ${ext ? "the web server on " + dstLan : dstLan}, and everything else must keep working. Following Cisco's placement guideline, where does it go?`,
@@ -86,6 +88,7 @@ const GEN = {
       fields:[{label:"Router", a:router, check:v=>norm(v)===router.toLowerCase()}, {label:"Interface", a:"G0/0", check:v=>oneOf(v, ["g0/0","gi0/0","gigabitethernet0/0"])}, {label:"in / out", a:dir, check:v=>norm(v)===dir}],
       why: ext ? `An extended ACL can name the source AND the destination, so it can go close to the source without blocking anything else: on ${src}, inbound on G0/0 (${srcLan}'s gateway interface). The unwanted traffic is dropped before it crosses any WAN link.`
                : `A standard ACL matches only the source. Put it near the source and it would block ${srcLan} from everywhere, so it goes close to the destination: on ${dst}, outbound on G0/0 — the interface that leads into ${dstLan}.` }; },
+  aclplacestd(){ return GEN.aclplace(false); },
   // port security: what happens to this frame?
   psecviol(){ const max = 1 + rnd(3), have = rnd(max + 1), mode = pick(["shutdown","restrict","protect"]), known = have > 0 && rnd(3)===0;
     let fwd, state = "up", counter = false, story;
@@ -159,7 +162,7 @@ const GEN = {
     return { q:`Which part of the CIA triad does this incident hit most directly? "${stmt}"`, stmt, ans, fields:[{label:"confidentiality / integrity / availability", a:ans, check:v=>{ const x = norm(v); return x===ans || x===ans[0]; }}],
       why: ans==="confidentiality" ? "Confidentiality = only the right people can READ the data. Here data was exposed to people who shouldn't see it." : ans==="integrity" ? "Integrity = data and systems are not CHANGED without authority. Here something was altered." : "Availability = the service is THERE when people need it. Here users lost access." }; },
 };
-const LABELS = { aclmatch:"ACL — first match", aclwild:"ACL — range to wildcard", aclplace:"ACL — placement", psecviol:"Port security — what happens", snoopdrop:"DHCP snooping — forwarded or dropped", daicheck:"DAI — forwarded or dropped", pwtype:"Password types", radtac:"RADIUS or TACACS+", cia:"CIA triad" };
+const LABELS = { aclmatch:"ACL — first match", aclwild:"ACL — range to wildcard", aclplace:"ACL — placement", aclmatchstd:"Standard ACL — first match", aclmatchext:"Extended ACL — first match", aclplacestd:"Standard ACL — placement", psecviol:"Port security — what happens", snoopdrop:"DHCP snooping — forwarded or dropped", daicheck:"DAI — forwarded or dropped", pwtype:"Password types", radtac:"RADIUS or TACACS+", cia:"CIA triad" };
 Object.assign(D.GEN, GEN); Object.assign(D.LABELS, LABELS); for (const k of Object.keys(GEN)) if (!D.types.includes(k)) D.types.push(k);
 D._secSeed = s => { seedState = s; }; D.SEC = { types:Object.keys(GEN), ipNum, ipStr };
 })();
