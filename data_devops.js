@@ -2,7 +2,7 @@
 (function(){
 
 LL.tracks.push({
-  id:"docker", phase:2, title:"Docker", tag:"Ladder step 6", hours:"5–7h",
+  id:"docker", phase:2, title:"Docker", tag:"Ladder step 10", hours:"5–7h",
   blurb:"The step that makes Kubernetes learnable. Images vs containers, Dockerfiles, networks, volumes, Compose — and Project 4: containerise something of yours.",
   lessons:[
   {t:"Containers, images, and the Docker workflow", html:`
@@ -121,7 +121,7 @@ CMD ["python", "main.py"]`,
 });
 
 LL.tracks.push({
-  id:"terraform", phase:2, title:"Terraform", tag:"Ladder step 7", hours:"5–7h",
+  id:"terraform", phase:2, title:"Terraform", tag:"Ladder step 11", hours:"5–7h",
   blurb:"Infrastructure as code: HCL, the plan/apply loop, state, variables and modules — the language of Project 2 (the full VPC built with no console clicks).",
   lessons:[
   {t:"IaC thinking, HCL, and the plan/apply loop", html:`
@@ -264,7 +264,7 @@ output "vpc_id" {
 });
 
 LL.tracks.push({
-  id:"cicd", phase:2, title:"CI/CD & GitHub Actions", tag:"Ladder step 8", hours:"3–4h",
+  id:"cicd", phase:2, title:"CI/CD & GitHub Actions", tag:"Ladder step 12", hours:"3–4h",
   blurb:"72.8% of platform work and one of the smallest steps: pipelines that test and deploy on every push — Project 5.",
   lessons:[
   {t:"Pipeline thinking and GitHub Actions anatomy", html:`
@@ -356,7 +356,7 @@ jobs:
 });
 
 LL.tracks.push({
-  id:"k8s", phase:2, title:"Kubernetes", tag:"Ladder step 9 · CKA path", hours:"14–18h",
+  id:"k8s", phase:2, title:"Kubernetes", tag:"Ladder step 13 · CKA path", hours:"14–18h",
   blurb:"Now it makes sense — Docker, Terraform and pipelines sit under it. Architecture, Pods/Deployments/Services, config, probes, kubectl fluency, and the networking angle where your background is the advantage.",
   lessons:[
   {t:"Why Kubernetes, and the architecture", html:`
@@ -469,7 +469,7 @@ OOMKilled     → memory limit too low or a leak; raise limits or fix the leak</
 });
 
 LL.tracks.push({
-  id:"sre", phase:2, title:"Observability, GitOps & SRE", tag:"Ladder steps 10–11", hours:"5–7h",
+  id:"sre", phase:2, title:"Observability, GitOps & SRE", tag:"Ladder steps 14–15", hours:"5–7h",
   blurb:"Prometheus & Grafana, the metrics that matter, ArgoCD-style GitOps, SLOs and error budgets, and blameless postmortems — the capstone's operating system.",
   lessons:[
   {t:"Observability: Prometheus, Grafana, and what to measure", html:`

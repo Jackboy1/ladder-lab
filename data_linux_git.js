@@ -2,7 +2,7 @@
 (function(){
 
 LL.tracks.push({
-  id:"linux", phase:1, title:"Linux", tag:"Ladder step 2", hours:"10–14h",
+  id:"linux", phase:1, title:"Linux", tag:"Ladder step 3", hours:"10–14h",
   blurb:"Your real gap per the Ladder — it blocks Docker through Kubernetes. Filesystem, permissions, processes, systemd, text tools and bash scripting, with live terminal labs.",
   lessons:[
   {t:"The filesystem and moving around", html:`
@@ -266,7 +266,7 @@ exit $fail`,
 });
 
 LL.tracks.push({
-  id:"git", phase:1, title:"Git & GitHub", tag:"Ladder step 3", hours:"3–4h",
+  id:"git", phase:1, title:"Git & GitHub", tag:"Ladder step 2", hours:"3–4h",
   blurb:"How Git actually thinks, branching without fear, resolving conflicts, and the GitHub flow that makes your public repo your CV.",
   lessons:[
   {t:"How Git thinks: snapshots and the three areas", html:`
