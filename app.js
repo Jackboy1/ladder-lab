@@ -206,8 +206,9 @@ function tracksView(){
       <button class="btn" id="startexam">Start exam</button>
     </div></div>` +
   LL.phases.map(ph=>{
-    const ts = LL.tracks.filter(t=>t.phase===ph.id);
-    return `<h2 style="margin-top:18px">${esc(ph.name)}</h2><div class="grid2">`+ts.map(t=>{
+    const ts = LL.tracks.filter(t=>t.phase===ph.id), soon = (LL.planned||[]).filter(c=>c.phase===ph.id);
+    if (!ts.length && !soon.length) return "";
+    return `<h2 style="margin-top:18px">${esc(ph.name)}</h2>${ph.note?`<p class="small muted" style="margin-top:-4px">${esc(ph.note)}</p>`:""}<div class="grid2">`+ts.map(t=>{
       const p = trackProgress(t);
       return `<div class="card">
         <h3>${esc(t.title)} ${trackComplete(t)?'<span class="tag ok">CERTIFIED</span>':""}</h3>
@@ -217,7 +218,7 @@ function tracksView(){
         <div class="small muted" style="margin-top:4px">${t.lessons.length} lessons · ${t.quiz.length} quiz Qs · ${t.cards.length} cards · ${t.labs.length+t.codelabs.length} labs</div>
         <div class="btnrow"><button class="btn" onclick="GO('track',{id:'${t.id}'})">Open</button></div>
       </div>`;
-    }).join("")+`</div>`;
+    }).join("")+soon.map(c=>`<div class="card soon"><h3>${esc(c.title)} <span class="tag">COMING SOON</span></h3><p class="small">${esc(c.blurb)}</p><div class="small muted">On the roadmap — built to the same standard: detailed lessons, hands-on labs, drills and fact-checked content.</div></div>`).join("")+`</div>`;
   }).join("");
   const se=$("#startexam"); if(se) se.onclick=()=>{ EXAM=null; go("exam",{track:$("#examtrack").value, mode:$("#exammode").value}); };
 }
@@ -1011,7 +1012,7 @@ function careerView(){
     <div class="callout">${esc(C.reframe)}</div></div>
   <div class="card"><h2>Three tracks, running at the same time</h2>
     ${C.tracks.map(t=>`<p><span class="tag acc">${esc(t.k)}</span> ${esc(t.d)}</p>`).join("")}</div>
-  <div class="card"><h2>The 12 steps → your courses here</h2>
+  <div class="card"><h2>The steps, in order → your courses here</h2>
     ${C.steps.map(s=>`<div class="listrow">
       <span class="tag">${String(s.n).padStart(2,"0")}</span>
       <div class="grow"><b>${esc(s.t)}</b><div class="small muted">${esc(s.note)}</div></div>

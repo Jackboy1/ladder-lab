@@ -7,8 +7,19 @@ window.LL = {
   interview: [],
   phases: [
     { id: 0, name: "Phase 0 · Foundations refresh", note: "What you already studied — kept sharp so it never fades." },
-    { id: 1, name: "Phase 1 · Core (steps 1–5 of the Ladder)", note: "Linux, Git, AWS, Python. These carry most of the employability gain." },
-    { id: 2, name: "Phase 2 · Platform (steps 6–11)", note: "Docker → Terraform → CI/CD → Kubernetes → Observability → GitOps." },
+    { id: 1, name: "Phase 1 · Core", note: "Git, Linux, AWS, Python — then web & APIs, cloud networking, security and databases. These carry most of the employability gain." },
+    { id: 2, name: "Phase 2 · Platform", note: "Docker → Terraform → CI/CD → Kubernetes → Observability → GitOps → DevSecOps." },
+    { id: 3, name: "Phase 3 · Builder & AI", note: "Full-stack web development, then AI and machine learning." },
+  ],
+  // courses on the agreed roadmap that aren't built yet — shown as "coming soon" in their place (see ROADMAP.md)
+  planned: [
+    { phase: 1, title: "Web & API engineering", blurb: "How the web really works (HTTP, status codes, headers, the request lifecycle), web security from authentication to the OWASP Top 10, caching and CDNs, and API design — REST, webhooks, rate limits, idempotency." },
+    { phase: 1, title: "Cloud networking & BGP", blurb: "BGP from zero, hybrid VPN and Direct Connect, VPC design, Transit Gateway, hybrid DNS and load balancers — the core of the cloud network architect role." },
+    { phase: 1, title: "Security for network & cloud engineers", blurb: "Firewalls and zones, hands-on IPsec VPNs, TLS and certificates, cloud IAM and least privilege, zero trust, logging and alerting." },
+    { phase: 1, title: "Databases & SQL", blurb: "SQL from SELECT to joins and indexes, transactions, ORMs and the N+1 trap, migrations, replication, backups — on PostgreSQL and AWS." },
+    { phase: 2, title: "DevSecOps", blurb: "Pipeline and supply-chain security, secrets, image scanning and policy as code." },
+    { phase: 3, title: "Full-stack web development", blurb: "HTML/CSS/JS, a backend API, auth and deployment — plus performance (Core Web Vitals) and frontend architecture (CSR/SSR/SSG)." },
+    { phase: 3, title: "AI, ML & generative AI", blurb: "ML fundamentals, LLMs, prompting, RAG and AI on AWS." },
   ],
   ranks: [
     { points: 0,    title: "First Line Support" },

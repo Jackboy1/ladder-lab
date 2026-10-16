@@ -139,7 +139,7 @@ const K = {
       let q = DRILL.gen(types), n = 0, right = 0, checked = false, vals = [], marks = [];
       const draw = () => {
         if (n>=set){ body.innerHTML = `<p><b>${right}/${set}</b> fully correct${right===set?" — clean sweep.":". Misses are the method you still need: read their walkthroughs and go again."}</p><button class="btn sm kd-again">Another ${set}</button>`; body.querySelector(".kd-again").onclick = () => { n=0; right=0; q=DRILL.gen(types); checked=false; vals=[]; draw(); }; return; }
-        body.innerHTML = `<div class="small muted">Question ${n+1} of ${set} · ${right} right · ${esc(DRILL.LABELS[q.type]||q.type)}</div><div class="kc-q">${esc(q.q)}</div>
+        body.innerHTML = `<div class="small muted">Question ${n+1} of ${set} · ${right} right · ${esc(DRILL.LABELS[q.type]||q.type)}</div><div class="kc-q">${esc(q.q)}</div>${q.ex?`<figure class="kout"><pre><code>${esc(q.ex)}</code></pre></figure>`:""}
           <div class="kd-fields">${q.fields.map((f,i)=>`<label><span>${esc(f.label)}</span><input class="txt mono" data-i="${i}" value="${esc(vals[i]||"")}" autocomplete="off" spellcheck="false" ${checked?"disabled":""}>${checked?(marks[i]?`<span class="small" style="color:var(--ok)">✓</span>`:`<span class="small" style="color:var(--bad)">✗ ${esc(f.a)}</span>`):""}</label>`).join("")}</div>
           ${checked?`<div class="kc-why"><b>${marks.every(Boolean)?"Correct.":"Worked answer:"}</b> ${esc(q.why)}</div><button class="btn sm kd-next">${n+1>=set?"Finish":"Next question"}</button>`:`<button class="btn sm kd-check">Check</button> <button class="btn sm ghost kd-skip">Different question</button>`}`;
         const ins = [...body.querySelectorAll("input")]; if (!checked && ins[0]) ins[0].focus();
