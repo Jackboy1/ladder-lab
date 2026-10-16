@@ -136,9 +136,9 @@ function ios2Env(opts){
   const tooShort = v => { const plain = !/^[05789] \S+$/.test(String(v)); const pwd = String(v).replace(/^0 /, ""); return plain && st.secMinLen && pwd.length < st.secMinLen ? `% Password too short - must be at least ${st.secMinLen} characters. Password configuration failed` : null; };
   const ALG = {md5:"5", sha256:"8", scrypt:"9"};
   const hashType = v => { const m = String(v).match(/^([589]) \S+$/); return m ? m[1] : null; };   // a pasted hash keeps its type; plain text → the default (9)
-  const unhash = v => { const m = String(v).match(/^([05789]) (\S+)$/); if (!m) return v; if (HASHREV[m[2]]!=null) return HASHREV[m[2]]; if (m[1]==="7"){ const d = untype7(m[2]); if (d!=null) return d; } return m[1]==="0" ? m[2] : m[2]; };
+  const unhash = v => { const m = String(v).match(/^([05789]) (\S+)$/); if (!m) return v; if (HASHREV[m[2]]!=null) return HASHREV[m[2]]; if (m[1]==="7"){ const d = untype7(m[2]); if (d!=null){ st.enc7 = [...new Set([...(st.enc7||[]), d])]; st.t7 = Object.assign({}, st.t7, {[d]: m[2].toUpperCase()}); return d; } } return m[1]==="0" ? m[2] : m[2]; };
   // service password-encryption turns every stored password into type 7 at once; "no service password-encryption" doesn't turn them back
-  const pw = p => p==null ? null : (st.servicePwEnc || (st.enc7||[]).includes(p)) ? `7 ${hashOf(p,"7")}` : p;
+  const pw = p => p==null ? null : (st.servicePwEnc || (st.enc7||[]).includes(p)) ? `7 ${(st.t7||{})[p] || hashOf(p,"7")}` : p;
 
   const compactList = arr => { const a = [...arr].sort((x,y)=>x-y), out = []; for (let k=0;k<a.length;k++){ let j = k; while (j+1<a.length && a[j+1]===a[j]+1) j++; out.push(j>k ? `${a[k]}-${a[j]}` : `${a[k]}`); k = j; } return out.join(","); };
   const activeVlans = () => Object.keys(st.vlans).map(Number).filter(v=>v<1002||v>1005).sort((a,b)=>a-b);

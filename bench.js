@@ -541,10 +541,10 @@ function aclGate(B, res, dev, ifn, dir, pkt, dst, arrIf){
   if (r.entry){ (res.aclHits = res.aclHits || []).push(r.entry); if (r.entry.log) syslog(B, dev, aclLogLine(name, L, r.entry.action, pkt, dst), true); }
   const lineTxt = r.entry ? `line ${r.entry.seq} (${window.ACL.entryText(L, r.entry, false)})` : "";
   if (r.permit){ res.log.push(`&nbsp;&nbsp;· ACL <b>${name}</b> ${dir} on ${dev.label} ${shortIf(ifn)}: ${pktText(pkt, dst)} matches ${lineTxt} → permitted`); return null; }
-  const ai = E.intfs[arrIf || ifn], from = ai && ai.ip, quiet = (ai && ai.noUnreach) || dst==="255.255.255.255" || pkt.src==="0.0.0.0";
+  const ai = E.intfs[arrIf || ifn], from = ai && ai.ip, bcastNo = dst==="255.255.255.255" || pkt.src==="0.0.0.0", quiet = (ai && ai.noUnreach) || bcastNo;
   res.kind = quiet ? "timeout" : "prohib"; res.unreachFrom = from; res.prohibBy = dev;
   if (!quiet && from && dir==="in") res.path.push(from), res.srcAt.push(pkt.src), res.portAt.push(pkt.sport);   // (an outbound deny: the router is already the last hop)
-  res.log.push(`<b>ACL ${name} ${dir}</b> on ${dev.label} ${shortIf(ifn)} denies ${pktText(pkt, dst)} — ${r.implicit ? "no line matched, so the implicit <b>deny any</b> at the end drops it" : lineTxt + " drops it"}; ${quiet ? "<b>no ip unreachables</b> on that interface, so the sender hears nothing" : "the router sends ICMP Destination Unreachable (type 3, code 13 'administratively prohibited') back from " + from}`);
+  res.log.push(`<b>ACL ${name} ${dir}</b> on ${dev.label} ${shortIf(ifn)} denies ${pktText(pkt, dst)} — ${r.implicit ? "no line matched, so the implicit <b>deny any</b> at the end drops it" : lineTxt + " drops it"}; ${quiet ? (bcastNo ? "IOS never sends an ICMP error about a broadcast or a packet from 0.0.0.0, so the sender hears nothing" : "<b>no ip unreachables</b> on that interface, so the sender hears nothing") : "the router sends ICMP Destination Unreachable (type 3, code 13 'administratively prohibited') back from " + from}`);
   return res;
 }
 const natPort = (p, x) => p && p.proto!=null && x!=null ? ":" + x : "";

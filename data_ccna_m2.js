@@ -2374,8 +2374,10 @@ ${K.out(`BR-SW1#show users
 <h3>show running-config (the relevant parts)</h3>
 ${K.out(`hostname BR-SW1
 !
-username netadmin secret 9 $9$mQ3xT1bL0aZp9E$Kd8...
 ip domain name ladderlab.local
+!
+username netadmin secret 9 $9$mQ3xT1bL0aZp9E$Kd8...
+!
 ip ssh version 2
 !
 interface Vlan1
@@ -2391,7 +2393,7 @@ line vty 5 15
 <ul>
 <li><b>secret 9</b> — hashed; nobody can read it back from the config.</li>
 <li><b>line vty 0 4 and line vty 5 15</b> — IOS splits the range; both blocks carry your settings because you typed <code>0 15</code>.</li>
-<li><b>No exec-timeout line</b> — 10 minutes is the default, and IOS hides default values in the running-config. Set <code>5 0</code> and it appears. (The lab simulator lists it anyway.)</li>
+<li><b>No exec-timeout line</b> — 10 minutes is the default, and IOS hides default values in the running-config. Set <code>5 0</code> and it appears.</li>
 <li><b>No RSA key in sight</b> — keys are not in the running-config. <code>show ip ssh</code> proves one exists.</li>
 </ul>
 <h3>Connecting from a PC</h3>
@@ -2405,7 +2407,7 @@ The authenticity of host '192.168.10.2 (192.168.10.2)' can't be established.
 RSA key fingerprint is SHA256:Qm8r2c1xYbS0f7tHnV3kLw9pEaZ4uJ6dR5gT1oNcX2s.
 Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
 Warning: Permanently added '192.168.10.2' (RSA) to the list of known hosts.
-netadmin@192.168.10.2's password:
+(netadmin@192.168.10.2) Password:
 BR-SW1>enable
 Password:
 BR-SW1#`, "A first SSH login from Windows. Passwords are not echoed. (The fingerprint shown is illustrative.)")}
@@ -2420,7 +2422,7 @@ BR-SW1#`, "A first SSH login from Windows. Passwords are not echoed. (The finger
 <tr><th>The PC says</th><th>What it means</th><th>Check on the console</th></tr>
 <tr><td><code>ssh: connect to host 192.168.10.2 port 22: Connection timed out</code></td><td>Nothing answered: an <b>IP path</b> problem.</td><td>Is <code>interface vlan 1</code> up with the right IP? Same subnet, or <code>ip default-gateway</code> for a remote PC? Does ping work?</td></tr>
 <tr><td><code>ssh: connect to host 192.168.10.2 port 22: Connection refused</code></td><td>The switch answered — with &ldquo;no&rdquo;. Nothing accepts SSH on port 22.</td><td><code>show ip ssh</code>: no RSA key? Under <code>line vty</code>: <code>transport input telnet</code> or <code>none</code>?</td></tr>
-<tr><td><code>netadmin@192.168.10.2: Permission denied (password).</code></td><td>SSH works; the login doesn't.</td><td>Wrong username or secret? Does the user exist? Do the VTY lines say <code>login local</code>?</td></tr>
+<tr><td><code>netadmin@192.168.10.2: Permission denied (publickey,keyboard-interactive,password).</code></td><td>SSH works; the login doesn't.</td><td>Wrong username or secret? Does the user exist? Do the VTY lines say <code>login local</code>?</td></tr>
 </table></div>
 ${K.remember(`<b>Timed out</b> = you can't reach the building. <b>Refused</b> = you reached it, but the door isn't there. <b>Denied</b> = the door is there, your key is wrong.`)}
 ${K.mistake(`Treating every SSH failure as &ldquo;the switch is down&rdquo; and asking someone on site to power-cycle it. &ldquo;Refused&rdquo; and &ldquo;denied&rdquo; both prove the switch is up and answering. A reboot fixes neither, and drops every user in the branch.`)}
@@ -2431,8 +2433,10 @@ SSH Enabled - version 2.0
 Authentication timeout: 120 secs; Authentication retries: 3
 PHC-SW1#show running-config
 ...
-username netadmin secret 9 $9$Lp0...
 ip domain name ladderlab.local
+!
+username netadmin secret 9 $9$Lp0...
+!
 ip ssh version 2
 ...
 line vty 0 4
@@ -2475,7 +2479,7 @@ ${K.bench({id:"m2-ssh-build", points:90, from:"CCNA · Module 2 · lesson 6", ti
     ["pc","admin","enable"],["pc","admin","En4ble!Br1"],["pc","admin","copy running-config startup-config"],["pc","admin",""]]})}
 ${K.hint(`Break it on purpose before you finish. Try <code>ssh</code> from the PC <i>before</i> generating the key (refused), with the wrong secret (permission denied), and with Vlan1 shut down (timed out). Each message points to a different step — that is the skill you'll use on real tickets.`)}
 ${K.q({type:"order", q:"Put the SSH set-up steps in the order IOS needs them on a factory-default switch.", items:["hostname BR-SW1","ip domain-name ladderlab.local","crypto key generate rsa modulus 2048","ip ssh version 2","username netadmin secret Br4nch!SSH","line vty 0 15, then login local and transport input ssh"], why:"The key is named hostname.domain, so both must exist before crypto key generate rsa. ip ssh version 2 is refused until a key exists. The user must exist before login local, or nobody can log in remotely. The VTY settings come last and decide who gets in and which protocol is allowed."})}
-${K.check({q:"From a PC on the same subnet, <code>ping 192.168.10.2</code> works, but <code>ssh -l netadmin 192.168.10.2</code> says <i>Permission denied (password)</i>, even with the right secret. What is the most likely cause?", o:["No RSA key on the switch","Vlan1 is shut down","The VTY lines use <code>login</code> (line password) instead of <code>login local</code>","The PC has no default gateway"], a:2, why:"Permission denied means SSH connected (so the key and transport are fine) but the login failed. With the right secret, the usual cause is that the VTY lines aren't checking the local user database: they need <code>login local</code>."})}
+${K.check({q:"From a PC on the same subnet, <code>ping 192.168.10.2</code> works, but <code>ssh -l netadmin 192.168.10.2</code> says <i>Permission denied (publickey,keyboard-interactive,password)</i>, even with the right secret. What is the most likely cause?", o:["No RSA key on the switch","Vlan1 is shut down","The VTY lines use <code>login</code> (line password) instead of <code>login local</code>","The PC has no default gateway"], a:2, why:"Permission denied means SSH connected (so the key and transport are fine) but the login failed. With the right secret, the usual cause is that the VTY lines aren't checking the local user database: they need <code>login local</code>."})}
 
 <h2>Moving a live switch from Telnet to SSH without locking yourself out</h2>
 <p>The real job is changing remote access on a switch that is <b>in service and far away</b>, often while connected by the very protocol you are removing. One wrong order and your session drops with nothing to replace it.</p>
@@ -2589,7 +2593,7 @@ quiz:[
   {type:"fill", q:"Under line vty 0 15, which two commands make the lines check local usernames and accept only SSH?", fields:[{label:"Login method", a:["login local"], ios:true},{label:"Protocol", a:["transport input ssh"], ios:true}], lvl:2, why:"login local tells the VTY lines to check usernames and secrets created with the username command; plain login checks only a line password, and SSH logins fail. transport input ssh refuses Telnet and any other protocol on new sessions."},
   {type:"fill", q:"From a Windows PC, type the command that opens an SSH session to 192.168.10.2 as the user netadmin.", a:["ssh -l netadmin 192.168.10.2","ssh netadmin@192.168.10.2"], lvl:1, why:"Windows 10 and 11 include an OpenSSH client. ssh -l user ip and ssh user@ip mean the same thing. The -l form is also the syntax on Cisco IOS when you SSH from one device to another."},
   {q:"A remote switch is configured with 'username netadmin secret …' and SSH works for netadmin. A new engineer's account is needed. Which approach is best practice?", o:["Share the netadmin secret with the new engineer","Create a second user with its own username and secret","Add a VTY line password for the new engineer","Set the VTY lines to no login for convenience"], a:1, lvl:2, why:"Named accounts mean the logs show who did what, and one person's access can be removed without changing everyone's password. Shared credentials and no login remove accountability."},
-  {q:"Every engineer gets 'Permission denied (password)' when they SSH to a switch, even with correct credentials. show ip ssh says version 2.0, ping works, and the VTY lines are shown. What is the fix?", ex:"line vty 0 4\n password 7 05080F1C2243\n login\n transport input ssh\nline vty 5 15\n password 7 05080F1C2243\n login\n transport input ssh", o:["Generate a new RSA key","Under line vty 0 15, replace login with login local (and make sure a username exists)","Change transport input ssh to transport input all","Set exec-timeout 0 0"], a:1, lvl:3, why:"SSH connects (key and transport are fine), but the lines use login, which checks only the line password; SSH presents a username and password. login local makes the lines check the local database. Allowing Telnet or removing the timeout would only make security worse."},
+  {q:"Every engineer gets 'Permission denied (publickey,keyboard-interactive,password)' when they SSH to a switch, even with correct credentials. show ip ssh says version 2.0, ping works, and the VTY lines are shown. What is the fix?", ex:"line vty 0 4\n password 7 05080F1C2243\n login\n transport input ssh\nline vty 5 15\n password 7 05080F1C2243\n login\n transport input ssh", o:["Generate a new RSA key","Under line vty 0 15, replace login with login local (and make sure a username exists)","Change transport input ssh to transport input all","Set exec-timeout 0 0"], a:1, lvl:3, why:"SSH connects (key and transport are fine), but the lines use login, which checks only the line password; SSH presents a username and password. login local makes the lines check the local database. Allowing Telnet or removing the timeout would only make security worse."},
   {q:"You must change the VTY settings on a switch 400 km away, and nobody is on site today. Which precaution best protects you from locking yourself out?", o:["Type reload in 15 before the change, and reload cancel once a new SSH session is proven","Set exec-timeout 0 0 so your session never drops","Configure line vty 0 4 only, leaving 5 to 15 as a backup","Remove the local user so the old line password still works"], a:0, lvl:3, why:"reload in 15 schedules a reboot into the saved, working configuration: if you lock yourself out, the switch comes back with its old access in 15 minutes. Once a fresh SSH session works, reload cancel stops it. Leaving lines open or removing users weakens security instead of protecting the change."},
 ],
 cards:[

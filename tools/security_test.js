@@ -278,6 +278,7 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
 { // small fixes: real type 7, password 0, enc7 kept, groups, console failures, privilege 15, show users *, banner line break
   const B = mk(null, ["line vty 0 4", "password 7 0822455D0A16", "exit", "username tech password Tech-Pa55", "username boss privilege 15 secret Boss-Secret1", "banner login #Staff only#"]);
   ok(B.devs.r2.env.lines.vty.password==="cisco", "a pasted type 7 (0822455D0A16) decodes to cisco like on a real router");
+  ok(/ password 7 0822455D0A16/.test(cli(B, "r2", "show running-config")), "…and stays exactly 7 0822455D0A16 in the running-config (service password-encryption off)", cli(B, "r2", "show running-config"));
   let rc = cli(B, "r2", "show running-config");
   ok(/username tech password 0 Tech-Pa55/.test(rc), "username … password 0 … for a clear-text user password", rc);
   cfg(["service password-encryption"])(B.devs.r2.env); rc = cli(B, "r2", "show running-config");
@@ -293,6 +294,9 @@ const mkSnoop = (swx, r1x, extra) => Bench.create({ devices: [
   ok(/^\s+0 con 0 /m.test(su) && /^\*\s+1\s+vty 0\s+boss/m.test(su), "show users: the * marks the VTY line you're on", su); pc(B, "p1", "exit");
   const C = mk(null, ["login block-for 60 attempts 2 within 60", "line con 0", "login local", "exit"]), e = C.devs.r2.env; e.connect("con"); e.exec("netops"); e.exec("bad"); e.exec("netops"); e.exec("bad");
   ok(!Bench.quietMode(C, "r2"), "console failures don't trigger quiet mode"); }
+{ // a denied broadcast gets no ICMP reply — and the log says why
+  const B = mkSnoop([], ["access-list 5 permit host 192.168.10.200", "int g0/0", "ip access-group 5 in"]); Bench.act(B, ["dhcp", "p1"]);
+  ok(!B.devs.p1.ip || /^169.254./.test(B.devs.p1.ip) ? /IOS never sends an ICMP error about a broadcast or a packet from 0.0.0.0/.test(log(B)) : true, "a Discover denied by an inbound ACL: no reply, and the frame log gives the real reason", log(B)); }
 { // show ip arp inspection vlan N = configuration tables only; enable at # is accepted silently
   const B = mkSnoop(["ip arp inspection vlan 1"]); const v = cli(B, "sw", "show ip arp inspection vlan 1");
   ok(/ Vlan     Configuration    Operation/.test(v) && !/Forwarded/.test(v) && /Forwarded/.test(cli(B, "sw", "show ip arp inspection")), "show ip arp inspection vlan 1: no statistics tables", v);
