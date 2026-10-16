@@ -1399,6 +1399,15 @@ function pcExec(B, d, line){
   if (!raw) return "";
   if (l==="help" || l==="?") return "Commands: ipconfig · ipconfig /all · ipconfig /release · ipconfig /renew · ipconfig /flushdns · ping <ip|name> · tracert <ip|name> · nslookup <name> [server] · curl http://<ip|name>[:port] · arp -a · arp -d · ssh -l <user> <ip> · telnet <ip> · cls";
   if (l==="cls") return {clear:true};
+  if (/^netsh\s+wlan\s+show\s+interfaces?$/.test(l)){ computeL3(B); const w = d.wifiAt, ap = w && B.devs[w.ap], ch = ap && ap.channel || 36, band = ch > 14 ? "5 GHz" : "2.4 GHz", mc = m => (m||"").replace(/\./g,"").match(/../g).join(":");
+    if (d.kind!=="laptop") return "There is no wireless interface on the system.";
+    const head = "There is 1 interface on the system: \n\n    Name                   : Wi-Fi\n    Description            : Intel(R) Wi-Fi 6E AX211 160MHz\n    GUID                   : 3f2a9c4e-1b7d-4e21-9a55-" + d.mac.replace(/\./g,"") + "\n    Physical address       : " + mc(d.mac) + "\n    Interface type         : Primary\n";
+    if (!w) return head + "    State                  : disconnected\n    Radio status           : Hardware On\n                             Software On";
+    const akm = w.auth==="WPA3-Personal" ? "00-0f-ac:08" : w.auth==="Open" ? "00-00-00:00" : "00-0f-ac:02", cipher = w.auth==="Open" ? "None" : "CCMP";
+    return head + `    State                  : connected\n    SSID                   : ${w.ssid}\n    AP BSSID               : ${mc(ap ? ap.mac : "")}\n    Band                   : ${band}\n    Channel                : ${ch}\n    Connected Akm-cipher   : [ akm = ${akm}, cipher =  ${w.auth==="Open" ? "00-00-00:00" : "00-0f-ac:04"} ]\n    Network type           : Infrastructure\n    Radio type             : 802.11ac\n    Authentication         : ${w.auth}\n    Cipher                 : ${cipher}\n    Connection mode        : Auto Connect\n    Receive rate (Mbps)    : 866.7\n    Transmit rate (Mbps)   : 866.7\n    Signal                 : 91% \n    Rssi                   : -44\n    Profile                : ${w.ssid} `; }
+  if (/^netsh\s+wlan\s+show\s+networks(\s+mode=bssid)?$/.test(l)){ computeL3(B); if (d.kind!=="laptop") return "There is no wireless interface on the system.";
+    const nets = window.WIFIGUI ? window.WIFIGUI.visible(B, d) : [], auth = s0 => s0==="none" ? "Open" : s0==="wpa2-ent" ? "WPA2-Enterprise" : s0==="wpa3-sae" ? "WPA3-Personal" : "WPA2-Personal";
+    return `Interface name : Wi-Fi \nThere are ${nets.length} networks currently visible. \n\n` + nets.map((n,i)=>`SSID ${i+1} : ${n.ssid}\n    Network type            : Infrastructure\n    Authentication          : ${auth(n.sec)}\n    Encryption              : ${n.sec==="none" ? "None" : "CCMP"} `).join("\n\n"); }
   if (l==="ipconfig /release" || l==="ipconfig /renew"){
     const head = "\nWindows IP Configuration\n\n";
     if (!d.dhcp) return head + "The operation failed as no adapter is in the state permissible for this operation.";
@@ -1574,7 +1583,8 @@ function act(B, a){
     d.dhcp = true; d.released = false; d.ip = null; d.mask = null; d.gw = null; d.dns = []; d.domain = null; d.lease = null; B.arp[d.id] = {};
     const res = dora(B, d); B.frames = res.frames; B.log = res.log;
     r = {ok:true, msg: res.ok ? `${d.label}: set to obtain an IP address automatically — got ${res.ip} from the DHCP server ${res.server}.` : `${d.label}: set to obtain an IP address automatically — but no DHCP server answered, so Windows uses an APIPA 169.254.x.x address. Open the frame log to see why.`}; }
-  else if (op==="pc"){ B.frames = []; r = {ok:true, out: pcExec(B, B.devs[x[0]], x[1])}; }
+  else if (op==="pc"){ B.frames = []; const dv = B.devs[x[0]], o0 = pcExec(B, dv, x[1]);
+    r = {ok:true, out: dv && dv.wifiAt && typeof o0==="string" ? o0.replace("Ethernet adapter Ethernet:", "Wireless LAN adapter Wi-Fi:").replace("Intel(R) Ethernet Connection I219-LM", "Intel(R) Wi-Fi 6E AX211 160MHz") : o0}; }
   else if (op==="power"){ const d = B.devs[x[0]]; d.on = x[1]!==false; if (!d.on && B.mac[d.id]) B.mac[d.id] = {}; r = {ok:true, msg:`${d.label} powered ${d.on?"on":"off"}.`}; }
   else if (op==="console"){ r = openConsole(B, x[0], x[1]||{}); }
   else if (op==="term"){ B.frames = []; r = {ok:true, out: termExec(B, x[0])}; }
@@ -1804,6 +1814,8 @@ function mount(el, cfg, tasks, onWin){
         if (d.kind==="pc"||d.kind==="server"||d.kind==="laptop"){ btns.push(`<button class="btn sm ghost" data-tool="ip:${id}">IP settings</button>`); if (v6InPlay(B, cfg)) btns.push(`<button class="btn sm ghost" data-tool="ip6:${id}">IPv6 settings</button>`); btns.push(`<button class="btn sm ghost" data-tool="cmd:${id}">Command Prompt</button>`); }
         if (d.kind==="server" && d.services) btns.push(`<button class="btn sm ghost" data-tool="svc:${id}">Server services</button>`);
         if (d.kind==="laptop") btns.push(`<button class="btn sm ghost" data-tool="putty:${id}">Terminal app (PuTTY)</button>`);
+        if (d.kind==="laptop" && window.WIFIGUI) btns.push(`<button class="btn sm ghost" data-tool="wifi:${id}">Wi-Fi</button>`);
+        if (d.kind==="wlc" && window.WLCGUI) btns.push(`<button class="btn sm ghost" data-tool="wlcgui:${id}">Controller GUI (https://${esc(d.ip||"")})</button>`);
         if (cfg.builder && d.env) btns.push(`<button class="btn sm ghost" data-tool="cli:${id}">CLI</button>`);
         if (cfg.builder) btns.push(`<button class="btn sm ghost" data-rename="${id}">Rename</button>`, `<button class="btn sm ghost" data-del="${id}">Delete</button>`);
         if (cfg.power) btns.push(`<button class="btn sm ghost" data-power="${id}">${d.on?"Power off":"Power on"}</button>`);
@@ -1826,6 +1838,8 @@ function mount(el, cfg, tasks, onWin){
   function toolHtml(){
     if (!tool) return "";
     const [kind, id] = tool.split(":"), d = B.devs[id];
+    if (kind==="wlcgui" && window.WLCGUI && d && d.wlc) return window.WLCGUI.render(B, d, (B._wg = B._wg || {}));
+    if (kind==="wifi" && window.WIFIGUI && d) return window.WIFIGUI.render(B, d);
     if (kind==="svc"){ const S = d.services || {}, part = [];
       if (S.dns){ const R = Object.entries(S.dns.records||{}); part.push(`<h4>DNS server${S.dns.authoritative===false ? " (public resolver)" : ""}</h4>` + (R.length ? `<table class="bn-tab"><tr><th>Name</th><th>Type</th><th>Address</th></tr>${R.map(([n,ip])=>`<tr><td>${esc(n)}</td><td>A</td><td>${esc(ip)}</td></tr>`).join("")}</table>` : "<p>No records.</p>")); }
       if (S.tftp){ const F = Object.entries(S.tftp.files||{}); part.push("<h4>TFTP server — files</h4>" + (F.length ? F.map(([n,b])=>`<details><summary><code>${esc(n)}</code> · ${b.length} bytes</summary><pre class="bn-pre">${esc(b)}</pre></details>`).join("") : "<p>No files yet.</p>")); }
@@ -1960,6 +1974,8 @@ function mount(el, cfg, tasks, onWin){
     const ip6s = el.querySelector("#bn-ip6save");
     if (ip6s) ip6s.onclick = () => { const id = tool.split(":")[1]; const m = (el.querySelector('input[name="bn6m"]:checked')||{}).value || "auto"; const r = act(B, ["ip6", id, m, el.querySelector("#bn-ip6").value.trim(), el.querySelector("#bn-len6").value.trim(), el.querySelector("#bn-gw6").value.trim()]); if (r.ok) tool=null; after(r); };
     const ips = el.querySelector("#bn-ipsave");
+    if (tool && /^(wlcgui|wifi):/.test(tool)){ const [k2, i2] = tool.split(":"), d2 = B.devs[i2], ctx2 = {dev:d2, state:(B._wg = B._wg || {}), act:a=>{ const r = act(B, a); after(r); return r; }, redraw:()=>draw(), say:(m,c)=>say(m,c)};
+      if (k2==="wlcgui" && window.WLCGUI) window.WLCGUI.wire(el.querySelector(".wlcgui"), ctx2); else if (window.WIFIGUI) window.WIFIGUI.wire(el.querySelector(".bn-panel"), ctx2); }
     if (ips) ips.onclick = () => { const id = tool.split(":")[1], m = (el.querySelector('input[name="bn4m"]:checked')||{}).value;
       const r = m==="auto" ? act(B, ["dhcp", id]) : act(B, ["ip", id, el.querySelector("#bn-ip").value.trim(), el.querySelector("#bn-mask").value.trim(), el.querySelector("#bn-gw").value.trim(), el.querySelector("#bn-dns").value.trim()]); if (r.ok) tool=null; after(r); };
     if (el.querySelector("#bn-cmd")){ const id = tool.split(":")[1], d = B.devs[id];

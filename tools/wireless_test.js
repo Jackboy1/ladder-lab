@@ -6,7 +6,7 @@
 const fs = require("fs"), vm = require("vm"), path = require("path");
 const root = path.join(__dirname, "..");
 const ctx = { console, Date }; ctx.window = ctx; vm.createContext(ctx);
-for (const f of ["sim.js", "ipv6.js", "acl.js", "dhcp.js", "nat.js", "wlan.js", "sim_ios.js", "bench.js"]) vm.runInContext(fs.readFileSync(path.join(root, f), "utf8"), ctx, { filename: f });
+for (const f of ["sim.js", "ipv6.js", "acl.js", "dhcp.js", "nat.js", "wlan.js", "wifi_gui.js", "sim_ios.js", "bench.js"]) vm.runInContext(fs.readFileSync(path.join(root, f), "utf8"), ctx, { filename: f });
 const { Bench } = ctx; let fails = 0;
 const ok = (c, msg, extra) => { if (!c){ fails++; console.log("FAIL:", msg); if (extra!=null) console.log(String(extra).split("\n").map(l=>"      "+l).join("\n")); } else console.log("ok  ", msg); };
 const cfg = cmds => e => { e.exec("en"); e.exec("conf t"); for (const c of cmds) e.exec(c); e.exec("end"); };
@@ -39,6 +39,12 @@ const mk = (o) => Bench.create({ devices: [
   ok(/Reply from 10\.10\.20\.1: bytes=32/.test(pc(B, "lap", "ping 10.10.20.1")), "the Wi-Fi laptop pings its gateway", pc(B, "lap", "ping 10.10.20.1"));
   ok(/Reply from 10\.10\.99\.5: bytes=32/.test(pc(B, "lap", "ping 10.10.99.5")), "…and the controller's management address (routed via R1)");
   ok(/Reply from 10\.10\.10\.\d+: bytes=32/.test(pc(B, "lap", "ping " + B.devs.ap.ip)), "…and the AP");
+  const ni = pc(B, "lap", "netsh wlan show interfaces");
+  ok(/^There is 1 interface on the system: \n\n    Name                   : Wi-Fi\n/.test(ni) && /    State                  : connected\n    SSID                   : Staff-WiFi\n/.test(ni) && /    Authentication         : WPA2-Personal\n    Cipher                 : CCMP\n/.test(ni), "netsh wlan show interfaces: connected, Staff-WiFi, WPA2-Personal, CCMP (real Windows 11 layout)", ni);
+  const nn = pc(B, "lap", "netsh wlan show networks");
+  ok(/There are 1 networks currently visible\. \n\nSSID 1 : Staff-WiFi\n    Network type            : Infrastructure\n    Authentication          : WPA2-Personal/.test(nn), "netsh wlan show networks lists the broadcast SSID", nn);
+  const ic = pc(B, "lap", "ipconfig");
+  ok(/Wireless LAN adapter Wi-Fi:/.test(ic) && !/Ethernet adapter Ethernet:/.test(ic) && /IPv4 Address[. ]*: 10\.10\.20\./.test(ic), "ipconfig shows the Wireless LAN adapter Wi-Fi with its VLAN 20 address", ic);
 }
 { // what breaks
   const k = mk({wifi:{key:"wrong-password"}});
@@ -83,7 +89,7 @@ const mk = (o) => Bench.create({ devices: [
   ok(!Bench.wifiAssoc(B, "lap"), "no WLAN yet: the laptop isn't connected");
   ok(Bench.act(B, ["wlc", "wlc", "iface", "staff", 20, {ip:"10.10.20.5", mask:"255.255.255.0", gw:"10.10.20.1", dhcp:"10.10.20.1"}]).ok, "CONTROLLER → Interfaces → New: staff, VLAN 20");
   ok(Bench.act(B, ["wlc", "wlc", "wlan", 1, "STAFF", "Staff-WiFi"]).ok && !Bench.wlanUp(B, "wlc", "Staff-WiFi"), "WLANs → Create New: starts disabled");
-  ok(!Bench.act(B, ["wlc", "wlc", "wlanset", 1, {enabled:true}]).ok, "can't enable a WPA2-PSK WLAN with no key");
+  ok(B.devs.wlc.wlc.wlans[1].security==="wpa2-ent" && !Bench.act(B, ["wlc", "wlc", "wlanset", 1, {security:"wpa2-psk", enabled:true}]).ok, "new WLAN defaults to 802.1X; switching to PSK and enabling with no key is refused");
   ok(Bench.act(B, ["wlc", "wlc", "wlanset", 1, {iface:"staff", security:"wpa2-psk", psk:"Lagos-Staff-2026", enabled:true}]).ok && Bench.wlanUp(B, "wlc", "Staff-WiFi"), "interface, WPA2 PSK, key and Status Enabled → applied");
   const r = Bench.act(B, ["wifi", "lap", "Staff-WiFi", "Lagos-Staff-2026"]);
   ok(r.ok && /connected to Staff-WiFi \(WPA2-Personal\) — got 10\.10\.20\./.test(r.msg) && Bench.wifiVlan(B, "lap")===20, "the laptop connects and gets an address in VLAN 20", r.msg);

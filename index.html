@@ -77,6 +77,14 @@ main{min-height:60vh}
 /* cards & common */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:0 0 14px}
 .card.soon{border-style:dashed;background:var(--panel2)}.card.soon h3{color:var(--muted)}
+/* the AireOS-style WLC GUI inside a bench */
+.wlcgui .wg-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;background:#1b2a3a;color:#e8edf6;border-radius:8px;padding:6px 10px;margin:6px 0}
+.wlcgui .wg-top b{font-family:var(--display);letter-spacing:.06em;color:#4fd1c5}.wlcgui .wg-menu{display:flex;flex-wrap:wrap;gap:2px}
+.wlcgui .wg-m{background:none;border:0;color:#c9d3e3;font:600 .72rem var(--mono);padding:4px 6px;border-radius:5px;cursor:pointer}.wlcgui .wg-m.on,.wlcgui .wg-m:hover{background:#2c4058;color:#fff}
+.wlcgui .wg-links{margin-left:auto;font:.68rem var(--mono);color:#93a3b8}.wlcgui .wg-body h4{margin:8px 0 6px}.wlcgui .wg-body h5{margin:10px 0 4px;font-size:.8rem}
+.wlcgui .wg-tabs{display:flex;gap:4px;margin:4px 0 8px}.wlcgui .wg-tab{border:1px solid var(--line);background:var(--panel);border-radius:6px 6px 0 0;padding:4px 10px;font:600 .75rem var(--body);cursor:pointer}.wlcgui .wg-tab.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.wg-form{border-collapse:collapse}.wg-form th{text-align:left;font-weight:600;font-size:.8rem;padding:4px 12px 4px 0;white-space:nowrap;vertical-align:top}.wg-form td{padding:3px 0}.wg-form .txt{max-width:260px}
+.wg-chk{display:inline-flex;align-items:center;gap:5px;font-size:.82rem}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-bottom:14px}
 .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:14px}
 .eyebrow{font-family:var(--display);font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
@@ -338,6 +346,7 @@ footer{margin-top:34px;color:var(--muted);font-size:.78rem;border-top:1px solid 
 <script src="acl.js?v=20261016a"></script>
 <script src="dhcp.js?v=20261016a"></script>
 <script src="wlan.js?v=20261016a"></script>
+<script src="wifi_gui.js?v=20261016a"></script>
 <script src="nat.js?v=20261016a"></script>
 <script src="sim_ios.js?v=20261016a"></script>
 <script src="bench.js?v=20261016a"></script>

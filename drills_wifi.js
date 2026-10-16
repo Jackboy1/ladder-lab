@@ -24,9 +24,9 @@ const GEN = {
       why:`Each pair must be at least 5 channel numbers (25 MHz) apart. ${pl.map((x,i)=>pl.slice(i+1).map(y=>`${x}–${y}: ${Math.abs(x-y)}`).join(", ")).filter(Boolean).join(", ")}. ${okp ? "Every pair is ≥ 5 apart — no overlap." : "At least one pair is closer than 5 — they overlap."} (1, 6 and 11 is the usual plan; 2-7-12 and 3-8-13 also work where channels 12–13 are allowed.)` }; },
   wifidbm(){ const steps = [[0,1],[3,2],[6,4],[10,10],[13,20],[16,40],[20,100],[23,200],[26,400],[30,1000],[-3,0.5],[-10,0.1],[7,5],[17,50],[27,500]];
     const [db, mw] = pick(steps), toMw = rnd(2)===0, fmt = x => String(+x.toFixed(2));
-    return toMw ? { q:`Convert ${db} dBm to milliwatts (use the rule of 3s and 10s).`, db, mw, fields:[{label:"mW", a:fmt(mw), check:v=>{ const x = parseFloat(String(v).replace(",",".")); return isFinite(x) && Math.abs(x - mw) <= mw*0.06; }}],
+    return toMw ? { q:`Convert ${db} dBm to milliwatts (use the rule of 3s and 10s).`, db, mw, fields:[{label:"mW", a:fmt(mw), check:v=>{ const t = String(v).trim().replace(",",".").replace(/\s*mw$/i,""); if (!/^-?\d+(\.\d+)?$/.test(t)) return false; return Math.abs(+t - mw) <= mw*0.06; }}],
         why:`0 dBm = 1 mW; every +10 dB multiplies the power by 10 and every +3 dB roughly doubles it (−3 dB halves, −10 dB divides by 10). ${db} dBm → ${fmt(mw)} mW.` }
-      : { q:`A radio transmits ${fmt(mw)} mW. What is that in dBm (to the nearest whole dB)?`, db, mw, fields:[{label:"dBm", a:String(db), check:v=>{ const x = parseFloat(String(v).replace(/[^0-9.\-]/g,"")); return isFinite(x) && Math.abs(x - db) <= 0.5; }}],
+      : { q:`A radio transmits ${fmt(mw)} mW. What is that in dBm (to the nearest whole dB)?`, db, mw, fields:[{label:"dBm", a:String(db), check:v=>{ const t = String(v).trim().replace(/\s*dbm$/i,""); if (!/^-?\d+(\.\d+)?$/.test(t)) return false; return Math.abs(+t - db) <= 0.5; }}],
         why:`dBm = 10 × log10(mW). Or by steps from 1 mW = 0 dBm: ×10 = +10 dB, ×2 ≈ +3 dB. ${fmt(mw)} mW ≈ ${db} dBm.` }; },
   wifisnr(){ const rssi = -(40 + rnd(41)), noise = -(85 + rnd(14)), snr = rssi - noise;
     return { q:`A client sees the AP at ${rssi} dBm and the noise floor at ${noise} dBm. What is the SNR?`, rssi, noise, fields:[{label:"SNR (dB)", a:String(snr), check:v=>norm(v)===String(snr)}],

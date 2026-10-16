@@ -10,6 +10,7 @@ const W = {};
 /* ---------- the controller's configuration ---------- */
 W.store = (o) => Object.assign({
   mgmt: {ip:null, mask:null, gw:null, vlan:0, port:1},          // the management interface (APs join to this address)
+  virtual: "192.0.2.1",                                          // the virtual interface (DHCP relay identity, web auth) — RFC 5737 space, never routed
   ifaces: {},                                                     // dynamic interfaces: name → {vlan, ip, mask, gw, port, dhcp}
   wlans: {},                                                      // id → WLAN
   aps: {},                                                        // AP name → {mode, joined, …} (filled by the bench)
@@ -35,9 +36,12 @@ W.createWlan = (st, f) => { const id = +f.id, ssid = String(f.ssid||""), profile
   if (!profile) return {err:"Profile Name is required."}; if (!ssid) return {err:"SSID is required."};
   if (ssid.length > W.LIMITS.ssid) return {err:`SSID can be at most ${W.LIMITS.ssid} characters.`};
   if (Object.values(st.wlans).some(w=>w.profile===profile)) return {err:`Profile Name ${profile} is already in use.`};
-  st.wlans[id] = {id, profile, ssid, enabled:false, iface:"management", security:"wpa2-psk", cipher:"aes", psk:null, pskFormat:"ascii", qos:"silver", broadcast:true, flexLocal:false};
-  return {ok:true}; };   // a new AireOS WLAN starts disabled with WPA2 + 802.1X-style security until you set it — here: WPA2, no key yet
+  // AireOS: a new WLAN is created disabled, on the management interface, WPA2 + AES with 802.1X key management, QoS Silver, SSID broadcast on
+  st.wlans[id] = {id, profile, ssid, enabled:false, iface:"management", security:"wpa2-ent", cipher:"aes", psk:null, pskFormat:"ascii", qos:"silver", broadcast:true, flexLocal:false};
+  return {ok:true}; };
 W.setWlan = (st, id, f) => { const w = st.wlans[id]; if (!w) return {err:`No WLAN ${id}.`};
+  if (w.enabled && f.enabled!==false && ((f.ssid!=null && f.ssid!==w.ssid) || (f.profile!=null && f.profile!==w.profile))) return {err:"Disable the WLAN before changing its Profile Name or SSID."};
+  if (f.ssid!=null && String(f.ssid).length > W.LIMITS.ssid) return {err:`SSID can be at most ${W.LIMITS.ssid} characters.`};
   if (f.iface!=null && f.iface!=="management" && !st.ifaces[f.iface]) return {err:`Interface ${f.iface} doesn't exist.`};
   if (f.security!=null && !W.SECURITY[f.security]) return {err:"Unknown security type."};
   if (f.psk!=null && f.psk!==""){ const fmt = f.pskFormat || w.pskFormat, k = String(f.psk);
@@ -47,7 +51,7 @@ W.setWlan = (st, id, f) => { const w = st.wlans[id]; if (!w) return {err:`No WLA
   Object.assign(w, Object.fromEntries(Object.entries(f).filter(([,v])=>v!==undefined)));
   if (w.enabled && (w.security==="wpa2-psk" || w.security==="wpa3-sae" || w.security==="wpa2-wpa3") && !w.psk) { w.enabled = false; return {err:"Set a pre-shared key before enabling a PSK/SAE WLAN.", disabled:true}; }
   return {ok:true}; };
-W.policyText = w => w.security==="none" ? "None" : w.security==="wpa2-psk" ? "[WPA2][Auth(PSK)]" : w.security==="wpa2-ent" ? "[WPA2][Auth(802.1X)]" : w.security==="wpa3-sae" ? "[WPA3][Auth(SAE)]" : "[WPA2][WPA3][Auth(PSK)][Auth(SAE)]";
+W.policyText = w => w.security==="none" ? "None" : w.security==="wpa2-psk" ? "[WPA2][Auth(PSK)]" : w.security==="wpa2-ent" ? "[WPA2][Auth(802.1X)]" : w.security==="wpa3-sae" ? "[WPA3][Auth(SAE)]" : "[WPA2][Auth(PSK)], [WPA3][Auth(SAE)]";
 W.ifaceOf = (st, w) => w.iface==="management" ? Object.assign({name:"management"}, st.mgmt) : Object.assign({name:w.iface}, st.ifaces[w.iface]);
 
 /* ---------- AP join: how does a lightweight AP find its controller? ---------- */
@@ -71,11 +75,12 @@ W.associate = (st, apJoined, client) => {
   const w = Object.values(st.wlans).find(x=>x.ssid===client.ssid);
   if (!w) return {ok:false, reason:"no-ssid", win:"The network isn't listed.", why:`No WLAN on the controller has the SSID "${client.ssid}".`};
   if (!w.enabled) return {ok:false, reason:"disabled", win:"The network isn't listed.", why:`WLAN ${w.id} (${w.profile}) exists but its Status isn't Enabled.`};
+  if (w.id > 16) return {ok:false, reason:"apgroup", win:"The network isn't listed.", why:`APs in the default AP group advertise only WLAN IDs 1–16; WLAN ${w.id} needs an AP group (not modelled in this lab).`};
   const wpa2 = client.wpa2!==false, wpa3 = !!client.wpa3;
   if (w.security==="wpa3-sae" && !wpa3) return {ok:false, reason:"needs-wpa3", win:"Can't connect to this network", why:"The WLAN is WPA3-only (SAE) and this client's Wi-Fi adapter or driver only supports WPA2."};
   if (w.security==="wpa2-psk" && !wpa2) return {ok:false, reason:"needs-wpa2", win:"Can't connect to this network", why:"The WLAN is WPA2-only and the client only speaks WPA3."};
   if (w.security==="wpa2-ent") return {ok:false, reason:"needs-radius", win:"Can't connect to this network", why:"WPA2 Enterprise needs 802.1X: the controller must reach a RADIUS server that checks the user's credentials — this lab has none."};
-  if (w.security!=="none" && client.key!==w.psk) return {ok:false, reason:"bad-key", win:"The network security key isn't correct. Please try again.", why:"The passphrase doesn't match the WLAN's pre-shared key, so the 4-way handshake (WPA2) or SAE exchange (WPA3) fails."};
+  if (w.security!=="none" && client.key!==w.psk) return {ok:false, reason:"bad-key", win:"The network security key isn't correct", why:"The passphrase doesn't match the WLAN's pre-shared key, so the 4-way handshake (WPA2) or SAE exchange (WPA3) fails."};
   const mode = w.security==="none" ? "Open" : w.security==="wpa2-wpa3" ? (wpa3 ? "WPA3-Personal" : "WPA2-Personal") : w.security==="wpa3-sae" ? "WPA3-Personal" : "WPA2-Personal";
   return {ok:true, wlan:w, auth:mode, cipher: w.security==="none" ? "None" : "CCMP", why: w.security==="none" ? "An open WLAN: no key, no encryption — anyone in range can join and read the traffic." : `${mode}: the keys match, the handshake completes and traffic is encrypted with AES-CCMP.`}; };
 
