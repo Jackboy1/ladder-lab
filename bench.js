@@ -1698,7 +1698,9 @@ function drawCables(B){
   return B.cables.map(c=>{
     const s = linkState(B,c), col = CABLES[c.type].color;
     return `<path d="${cablePath(B,c.a,c.b)}" fill="none" stroke="${col}" stroke-width="3.2" stroke-linecap="round" opacity="${s.up?1:.75}" ${CABLES[c.type].kind==="console"?'stroke-dasharray="7 4"':""}/>`;
-  }).join("");
+  }).join("") + B.order.map(id=>B.devs[id]).filter(c=>c.wifiAt && B.devs[c.wifiAt.ap]).map(c=>{   // a Wi-Fi association: a dashed radio link to the AP
+    const ap = B.devs[c.wifiAt.ap], La = layout(ap), Lc = layout(c), x1 = ap.x + La.w/2, y1 = ap.y + 14, x2 = c.x + Lc.w/2, y2 = c.y + 12;
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--ok)" stroke-width="2" stroke-dasharray="3 5" stroke-linecap="round"/><text x="${(x1+x2)/2 + 8}" y="${(y1+y2)/2}" font-size="9" font-family="var(--mono)" fill="var(--muted)">${esc(c.wifiAt.ssid)}</text>`; }).join("");
 }
 // animated frames: one dot per hop, staggered by step; broadcasts amber, unicasts accent
 function drawFrames(B){
