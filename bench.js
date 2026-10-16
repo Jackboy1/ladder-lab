@@ -58,7 +58,9 @@ function addDevice(B, d0){
     } else if (d.kind!=="hub"){
       d.mac = d0.mac || macFor(d.id); B.arp[d.id] = {};
       d.ip6 = Object.assign({auto:true}, d0.ip6 || {});
-      if (d0.dhcp){ d.dhcp = true; d.ip = null; d.mask = null; d.gw = null; } d.dns = d0.dns ? [].concat(d0.dns) : [];   // Windows default: "Obtain an IPv6 address automatically" (SLAAC from router advertisements)
+      if (d0.dhcp){ d.dhcp = true; d.ip = null; d.mask = null; d.gw = null; } d.dns = d0.dns ? [].concat(d0.dns) : [];
+      if (d.kind==="wlc" && window.WLAN){ d.wlc = window.WLAN.store(clone(d0.wlc||{})); const m = d.wlc.mgmt; d.ip = m.ip; d.mask = m.mask; d.gw = m.gw; d.dhcp = false; d.model = d0.model || "Cisco 3504 WLC"; }
+      if (d.kind==="ap"){ d.apMode = d0.mode || "local"; d.primary = d0.primary || null; d.model = d0.model || "Catalyst 9120 AP"; if (!d0.ip){ d.dhcp = true; d.ip = null; d.mask = null; d.gw = null; } }   // Windows default: "Obtain an IPv6 address automatically" (SLAAC from router advertisements)
     }
     if (d0.snap && d.env) d.env.importConfig(d0.snap);   // a saved topology: restore the device's config
     if (d0.setup) d0.setup(d);
@@ -86,6 +88,8 @@ function defaultPorts(kind){
   if (kind==="router") return [{id:"g0", type:"rj45", label:"G0/0", ios:"GigabitEthernet0/0"},{id:"g1", type:"rj45", label:"G0/1", ios:"GigabitEthernet0/1"},{id:"g2", type:"rj45", label:"G0/2", ios:"GigabitEthernet0/2"},{id:"con", type:"console", label:"CON"}];
   if (kind==="hub") return [1,2,3,4].map(i=>({id:"p"+i, type:"rj45", label:String(i)}));
   if (kind==="laptop") return [{id:"eth", type:"rj45", label:"ETH"},{id:"usb", type:"usb", label:"USB"}];
+  if (kind==="ap") return [{id:"eth", type:"rj45", label:"G0 · PoE"}];
+  if (kind==="wlc") return [{id:"p1", type:"rj45", label:"1"},{id:"p2", type:"rj45", label:"2"}];
   return [{id:"eth", type:"rj45", label:"NIC"}];
 }
 const P = (B, ref) => { const [d,p] = String(ref).split(":"); const dev = B.devs[d]; const port = dev && dev.ports.find(x=>x.id===p); return port ? {dev, port, ref:d+":"+p} : null; };
@@ -445,6 +449,13 @@ function deliver(B, from, frame, step0){
       if (frame.dst===BCAST || frame.dst===li.mac || isV6Mc(frame.dst) || hsrpOwnsMac(B, d, ln, frame.dst)) recv.push({dev:d, ref, ios:ln, tag});
       return;
     }
+    if (d.kind==="wlc" || d.kind==="ap"){
+      const own = d.kind==="wlc" ? (d.wlc && d.wlc.mgmt.vlan ? d.wlc.mgmt.vlan : null) : null;
+      if ((tag==null ? null : tag)===own && (frame.dst===BCAST || frame.dst===d.mac || isV6Mc(frame.dst))) recv.push({dev:d, ref, tag});
+      for (const id2 of B.order){ const c = B.devs[id2]; if (!c.wifiAt || c.on===false || c.wifiAt.ref!==ref || (c.wifiAt.tag==null ? null : c.wifiAt.tag)!==(tag==null ? null : tag)) continue;
+        if (frame.dst===BCAST || frame.dst===c.mac || isV6Mc(frame.dst)) recv.push({dev:c, ref, tag}); }
+      return;
+    }
     if (tag!=null){ pushNote(`${d.label} received a frame with an 802.1Q tag and ignored it (a normal NIC expects untagged frames)`); return; }
     if (frame.dst===BCAST || frame.dst===d.mac || isV6Mc(frame.dst)) recv.push({dev:d, ref}); else if (frame.kind!=="arp") pushNote(`${d.label} saw a frame for ${frame.dst} and ignored it (not its MAC)`);
   };
@@ -467,7 +478,11 @@ function deliver(B, from, frame, step0){
 
 /* ---- IP layer ---- */
 // a "node" is something that sends IP: {dev, ref?, svi?, ios?, ip, mask, gw, mac, vlan?}
-function hostNode(d){ return {dev:d, ref: d.id+":"+d.ports.find(p=>p.type==="rj45").id, ip:d.ip, mask:d.mask, gw:d.gw, mac:d.mac}; }
+function hostNode(d){
+  if (d.wifiAt) return {dev:d, ref:d.wifiAt.ref, tag:d.wifiAt.tag, ip:d.ip, mask:d.mask, gw:d.gw, mac:d.mac, wifi:true};
+  if (d.kind==="wlc"){ const B = B_ctx.B, up = B && d.ports.find(p=>cableAt(B, d.id+":"+p.id)), v = d.wlc && d.wlc.mgmt.vlan;
+    return {dev:d, ref: d.id+":"+(up || d.ports[0]).id, tag: v ? v : undefined, ip:d.ip, mask:d.mask, gw:d.gw, mac:d.mac}; }
+  return {dev:d, ref: d.id+":"+d.ports.find(p=>p.type==="rj45").id, ip:d.ip, mask:d.mask, gw:d.gw, mac:d.mac}; }
 function ipOwner(B, ip){
   for (const id of B.order){ const d = B.devs[id];
     if (d.env){ for (const [n,i] of Object.entries(d.env.intfs)) if (i.ip===ip) return {dev:d, ios:n, i}; }
@@ -643,14 +658,14 @@ function l3Hear(B, d, ios){
   return (r.recv||[]).filter(x=>x.dev!==d && x.dev.env).map(x=>({dev:x.dev, ios: x.svi || x.ios}));
 }
 function l3Sig(B){
-  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.liveSig ? d.env.liveSig() : "", d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask, d.ip6, !!d.dhcp, !!d.released]; }),
+  return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.liveSig ? d.env.liveSig() : "", d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask, d.ip6, !!d.dhcp, !!d.released, d.wlc ? JSON.stringify([d.wlc.mgmt, d.wlc.ifaces, d.wlc.wlans]) : "", d.wifi ? JSON.stringify(d.wifi) : "", d.apMode||"", d.primary||"", d._wifiKey||""]; }),
     B.cables.map(c=>[c.a, c.b, c.type])]);
 }
 function computeL3(B){
   if (B._l3busy) return B._l3 || {ospf:{}, hsrp:{}};
   const sig = l3Sig(B); if (B._l3 && B._l3.sig===sig) return B._l3;
   B._l3busy = true; const keepStorm = B.stormSeen;
-  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; res.ra = computeRa(B); autoDhcp(B); try { linkLogs(B); } catch(e){} return res; }
+  try { const hears = new Map(); const res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res; res.ra = computeRa(B); autoDhcp(B); try { computeWifi(B); } catch(e){ console.log("wifi", e); } autoDhcp(B); try { linkLogs(B); } catch(e){} return res; }
   finally { B._l3busy = false; B.stormSeen = keepStorm; }
 }
 // a hello is heard only if the receiving interface's inbound ACL lets it in (a forgotten "permit ospf" kills the adjacency)
@@ -995,7 +1010,10 @@ const mbits = m => (ipToInt(m)>>>0).toString(2).split("1").length - 1;
 const leaseText = ms => ms==null ? "infinite" : ms % 86400000===0 ? `${ms/86400000} day${ms===86400000?"":"s"}` : ms % 3600000===0 ? `${ms/3600000} hour${ms===3600000?"":"s"}` : `${ms/60000} minutes`;
 function dlog(B, frames, log, r, text){ frames.push(...r.hops); log.push(text, ...r.notes.map(n=>"&nbsp;&nbsp;· "+n)); B.step += Math.max(1, ...r.hops.map(h=>h.step+1-B.step)); }
 const fromOf = n => n.svi ? {svi:n.dev.id, vlan:n.vlan} : (n.tag!=null ? {ref:n.ref, tag:n.tag} : n.ref);
-function dora(B, d){ return doraCore(B, {self:d, label:d.label, mac:d.mac, from:hostNode(d).ref, link:hostNode(d).ref, want:d.lastIp, who:"Windows"},
+function dora(B, d){
+  if (d.wifiAt && !d.wifiAt.flex && !d.wifiAt.dhcpServer) return {ok:false, frames:[], why:"proxy", log:[`<b>DHCP Discover</b> from ${d.label} reaches the controller over CAPWAP, but interface <b>${d.wifiAt.ifaceName}</b> has no Primary DHCP Server — with DHCP proxy on (the AireOS default) the WLC has nowhere to relay it, so the client never gets an address`]};
+  const hn = hostNode(d);
+  return doraCore(B, {self:d, label:d.label, mac:d.mac, from: hn.tag!=null ? {ref:hn.ref, tag:hn.tag} : hn.ref, link:hn.ref, want:d.lastIp, who:"Windows"},
   (o, f) => { d.ip = o.ip; d.mask = o.mask; d.gw = o.routers[0] || null; d.dns = o.dns.slice(); d.domain = o.domain || null; d.lastIp = o.ip;
     d.lease = {server:f.srvIp, srvId:f.srv.id, obtained:B.now, expires: o.leaseMs==null ? null : B.now + o.leaseMs}; B.arp[d.id] = {}; }); }
 function routerDora(B, r, ifn){ const i = r.env.intfs[ifn], node = routerNodeFor(r, ifn), sh = shortIf(ifn);
@@ -1090,6 +1108,31 @@ function dhcpRelease(B, d){
   return {frames, log};
 }
 // a PC set to "obtain automatically" asks again whenever the network changes (real Windows retries every few minutes)
+// Wi-Fi: which APs have joined a controller (CAPWAP discovery), and which clients are associated, on which VLAN
+function computeWifi(B){
+  if (!window.WLAN) return;
+  const devs = B.order.map(i=>B.devs[i]), wlcs = devs.filter(d=>d.kind==="wlc" && d.on!==false), aps = devs.filter(d=>d.kind==="ap");
+  for (const ap of aps){ ap.joinedTo = null; ap.joinLog = [];
+    if (ap.on===false || !linkUpAt(B, hostNode(ap).ref)){ ap.joinLog = ["The AP has no link or no power — it takes PoE from its switch port (or a power injector)."]; continue; }
+    let opt43 = [];
+    if (ap.lease && B.devs[ap.lease.srvId] && B.devs[ap.lease.srvId].env){ const pool = window.DHCP.poolFor(B.devs[ap.lease.srvId].env.dhcp, ap.ip); if (pool && pool.opt43) opt43 = window.DHCP.capwapWlcs(pool.opt43); }
+    for (const w of wlcs){ const keep = [B.frames, B.log, B.step]; let r;
+      try { r = window.WLAN.discover({ap:{ip:ap.ip, mask:ap.mask, gw:ap.gw, primary:ap.primary}, dhcpOpt43:opt43, wlcMgmt:w.ip, reach: ip => sendIp(B, hostNode(ap), ip, "CAPWAP discovery", {src:ap.ip, proto:"udp", sport:5246, dport:5246}).ok}); }
+      finally { [B.frames, B.log, B.step] = keep; }
+      ap.joinLog = r.steps; if (r.joined){ ap.joinedTo = w.id; ap.joinVia = r.via; break; } }
+    for (const w of wlcs){ if (ap.joinedTo===w.id) w.wlc.aps[ap.label] = {mode:ap.apMode, ip:ap.ip, mac:ap.mac, model:ap.model}; else delete w.wlc.aps[ap.label]; } }
+  for (const c of devs){ if (!c.wifi || c.on===false){ if (c.wifiAt){ c.wifiAt = null; c._wifiKey = ""; } continue; }
+    const wired = c.ports.some(p=>p.type==="rj45" && cableAt(B, c.id+":"+p.id));
+    const ap = c.wifi.ap ? B.devs[c.wifi.ap] : (aps.find(a=>a.joinedTo) || aps[0]), wlc = ap && ap.joinedTo ? B.devs[ap.joinedTo] : null;
+    const res = !c.wifi.ssid ? {ok:false, reason:"none", win:"Not connected", why:"No Wi-Fi network chosen."} : window.WLAN.associate(wlc ? wlc.wlc : window.WLAN.store(), !!wlc, {ssid:c.wifi.ssid, key:c.wifi.key, wpa3:c.wifi.wpa3, wpa2:c.wifi.wpa2});
+    c.wifiRes = Object.assign({}, res, {ap: ap && ap.id}); let at = null;
+    if (res.ok && !wired){ const iface = window.WLAN.ifaceOf(wlc.wlc, res.wlan), flex = ap.apMode==="flexconnect" && !!res.wlan.flexLocal;
+      const up = wlc.ports.find(p=>cableAt(B, wlc.id+":"+p.id)) || wlc.ports[0];
+      at = {ref: flex ? hostNode(ap).ref : wlc.id+":"+up.id, tag: iface.vlan ? iface.vlan : null, ap:ap.id, wlc:wlc.id, wlan:res.wlan.id, ssid:res.wlan.ssid, vlan:iface.vlan||0, dhcpServer:iface.dhcp||null, flex, ifaceName:iface.name, auth:res.auth, cipher:res.cipher}; }
+    const key = at ? [at.ref, at.tag, at.wlan].join("|") : "";
+    if (key!==(c._wifiKey||"")){ c._wifiKey = key; if (c.dhcp){ c.ip = null; c.mask = null; c.gw = null; c.lease = null; } c._dhcpTried = null; B.arp[c.id] = {}; }
+    c.wifiAt = at; }
+}
 function autoDhcp(B){
   if (!window.DHCP) return;
   for (const id of B.order){ const d = B.devs[id]; if (d.env || d.kind==="hub" || !d.dhcp || d.ip || d.released || d.on===false) continue;
@@ -1920,6 +1963,10 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   daiDrops: (B, sw, vlan) => { const d = B.devs[sw]; const x = d && d.env && d.env.daiStats && d.env.daiStats[vlan]; return x ? x.drop : 0; },
   sessionMode: (B, pc) => B.remote[pc] ? inSession(B, pc, e => e.mode) : null,
   sessionPrompt: (B, pc) => B.remote[pc] ? inSession(B, pc, e => e.prompt()) : null,
+  apJoined: (B, ap) => { computeL3(B); return !!(B.devs[ap] && B.devs[ap].joinedTo); },
+  wifiAssoc: (B, pc) => { computeL3(B); return !!(B.devs[pc] && B.devs[pc].wifiAt); },
+  wifiVlan: (B, pc) => { computeL3(B); const w = B.devs[pc] && B.devs[pc].wifiAt; return w ? w.vlan : null; },
+  wlanUp: (B, wlc, ssid) => { const d = B.devs[wlc]; return !!(d && d.wlc && Object.values(d.wlc.wlans).some(w=>w.ssid===ssid && w.enabled)); },
   quietMode: (B, dev) => { const e = B.devs[dev] && B.devs[dev].env; return !!(e && e.quietUntil && B.now < e.quietUntil); },
   loginFailures: (B, dev) => { const e = B.devs[dev] && B.devs[dev].env; return e ? (e.loginTotalFails||0) : 0; },
   psecViolations: (B, sw, port) => { const d = B.devs[sw]; const pp = d && d.ports.find(q=>q.id===port); const i = pp && d.env.intfs[pp.ios]; return i ? (i.psecViolCount||0) : 0; },

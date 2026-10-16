@@ -1118,7 +1118,7 @@ function ios2Env(opts){
     "config-std-nacl": aclMode(), "config-ext-nacl": aclMode(),
     "config-arp-nacl": [ X("permit ip host A:IP mac host A:WORD", a=>{ const m = normMac(a[1]); if (!m) return inv(); st.arpAcls[st.curArpAcl].push({action:"permit", ip:a[0], mac:m}); return ""; }),
       X("deny ip host A:IP mac host A:WORD", a=>{ const m = normMac(a[1]); if (!m) return inv(); st.arpAcls[st.curArpAcl].push({action:"deny", ip:a[0], mac:m}); return ""; }) ],
-    "config-dhcp": ["network","default-router","dns-server","domain-name","lease"].flatMap(k=>[
+    "config-dhcp": ["network","default-router","dns-server","domain-name","lease","option"].flatMap(k=>[
       X(k + " A:LINE", a=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, k + " " + a[0]); return r.err || ""; }),
       X("no " + k, ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }),
       X("no " + k + " A:LINE", ()=>{ const r = window.DHCP.poolCmd(st.dhcp, st.curPool, "no " + k); return r.err || ""; }) ]),

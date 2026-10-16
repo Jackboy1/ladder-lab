@@ -50,6 +50,10 @@ DHCP.poolCmd = (st, ctx, line) => {
     if (!a.length) return INC; if (a.length > 8 || a.some(x=>!ipRe.test(x))) return BAD; p[k] = a.slice(); return {};
   }
   if (c==="domain-name"){ if (neg){ p.domain = null; return {}; } if (!a[0]) return INC; if (a[1]) return BAD; p.domain = a[0]; return {}; }
+  // option 43 hex … — vendor-specific info; for Cisco lightweight APs: type f1, length 4 × controllers, then each WLC's IP in hex
+  if (c==="option"){ if (a[0]!=="43") return BAD; if (neg){ p.opt43 = null; return {}; }
+    if (a[1]!=="hex" || !a[2]) return a[1]==="hex" ? INC : BAD; const h = a.slice(2).join("").replace(/\./g, "").toLowerCase();
+    if (!/^([0-9a-f]{2})+$/.test(h)) return BAD; p.opt43 = h; return {}; }
   if (c==="lease"){
     if (neg){ p.lease = [1,0,0]; return {}; }
     if (a[0]==="infinite" && !a[1]){ p.lease = "infinite"; return {}; }
@@ -60,6 +64,9 @@ DHCP.poolCmd = (st, ctx, line) => {
   }
   return BAD;
 };
+// the controller addresses a Cisco AP reads from option 43 (sub-option f1) — [] when absent or malformed
+DHCP.capwapWlcs = hex => { const h = String(hex||""); if (h.slice(0,2)!=="f1") return []; const n = parseInt(h.slice(2,4), 16); if (!n || n % 4 || h.length < 4 + n*2) return [];
+  const out = []; for (let i = 0; i < n/4; i++){ const b = h.slice(4 + i*8, 12 + i*8).match(/../g).map(x=>parseInt(x, 16)); out.push(b.join(".")); } return out; };
 DHCP.running = st => {
   const out = st.excluded.map(r=>`ip dhcp excluded-address ${toIp(r[0])}${r[1]!==r[0] ? " " + toIp(r[1]) : ""}`);
   for (const p of Object.values(st.pools)){
@@ -69,6 +76,7 @@ DHCP.running = st => {
     if (p.routers.length) out.push(` default-router ${p.routers.join(" ")} `.trimEnd());
     if (p.dns.length) out.push(` dns-server ${p.dns.join(" ")}`);
     if (p.domain) out.push(` domain-name ${p.domain}`);
+    if (p.opt43) out.push(` option 43 hex ${p.opt43.match(/.{1,4}/g).join(".")}`);
     if (p.lease==="infinite") out.push(" lease infinite");
     else if (p.lease.join()!=="1,0,0") out.push(" lease " + (p.lease[2] ? p.lease.join(" ") : p.lease[1] ? p.lease.slice(0,2).join(" ") : p.lease[0]));
   }
