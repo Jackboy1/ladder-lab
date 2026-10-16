@@ -78,5 +78,19 @@ const mk = (o) => Bench.create({ devices: [
   ok(Bench.wifiAssoc(A, "lap") && !A.devs.lap.ip, "FlexConnect local switching with the AP on an ACCESS port: VLAN 20 can't leave — no address");
 }
 
+{ // building it through the bench actions (what a solve does): interface, WLAN, security, enable — then the laptop connects
+  const B = mk({wlc:{ifaces:{}, wlans:{}}, wifi:{ssid:null, key:null}});
+  ok(!Bench.wifiAssoc(B, "lap"), "no WLAN yet: the laptop isn't connected");
+  ok(Bench.act(B, ["wlc", "wlc", "iface", "staff", 20, {ip:"10.10.20.5", mask:"255.255.255.0", gw:"10.10.20.1", dhcp:"10.10.20.1"}]).ok, "CONTROLLER → Interfaces → New: staff, VLAN 20");
+  ok(Bench.act(B, ["wlc", "wlc", "wlan", 1, "STAFF", "Staff-WiFi"]).ok && !Bench.wlanUp(B, "wlc", "Staff-WiFi"), "WLANs → Create New: starts disabled");
+  ok(!Bench.act(B, ["wlc", "wlc", "wlanset", 1, {enabled:true}]).ok, "can't enable a WPA2-PSK WLAN with no key");
+  ok(Bench.act(B, ["wlc", "wlc", "wlanset", 1, {iface:"staff", security:"wpa2-psk", psk:"Lagos-Staff-2026", enabled:true}]).ok && Bench.wlanUp(B, "wlc", "Staff-WiFi"), "interface, WPA2 PSK, key and Status Enabled → applied");
+  const r = Bench.act(B, ["wifi", "lap", "Staff-WiFi", "Lagos-Staff-2026"]);
+  ok(r.ok && /connected to Staff-WiFi \(WPA2-Personal\) — got 10\.10\.20\./.test(r.msg) && Bench.wifiVlan(B, "lap")===20, "the laptop connects and gets an address in VLAN 20", r.msg);
+  const bad = Bench.act(B, ["wifi", "lap", "Staff-WiFi", "nope-nope"]);
+  ok(!bad.ok && /security key isn't correct/.test(bad.msg) && !Bench.wifiAssoc(B, "lap"), "wrong key through the Wi-Fi panel: the Windows message", bad.msg);
+  ok(Bench.act(B, ["wlc", "wlc", "apmode", "ap", "flexconnect"]).ok && B.devs.ap.apMode==="flexconnect", "WIRELESS → All APs → AP Mode FlexConnect");
+}
+
 console.log(fails ? `\n${fails} FAILED` : "\nALL PASSED");
 process.exitCode = fails ? 1 : 0;

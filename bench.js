@@ -1553,6 +1553,23 @@ function act(B, a){
     else { d.dhcp = false; d.released = false; d.lease = null; d.domain = null; d.ip = x[1]||null; d.mask = x[2]||null; d.gw = x[3]||null; d.dns = x[4] ? [x[4]] : []; B.arp[d.id] = {};
       const off = d.ip && d.mask && d.gw && !sameNet(d.ip, d.gw, d.mask);
       r = {ok:true, msg: off ? `${d.label}: saved — but Windows warns: the default gateway ${d.gw} is not on the same network segment (subnet) as ${d.ip}/${d.mask}. (In this lab that gateway can't be used.)` : `${d.label}: IP settings saved.`}; } }
+  else if (op==="wifi"){ const d = B.devs[x[0]];
+    if (!d || d.kind!=="laptop") r = {ok:false, msg:"Only a laptop has a Wi-Fi adapter here."};
+    else { d.wifi = Object.assign({}, d.wifi||{}, {ssid:x[1]||null, key:x[2]==null ? null : String(x[2])}, x[3]||{}); if (d.wifi.ssid && !d.dhcp && !d.ip) d.dhcp = true; computeL3(B); const res = d.wifiRes || {};
+      r = {ok: !!res.ok, msg: !x[1] ? `${d.label}: disconnected from Wi-Fi.` : res.ok ? `${d.label}: connected to ${x[1]} (${res.auth})${d.ip ? " — got " + d.ip : " — but no IP address yet (open the frame log)"}.` : `${d.label}: ${res.win || "Can't connect to this network"} ${res.why ? "— " + res.why : ""}`}; } }
+  else if (op==="wlc"){ const d = B.devs[x[0]], W = window.WLAN, st = d && d.wlc;
+    if (!st) r = {ok:false, msg:"That isn't a wireless LAN controller."};
+    else { const sub = x[1]; let o;
+      if (sub==="iface"){ o = W.createIface(st, {name:x[2], vlan:x[3]}); if (o.ok && x[4]) o = W.setIface(st, x[2], x[4]); }
+      else if (sub==="ifaceset") o = W.setIface(st, x[2], x[3]||{});
+      else if (sub==="wlan") o = W.createWlan(st, {id:x[2], profile:x[3], ssid:x[4]});
+      else if (sub==="wlanset") o = W.setWlan(st, +x[2], x[3]||{});
+      else if (sub==="wlandel"){ if (st.wlans[+x[2]]){ delete st.wlans[+x[2]]; o = {ok:true}; } else o = {err:"No such WLAN."}; }
+      else if (sub==="access"){ Object.assign(st.access, x[2]||{}); o = {ok:true}; }
+      else if (sub==="apmode"){ const ap = B.devs[x[2]] || Object.values(B.devs).find(v=>v.kind==="ap" && v.label===x[2]);
+        if (!ap || ap.kind!=="ap") o = {err:"No such AP."}; else { ap.apMode = x[3]; o = {ok:true, note:` — ${ap.label} reboots and rejoins in ${x[3]} mode`}; } }
+      else o = {err:"Unknown controller setting."};
+      computeL3(B); r = {ok:!!o.ok, msg: o.ok ? `${d.label}: applied${o.note||""}.` : `${d.label}: ${o.err}`}; } }
   else if (op==="dhcp"){ const d = B.devs[x[0]];
     d.dhcp = true; d.released = false; d.ip = null; d.mask = null; d.gw = null; d.dns = []; d.domain = null; d.lease = null; B.arp[d.id] = {};
     const res = dora(B, d); B.frames = res.frames; B.log = res.log;
@@ -1610,7 +1627,7 @@ function termExec(B, line){
 /* ---------------- view ---------------- */
 function layout(d){
   const ports = {}, pts = d.ports;
-  if (d.kind==="switch" || d.kind==="router" || d.kind==="hub"){
+  if (d.kind==="switch" || d.kind==="router" || d.kind==="hub" || d.kind==="wlc"){
     let x = 52; const h = 78;
     pts.forEach(p=>{ const [w,hh] = PORTW[p.type]; if (p.type==="console"){ x += 14; } ports[p.id] = {x, y:44, w, h:hh}; x += w + (p.type==="sfp"?10:7); });
     return {w:Math.max(x+14, d.kind==="hub"?170:200), h, ports};
@@ -1623,16 +1640,17 @@ function drawDevice(B, d, sel){
   const L = layout(d), x0 = d.x, y0 = d.y;
   let g = "";
   const stroke = d.on ? "var(--line)" : "var(--bad)";
-  if (d.kind==="switch" || d.kind==="router" || d.kind==="hub"){
+  if (d.kind==="switch" || d.kind==="router" || d.kind==="hub" || d.kind==="wlc"){
     const name = d.env ? d.env.host : d.label;
     g += `<rect x="${x0}" y="${y0}" width="${L.w}" height="${L.h}" rx="6" fill="var(--panel2)" stroke="${stroke}" stroke-width="1.4"/>`;
     g += `<text x="${x0+10}" y="${y0+18}" fill="var(--fg)" font-size="12" font-weight="700" font-family="var(--display)">${esc(name)}</text>`;
-    g += `<text x="${x0+10}" y="${y0+30}" fill="var(--muted)" font-size="9" font-family="var(--mono)">${esc(d.model||(d.kind==="switch"?"Catalyst switch":d.kind==="hub"?"Ethernet hub (repeater)":"ISR router"))}</text>`;
+    g += `<text x="${x0+10}" y="${y0+30}" fill="var(--muted)" font-size="9" font-family="var(--mono)">${esc(d.model||(d.kind==="switch"?"Catalyst switch":d.kind==="hub"?"Ethernet hub (repeater)":d.kind==="wlc"?"Wireless LAN controller":"ISR router"))}</text>`;
     g += `<circle cx="${x0+16}" cy="${y0+52}" r="4" fill="${d.on?"var(--ok)":"var(--bad)"}"/><text x="${x0+10}" y="${y0+68}" fill="var(--muted)" font-size="8" font-family="var(--mono)">PWR</text>`;
   } else {
     const cx = x0+L.w/2;
     g += `<rect x="${x0}" y="${y0}" width="${L.w}" height="${L.h}" rx="8" fill="var(--panel2)" stroke="${stroke}" stroke-width="1.2"/>`;
-    if (d.kind==="laptop") g += `<rect x="${cx-17}" y="${y0+10}" width="34" height="22" rx="2" fill="var(--chip)" stroke="var(--accent)"/><path d="M${cx-23},${y0+33} h46 l-4,6 h-38 z" fill="var(--chip)" stroke="var(--accent)"/>`;
+    if (d.kind==="ap"){ const on = d.joinedTo ? "var(--ok)" : "var(--muted)"; g += `<ellipse cx="${cx}" cy="${y0+26}" rx="20" ry="9" fill="var(--chip)" stroke="var(--accent)"/><circle cx="${cx}" cy="${y0+26}" r="2.6" fill="${on}"/>${[13,19].map(r=>`<path d="M${cx-r},${y0+14} q${r},-${r*0.55} ${2*r},0" fill="none" stroke="${on}" stroke-width="1.4"/>`).join("")}`; }
+    else if (d.kind==="laptop") g += `<rect x="${cx-17}" y="${y0+10}" width="34" height="22" rx="2" fill="var(--chip)" stroke="var(--accent)"/><path d="M${cx-23},${y0+33} h46 l-4,6 h-38 z" fill="var(--chip)" stroke="var(--accent)"/>`;
     else if (d.kind==="printer") g += `<rect x="${cx-20}" y="${y0+17}" width="40" height="18" rx="3" fill="var(--chip)" stroke="var(--accent)"/><rect x="${cx-13}" y="${y0+7}" width="26" height="11" fill="var(--panel)" stroke="var(--accent)"/><rect x="${cx-13}" y="${y0+31}" width="26" height="9" fill="var(--panel)" stroke="var(--accent)"/>`;
     else if (d.kind==="server") g += `<rect x="${cx-14}" y="${y0+8}" width="28" height="34" rx="2" fill="var(--chip)" stroke="var(--accent)"/>${[0,1,2].map(i=>`<line x1="${cx-9}" y1="${y0+16+i*9}" x2="${cx+4}" y2="${y0+16+i*9}" stroke="var(--muted)"/>`).join("")}`;
     else g += `<rect x="${cx-18}" y="${y0+9}" width="36" height="24" rx="2" fill="var(--chip)" stroke="var(--accent)"/><line x1="${cx}" y1="${y0+33}" x2="${cx}" y2="${y0+38}" stroke="var(--accent)" stroke-width="1.5"/><line x1="${cx-9}" y1="${y0+39}" x2="${cx+9}" y2="${y0+39}" stroke="var(--accent)" stroke-width="2"/>`;
@@ -1738,6 +1756,15 @@ function mount(el, cfg, tasks, onWin){
     if (op==="flip") return `Click <b>${esc(pn(x[0]))}</b> → <b>Flip Tx/Rx</b> (swap the LC connector polarity)`;
     if (op==="ip6") return x[1]==="auto" ? `<b>${esc(lab(x[0]))} → IPv6 settings</b>: Obtain an IPv6 address automatically → OK` : `<b>${esc(lab(x[0]))} → IPv6 settings</b>: address <code>${esc(x[2]||"(blank)")}</code>/<code>${esc(x[3]||"64")}</code>, gateway <code>${esc(x[4]||"(blank)")}</code> → OK`;
     if (op==="dhcp") return `<b>${esc(lab(x[0]))} → IP settings</b>: Obtain an IP address automatically → OK`;
+    if (op==="wifi") return x[1] ? `<b>${esc(lab(x[0]))} → Wi-Fi</b>: connect to <code>${esc(x[1])}</code>${x[2] ? " with the network security key" : ""}` : `<b>${esc(lab(x[0]))} → Wi-Fi</b>: disconnect`;
+    if (op==="wlc"){ const sub = x[1], o = x[3]||{};
+      if (sub==="iface") return `<b>${esc(lab(x[0]))} GUI → CONTROLLER → Interfaces → New</b>: ${esc(x[2])}, VLAN ${x[3]}${x[4] ? ", " + Object.entries(x[4]).map(([k,v])=>k + " " + v).join(", ") : ""} → Apply`;
+      if (sub==="ifaceset") return `<b>${esc(lab(x[0]))} GUI → CONTROLLER → Interfaces → ${esc(x[2])}</b>: ${Object.entries(o).map(([k,v])=>k + " " + v).join(", ")} → Apply`;
+      if (sub==="wlan") return `<b>${esc(lab(x[0]))} GUI → WLANs → Create New</b>: ID ${x[2]}, profile ${esc(x[3])}, SSID ${esc(x[4])} → Apply`;
+      if (sub==="wlanset") return `<b>${esc(lab(x[0]))} GUI → WLANs → ${x[2]}</b>: ${Object.entries(x[3]||{}).map(([k,v])=>k==="psk" ? "PSK ********" : k + " " + v).join(", ")} → Apply`;
+      if (sub==="apmode") return `<b>${esc(lab(x[0]))} GUI → WIRELESS → All APs → ${esc(lab(x[2]))}</b>: AP Mode ${esc(x[3])} → Apply`;
+      if (sub==="access") return `<b>${esc(lab(x[0]))} GUI → MANAGEMENT</b>: ${Object.entries(x[2]||{}).map(([k,v])=>k + " " + (v ? "enabled" : "disabled")).join(", ")} → Apply`;
+      return `<b>${esc(lab(x[0]))} GUI</b>: ${esc(sub)}`; }
     if (op==="ip") return `<b>${esc(lab(x[0]))} → IP settings</b>: IP <code>${esc(x[1]||"(blank)")}</code>, mask <code>${esc(x[2]||"(blank)")}</code>, gateway <code>${esc(x[3]||"(blank)")}</code>${x[4] ? ", DNS <code>" + esc(x[4]) + "</code>" : ""} → OK`;
     if (op==="pc") return `<b>${esc(lab(x[0]))} → Command Prompt</b>: <code>${esc(x[1]||"(press Enter)")}</code>`;
     if (op==="console"){ const s = x[1]||{}; return `<b>${esc(lab(x[0]))} → Terminal app (PuTTY)</b>: Serial, COM3, speed <code>${esc(s.speed)}</code>, data bits <code>${esc(s.data)}</code>, parity <code>${esc(s.parity)}</code>, stop bits <code>${esc(s.stop)}</code>, flow control <code>${esc(s.flow)}</code> → Open`; }
