@@ -2411,10 +2411,10 @@ ${K.out(`ABJ-FIN-SW1#show mac address-table vlan 20
 
 Vlan    Mac Address       Type        Ports
 ----    -----------       --------    -----
- 20     0050.0c53.0001    DYNAMIC     Gi0/1
- 20     0050.56a3.1102    STATIC      Gi0/5
- 20     0050.56a3.1187    STATIC      Gi0/6
- 20     0050.56aa.0740    STATIC      Gi0/7
+  20    0050.0c53.0001    DYNAMIC     Gi0/1
+  20    0050.56a3.1102    STATIC      Gi0/5
+  20    0050.56a3.1187    STATIC      Gi0/6
+  20    0050.56aa.0740    STATIC      Gi0/7
 Total Mac Addresses for this criterion: 4`, "Secure addresses are STATIC, however obtained; the router's MAC on the uplink is ordinary DYNAMIC.")}
 <p>STATIC matters: a secure address isn't aged out by the normal 300-second timer. The running-config shows how each port got its address:</p>
 ${K.out(`ABJ-FIN-SW1#show running-config | section interface GigabitEthernet0/[567]
