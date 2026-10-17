@@ -149,7 +149,7 @@ L7  Application name fails but IP works → DNS: nslookup/dig; stale hosts file;
 <tr><td>Port err-disabled</td><td>Port-security/BPDU Guard tripped — fix cause, shut/no shut</td></tr>
 </table></div>
 <h3>Close like a professional</h3>
-<p>Verify with the user (not just your ping), write cause + fix + evidence in the ticket, and ask the system question: <i>should monitoring have caught this before the user did?</i> That last sentence is what separates支 support from engineering — and it's the thinking the SRE track formalises as postmortems.</p>
+<p>Verify with the user (not just your ping), write cause + fix + evidence in the ticket, and ask the system question: <i>should monitoring have caught this before the user did?</i> That last sentence is what separates support from engineering — and it's the thinking the SRE track formalises as postmortems.</p>
 <div class="callout">Practise the muscle: the <b>Tickets</b> tab scenarios are this lesson applied; grade yourself against the models honestly.</div>`}
 );
 

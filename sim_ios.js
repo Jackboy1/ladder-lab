@@ -36,6 +36,9 @@ const HELP = {
   password:"Set a password", login:"Enable password checking", transport:"Define transport protocols for line", "exec-timeout":"Set the EXEC timeout", "logging":"Modify message logging facilities", name:"Ascii name of the VLAN",
   "running-config":"Current operating configuration", "startup-config":"Contents of startup configuration", version:"System hardware and software status", interfaces:"Interface status and configuration",
   "mac":"MAC configuration", "mac-address-table":"MAC forwarding table", arp:"ARP table", cdp_s:"CDP information", history:"Display the session command history", users:"Display information about terminal lines",
+  vrf:"VPN Routing/Forwarding instance", definition:"VRF definition", forwarding:"Configure forwarding table", rd:"Specify Route Distinguisher", "route-target":"Specify Target VPN Extended Communities",
+  "address-family":"Enter Address Family command mode", "exit-address-family":"Exit from Address Family configuration mode", tunnel:"protocol-over-protocol tunneling", keepalive:"Enable keepalive",
+  source:"Source interface or address", destination:"destination of tunnel", mtu:"Set IP Maximum Transmission Unit", tcp:"TCP header compression and other parameters", "adjust-mss":"Adjust the mss of transit packets",
   route:"IP routing table", "default-gateway":"Specify default gateway (if not routing IP)", "domain-name":"Define the default domain name", "domain-lookup":"Enable IP Domain Name System hostname translation", ssh:"Configure ssh options",
 };
 
@@ -60,6 +63,7 @@ function ios2Env(opts){
       lines:{ con:{password:null, login:false, loginLocal:false, timeout:null, sync:false}, vty:{password:null, login:false, loginLocal:false, transport:"all", timeout:null, sync:false} },
       users:{}, domain:null, domainLookup:true, rsa:0, sshVer:null, defaultGw:null, routes:[], cdpRun:true, lldpRun:false,
       stpMode:"rapid-pvst", stpPrio:{}, stpOff:{}, pfDefault:false, bpduDefault:false, ipRouting:false, vtpMode:"server", vtpDomain:"", lbMethod:null, ospf:null, v6routing:false, routes6:[], serviceDhcp:true,
+      vrfs:{}, ospfV:{},   // VRF-Lite: vrf definition / ip vrf blocks; OSPF processes bound to a VRF (router ospf N vrf NAME), by process ID
       secMinLen:0, loginBlock:null, loginQuietAcl:null, loginLogFail:false, loginLogOk:false, bannerLogin:null,
       aaa:{on:false, lists:{}, radius:{}, tacacs:{}},
       snoop:{on:false, vlans:[], opt82:true}, dai:{vlans:[], validate:[], filters:{}}, arpAcls:{}, relayTrustAll:false,
@@ -104,6 +108,7 @@ function ios2Env(opts){
     else if ("vlan".startsWith(p) && p.length>=2) base = "Vlan";
     else if ("loopback".startsWith(p) && p.length>=2) base = "Loopback";
     else if ("port-channel".startsWith(p) && p.length>=2) base = "Port-channel";
+    else if ("tunnel".startsWith(p) && p.length>=2 && /^\d+$/.test(num)) base = "Tunnel";
     if (!base) return null;
     const name = base + num;
     if (st.intfs[name]) return name;
@@ -113,15 +118,41 @@ function ios2Env(opts){
       st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"routed", sub:true, parent, encap:null, encapNative:false, vlan:1, cdp:false, mac: st.intfs[parent].mac }; return name; }
     if (create && base==="Vlan" && kind==="switch" && /^\d+$/.test(num) && +num>=1 && +num<=4094){ st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"svi", vlan:+num, cdp:false, mac:`${baseMac}.0${num.padStart(3,"0")}` }; return name; }
     if (create && base==="Loopback" && /^\d+$/.test(num)){ st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"routed", vlan:1, cdp:false, mac:null, loop:true }; return name; }
+    // a GRE tunnel interface (Layer 3 only — no MAC): created admin-up, line protocol down until it has a usable source and a route to its destination
+    if (create && base==="Tunnel" && +num<=2147483647 && (kind==="router" || st.ipRouting)){ st.intfs[name] = { ip:null, mask:null, shut:false, desc:"", mode:"routed", vlan:1, cdp:false, mac:null, tun:{src:null, dst:null, mode:"gre ip"} };
+      st.tunWas = Object.assign({}, st.tunWas, {[name]: false}); st.tunNew = name; return name; }
     return null;
   }
-  const short = n => n.replace("GigabitEthernet","Gi").replace("FastEthernet","Fa").replace("Loopback","Lo").replace("Port-channel","Po");
+  const short = n => n.replace("GigabitEthernet","Gi").replace("FastEthernet","Fa").replace("Loopback","Lo").replace("Port-channel","Po").replace("Tunnel","Tu");
   const sortIf = (a,b) => { const na = a.match(/\d+/g).map(Number), nb = b.match(/\d+/g).map(Number); const ta = a.replace(/[\d\/.]+/g,""), tb = b.replace(/[\d\/.]+/g,""); if (ta!==tb) return ta==="Vlan"?1:tb==="Vlan"?-1:ta<tb?-1:1; for (let i=0;i<Math.max(na.length,nb.length);i++) if ((na[i]||0)!==(nb[i]||0)) return (na[i]||0)-(nb[i]||0); return 0; };
   const ifNames = () => Object.keys(st.intfs).sort(sortIf);
 
   /* ---------- state helpers ---------- */
   const up = n => { const i = st.intfs[n]; if (!i || i.shut || i.errdis) return false; if (i.mode==="svi") return svIUp(i.vlan); if (i.loop) return true;
+    if (i.tun) return tunUp(n);
     if (i.sub) return up(i.parent); if (n.startsWith("Port-channel")) return !!hooks.linkUp(n); return !!hooks.linkUp(n); };
+  /* ---------- GRE tunnels: line protocol is up when the source interface is up with an address, a destination is set and the
+     underlay has a route to it (not through a tunnel); recursive routing (the destination learned through the tunnel itself)
+     disables it; with keepalives the far end must also answer ---------- */
+  const vrfOf = n => (st.intfs[n] && st.intfs[n].vrf) || null;
+  st.vrfOf = n => vrfOf(n);
+  function tunSrc(n){ const t = st.intfs[n].tun, uv = t.vrf || null; if (!t.src) return null;
+    if (ipRe.test(t.src)){ const own = ifNames().find(x=>!st.intfs[x].tun && st.intfs[x].ip===t.src && vrfOf(x)===uv); return own ? {ios:own, ip:t.src} : {ios:null, ip:t.src}; }
+    const i = st.intfs[t.src]; return i ? {ios:t.src, ip: i.ip || null} : {ios:null, ip:null}; }
+  function tunWhy(n){ const i = st.intfs[n], t = i.tun, uv = t.vrf || null;
+    if (!t.src) return "no source"; const s = tunSrc(n); if (!s.ios || !s.ip || st.intfs[s.ios].tun || vrfOf(s.ios)!==uv || !up(s.ios)) return "source down";
+    if (!t.dst) return "no destination"; if (ownIps().includes(t.dst)) return "destination is local";
+    if (!lookupIn(t.dst, uv, true)) return "no route"; if ((st.tunRec||{})[n]) return "recursive"; if (t.ka && (st.tunKa||{})[n]===false) return "keepalive";
+    return null; }
+  function tunUp(n){ return routingOn() && !tunWhy(n); }
+  st.tunInfo = () => ifNames().filter(n=>st.intfs[n].tun).map(n=>{ const i = st.intfs[n], t = i.tun, s = tunSrc(n) || {};
+    return {ios:n, ip:i.ip, mask:i.mask, vrf:vrfOf(n), uvrf:t.vrf||null, srcIf:s.ios||null, srcIp:s.ip||null, dst:t.dst, ka:t.ka||null, shut:!!i.shut, up:up(n), why: i.shut ? "shutdown" : tunWhy(n), mode:t.mode}; });
+  // the line protocol changes since the last look (printed on the console after a command; the bench logs the others)
+  st.tunCheck = () => { const out = []; st.tunWas = st.tunWas || {};
+    for (const n of ifNames().filter(x=>st.intfs[x].tun)){ const u = up(n), w = st.tunWas[n]; if (w===undefined){ st.tunWas[n] = u; continue; }
+      if (u!==w && !st.intfs[n].shut) out.push(`%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to ${u?"up":"down"}`); st.tunWas[n] = u; }
+    for (const k of Object.keys(st.tunWas)) if (!st.intfs[k]) delete st.tunWas[k];
+    return out; };
   // DTP: what a port is actually doing, given its own mode and its neighbour's (no bench ⇒ dynamic ports stay access)
   st.opMode = n => { const i = st.intfs[n]; if (!i) return null; if (i.mode==="routed"||i.mode==="svi"||i.sub||i.loop) return "routed";
     if (i.mode==="trunk") return "trunk"; if (i.mode==="access") return "access";
@@ -191,6 +222,11 @@ function ios2Env(opts){
   /* ---------- output builders ---------- */
   function runningCfg(){
     const L = ["Building configuration...","","Current configuration : 2104 bytes","!","version 17.9", st.servicePwEnc?"service password-encryption":"no service password-encryption","!",`hostname ${st.host}`,"!"];
+    for (const n of Object.keys(st.vrfs).sort()){ const v = st.vrfs[n], rt = (af) => (v.rt||[]).filter(x=>(x.af||null)===af).map(x=>`${af ? " " : ""} route-target ${x.dir} ${x.val}`);
+      if (v.style==="ip"){ L.push(`ip vrf ${n}`); if (v.desc) L.push(` description ${v.desc}`); if (v.rd) L.push(` rd ${v.rd}`); L.push(...rt(null), "!"); continue; }
+      L.push(`vrf definition ${n}`); if (v.desc) L.push(` description ${v.desc}`); if (v.rd) L.push(` rd ${v.rd}`); L.push(...rt(null));
+      for (const af of ["ipv4","ipv6"]) if (v["af" + af.slice(-1)]) L.push(" !", ` address-family ${af}`, ...rt(af), " exit-address-family");
+      L.push("!"); }
     if (st.enableSecret) L.push(`enable secret ${st.enableAlg||"9"} ${hashOf(st.enableSecret, st.enableAlg||"9")}`);
     if (st.enablePassword) L.push(`enable password ${pw(st.enablePassword)}`);
     if (st.enableSecret || st.enablePassword) L.push("!");
@@ -226,6 +262,7 @@ function ios2Env(opts){
       const i = st.intfs[n]; L.push(`interface ${n}`);
       if (i.desc) L.push(` description ${i.desc}`);
       if (i.sub && i.encap) L.push(` encapsulation dot1Q ${i.encap}${i.encapNative?" native":""}`);
+      if (i.vrf) L.push(` ${i.vrfCmd || "vrf forwarding"} ${i.vrf}`);
       if (kind==="switch" && !i.sub && i.mode!=="svi" && !i.loop){
         if (i.mode==="routed") L.push(" no switchport");
         else {
@@ -248,6 +285,7 @@ function ios2Env(opts){
       }
       if (i.bw) L.push(` bandwidth ${i.bw}`);
       if (i.dhcpClient) L.push(" ip address dhcp"); else if (i.ip) L.push(` ip address ${i.ip} ${i.mask}`); else if (i.mode==="svi"||i.mode==="routed") L.push(" no ip address");
+      if (i.ipMtu) L.push(` ip mtu ${i.ipMtu}`); if (i.mss) L.push(` ip tcp adjust-mss ${i.mss}`);
       if (i.relayTrusted) L.push(" ip dhcp relay information trusted");
       if (i.aclIn) L.push(` ip access-group ${i.aclIn} in`); if (i.aclOut) L.push(` ip access-group ${i.aclOut} out`); if (i.noUnreach) L.push(" no ip unreachables");
       if (i.natIn) L.push(" ip nat inside"); if (i.natOut) L.push(" ip nat outside");
@@ -257,25 +295,27 @@ function ios2Env(opts){
       if (i.ip6auto) L.push(" ipv6 address autoconfig"); if (i.ip6en) L.push(" ipv6 enable");
       if (i.hsrpVer===2) L.push(" standby version 2");
       if (i.hsrp) for (const [g,h] of Object.entries(i.hsrp)){ if (h.ip) L.push(` standby ${g} ip ${h.ip}`); if (h.prio!=null && h.prio!==100) L.push(` standby ${g} priority ${h.prio}`); if (h.preempt) L.push(` standby ${g} preempt`); }
-      if (i.ospfNet==="point-to-point") L.push(" ip ospf network point-to-point");
+      if (i.ospfNet==="point-to-point") L.push(" ip ospf network point-to-point"); else if (i.ospfNet==="broadcast") L.push(" ip ospf network broadcast");
       if (i.ospfPrio!=null) L.push(` ip ospf priority ${i.ospfPrio}`);
       if (i.ospfHello) L.push(` ip ospf hello-interval ${i.ospfHello}`); if (i.ospfDead && i.ospfDead!==(i.ospfHello||10)*4) L.push(` ip ospf dead-interval ${i.ospfDead}`);
       if (i.ospfArea) L.push(` ip ospf ${i.ospfArea.pid} area ${i.ospfArea.area}`);
       if (i.ospfCost) L.push(` ip ospf cost ${i.ospfCost}`);
       if (i.speed!=="auto" && i.speed) L.push(` speed ${i.speed}`);
       if (i.duplex!=="auto" && i.duplex) L.push(` duplex ${i.duplex}`);
-      if (i.cdp===false && i.mode!=="svi" && !i.loop && !i.sub && !i.po) L.push(" no cdp enable");
+      if (i.cdp===false && i.mode!=="svi" && !i.loop && !i.sub && !i.po && !i.tun) L.push(" no cdp enable");
       if (i.proxyArp===false) L.push(" no ip proxy-arp");
+      if (i.tun && i.tun.ka) L.push(` keepalive ${i.tun.ka.period} ${i.tun.ka.retries}`);
       if (i.shut) L.push(" shutdown");
+      if (i.tun){ const t = i.tun; if (t.src) L.push(` tunnel source ${t.src}`); if (t.dst) L.push(` tunnel destination ${t.dst}`); if (t.mode && t.mode!=="gre ip") L.push(` tunnel mode ${t.mode}`); if (t.vrf) L.push(` tunnel vrf ${t.vrf}`); }
       L.push("!");
     }
-    if (st.ospf){ const o = st.ospf; L.push(`router ospf ${o.pid}`); if (o.rid) L.push(` router-id ${o.rid}`); if (o.refBw && o.refBw!==100) L.push(` auto-cost reference-bandwidth ${o.refBw}`);
+    for (const o of procs()){ L.push(`router ospf ${o.pid}${o.vrf ? " vrf " + o.vrf : ""}`); if (o.rid) L.push(` router-id ${o.rid}`); if (o.refBw && o.refBw!==100) L.push(` auto-cost reference-bandwidth ${o.refBw}`);
       if (o.passiveDefault){ L.push(" passive-interface default"); for (const n of (o.noPassive||[])) L.push(` no passive-interface ${n}`); } else for (const n of (o.passive||[])) L.push(` passive-interface ${n}`);
       for (const w of o.networks) L.push(` network ${w.net} ${w.wild} area ${w.area}`); if (o.defOrig) L.push(` default-information originate${o.defAlways?" always":""}`); L.push("!"); }
     if (st.defaultGw) L.push(`ip default-gateway ${st.defaultGw}`);
     { const N = window.NAT ? window.NAT.running(st.nat) : []; if (N.length) L.push(...N); }
     for (const r of (st.routes6||[])) L.push(`ipv6 route ${U(r.net)}/${r.len}${r.ios?" "+r.ios:""}${r.nh?" "+U(r.nh):""}${r.ad?" "+r.ad:""}`);
-    for (const r of st.routes.slice().sort((x,y)=>toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.ad?" "+r.ad:""}`);
+    for (const r of st.routes.slice().sort((x,y)=>(x.vrf||"").localeCompare(y.vrf||"") || toInt(x.net)-toInt(y.net) || maskLen(x.mask)-maskLen(y.mask))) L.push(`ip route ${r.vrf ? "vrf " + r.vrf + " " : ""}${r.net} ${r.mask}${r.ios?" "+r.ios:""}${r.nh?" "+r.nh:""}${r.global?" global":""}${r.ad?" "+r.ad:""}`);
     { const A = window.ACL ? window.ACL.running(st.acl) : []; if (A.length) L.push("!", ...A); }
     for (const [n, E] of Object.entries(st.arpAcls)){ L.push(`arp access-list ${n}`); for (const e of E) L.push(` ${e.action} ip host ${e.ip} mac host ${e.mac}`); }
     if (st.dnsServer) L.push("ip dns server");
@@ -306,7 +346,7 @@ function ios2Env(opts){
   }
   function ipIntBrief(){
     let o = "Interface              IP-Address      OK? Method Status                Protocol\n";
-    for (const n of ifNames()){ const i = st.intfs[n]; const s = i.shut ? "administratively down" : (up(n) || (i.mode==="svi" && st.vlans[i.vlan])) ? "up" : "down";   // an SVI with no live port in its VLAN is up/down
+    for (const n of ifNames()){ const i = st.intfs[n]; const s = i.shut ? "administratively down" : (up(n) || i.tun || (i.mode==="svi" && st.vlans[i.vlan])) ? "up" : "down";   // an SVI with no live port in its VLAN is up/down
       o += pad(n,23) + pad(i.ip||"unassigned",16) + (i.dhcpClient?"YES DHCP   ":i.ip?"YES manual ":"YES unset  ") + pad(s,22) + (up(n)?"up":"down") + "\n"; }
     return o.trimEnd();
   }
@@ -326,6 +366,13 @@ function ios2Env(opts){
     const i = st.intfs[n], link = up(n), c = hooks.counters(n) || {};
     const l1 = i.shut ? "administratively down" : (link || (i.mode==="svi" && st.vlans[i.vlan])) ? "up" : "down";
     if (i.errdis) return `${n} is down, line protocol is down (err-disabled)\n  Hardware is Gigabit Ethernet, address is ${i.mac} (bia ${i.mac})${i.desc?`\n  Description: ${i.desc}`:""}\n  (err-disabled by ${i.errdis}: shutdown then no shutdown to recover, after fixing the cause)`;
+    if (i.tun){ const t = i.tun, s = tunSrc(n) || {}, ka = t.ka;
+      return [`${n} is ${i.shut ? "administratively down" : "up"}, line protocol is ${link ? "up" : "down"}`, "  Hardware is Tunnel", ...(i.desc ? [`  Description: ${i.desc}`] : []),
+        ...(i.ip ? [`  Internet address is ${i.ip}/${maskLen(i.mask)}`] : []), `  MTU 9976 bytes, BW ${i.bw || 100} Kbit/sec, DLY 50000 usec,`, "     reliability 255/255, txload 1/255, rxload 1/255",
+        "  Encapsulation TUNNEL, loopback not set", ka ? `  Keepalive set (${ka.period} sec), retries ${ka.retries}` : "  Keepalive not set",
+        `  Tunnel source ${s.ip || "UNKNOWN"}${s.ios ? ` (${s.ios})` : ""}${t.dst ? `, destination ${t.dst}` : ""}`, "  Tunnel protocol/transport GRE/IP", "    Key disabled, sequencing disabled", "    Checksumming of packets disabled",
+        "  Tunnel TTL 255, Fast tunneling enabled", "  Tunnel transport MTU 1476 bytes", "  Tunnel transmit bandwidth 8000 (kbps)", "  Tunnel receive bandwidth 8000 (kbps)",
+        `  Last input ${link ? "00:00:02" : "never"}, output ${link ? "00:00:02" : "never"}, output hang never`].join("\n"); }
     const hw = i.mode==="svi" ? "Ethernet SVI" : i.loop ? "Loopback" : "Gigabit Ethernet";
     const lines = [`${n} is ${l1}, line protocol is ${link?"up":"down"}${i.mode!=="svi"&&!i.loop&&kind==="switch"?` (${i.shut?"disabled":link?"connected":"notconnect"})`:""}`,
       `  Hardware is ${hw}${i.mac?`, address is ${i.mac} (bia ${i.mac})`:""}`];
@@ -390,10 +437,10 @@ function ios2Env(opts){
     for (const r of rows) o += pad(r.id,20) + pad(short(r.local),15) + pad("120",11) + pad(r.cap.includes("R")?"R":"B",16) + short(r.remote) + "\n";
     return o + `\nTotal entries displayed: ${rows.length}`;
   }
-  function arpTable(only){
-    const rows = (hooks.arp() || []).filter(r=>!only || r.ip===only);
+  function arpTable(only, vrf){   // one ARP table per VRF (the bench keys a VRF's entries "ip%vrf")
+    const V = vrf || null, rows = (hooks.arp() || []).filter(r=>(r.vrf||null)===V && (!only || r.ip===only));
     let o = "Protocol  Address          Age (min)  Hardware Addr   Type   Interface\n";
-    for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && up(n) && (!only || i.ip===only)) o += `Internet  ${pad(i.ip,17)}${pad("-",11)}${pad(i.mac||"-",16)}ARPA   ${n}\n`; }
+    for (const n of ifNames()){ const i = st.intfs[n]; if (i.ip && !i.tun && up(n) && vrfOf(n)===V && (!only || i.ip===only)) o += `Internet  ${pad(i.ip,17)}${pad("-",11)}${pad(i.mac||"-",16)}ARPA   ${n}\n`; }
     for (const r of rows) o += `Internet  ${pad(r.ip,17)}${pad(r.age||"0",11)}${pad(r.mac,16)}ARPA   ${r.intf}\n`;
     return o.trimEnd();
   }
@@ -404,41 +451,53 @@ function ios2Env(opts){
   const ones32 = x => (x>>>0).toString(2).replace(/0/g,"").length;
   const ageOf = s => { let h = 7; for (const ch of String(s)) h = (h*31 + ch.charCodeAt(0)) % 2400; h += 300; return `00:${String(Math.floor(h/60)).padStart(2,"0")}:${String(h%60).padStart(2,"0")}`; };
   // OSPF, this router's side: which interfaces run it, in which area, at what cost, with which timers
-  function ospfAreaOf(n){ const i = st.intfs[n]; if (!i || !i.ip) return null;
-    if (i.ospfArea) return i.ospfArea.area;                       // interface method: ip ospf 1 area 0
-    if (!st.ospf) return null; let best = null;
-    for (const w of st.ospf.networks){ const care = (0xFFFFFFFF - toInt(w.wild))>>>0;   // network statements: the most specific match wins
+  // every OSPF process on this router: the global one (st.ospf) and the VRF ones (router ospf N vrf NAME), in process-ID order
+  const procs = () => [st.ospf, ...Object.values(st.ospfV||{})].filter(Boolean).sort((x,y)=>x.pid-y.pid);
+  const OS = () => (st.curOspf!=null && st.ospfV && st.ospfV[st.curOspf]) || st.ospf;   // the process a config-router command changes
+  const ridActive = (o, v) => { if (o===st.ospf){ if (v!==undefined) st.ospfRidActive = v; return st.ospfRidActive; } st.ospfRidV = st.ospfRidV || {}; if (v!==undefined) st.ospfRidV[o.pid] = v; return st.ospfRidV[o.pid]; };
+  const newProc = (pid, vrf) => Object.assign({pid, rid:null, networks:[], passive:[], noPassive:[], passiveDefault:false, defOrig:false, defAlways:false, refBw:100}, vrf ? {vrf} : {});
+  const procByPid = pid => procs().find(o=>o.pid===pid) || null;
+  const procOfVrf = v => v ? Object.values(st.ospfV||{}).find(o=>o.vrf===v) || null : st.ospf;
+  function ospfAreaOf(n, o){ o = o || st.ospf; const i = st.intfs[n]; if (!i || !i.ip || !o) return null;
+    if (vrfOf(n)!==(o.vrf||null)) return null;                    // a process only sees the interfaces of its own VRF
+    if (i.ospfArea) return i.ospfArea.pid===o.pid ? i.ospfArea.area : null;   // interface method: ip ospf 1 area 0
+    let best = null;
+    for (const w of o.networks){ const care = (0xFFFFFFFF - toInt(w.wild))>>>0;   // network statements: the most specific match wins
       if (((toInt(i.ip) & care)>>>0) === ((toInt(w.net) & care)>>>0)){ const b = ones32(care); if (!best || b > best.b) best = {area:w.area, b}; } }
     return best ? best.area : null; }
-  const ospfPassive = n => { const o = st.ospf; if (!o) return false; return o.passiveDefault ? !(o.noPassive||[]).includes(n) : (o.passive||[]).includes(n); };
-  const bwKbit = n => { const i = st.intfs[n]; if (i.bw) return i.bw; if (i.loop) return 8000000; if (i.sub) return bwKbit(i.parent); if (i.mode==="svi"||n.startsWith("Port-channel")) return 1000000;
+  const ospfPassive = (n, o) => { o = o || procOfIf(n); if (!o) return false; return o.passiveDefault ? !(o.noPassive||[]).includes(n) : (o.passive||[]).includes(n); };
+  const procOfIf = n => procs().find(o=>ospfAreaOf(n, o)!=null) || st.ospf;
+  const bwKbit = n => { const i = st.intfs[n]; if (i.bw) return i.bw; if (i.loop) return 8000000; if (i.tun) return 100; if (i.sub) return bwKbit(i.parent); if (i.mode==="svi"||n.startsWith("Port-channel")) return 1000000;
     const c = hooks.counters(n) || {}; const sp = i.speed && i.speed!=="auto" ? i.speed : (c.speed || 1000); return sp*1000; };
-  const ospfCost = n => { const i = st.intfs[n]; if (i.ospfCost) return i.ospfCost; const ref = (st.ospf && st.ospf.refBw) || 100; return Math.max(1, Math.floor(ref*1000 / bwKbit(n))); };
-  const ospfNetType = n => { const i = st.intfs[n]; if (i.ospfNet==="point-to-point") return "POINT_TO_POINT"; return i.loop ? "LOOPBACK" : "BROADCAST"; };
-  function ospfRidPick(){ const o = st.ospf; if (!o) return null; if (o.rid) return o.rid;
-    const hi = arr => arr.sort((a,b)=>toInt(b)-toInt(a))[0] || null;   // highest loopback IP, else highest active interface IP
-    return hi(ifNames().filter(n=>st.intfs[n].loop && st.intfs[n].ip && up(n)).map(n=>st.intfs[n].ip)) || hi(ifNames().filter(n=>!st.intfs[n].loop && st.intfs[n].ip && up(n)).map(n=>st.intfs[n].ip)); }
-  function ospfRid(){ if (!st.ospf || !routingOn()) return null; if (!st.ospfRidActive) st.ospfRidActive = ospfRidPick(); return st.ospfRidActive; }   // chosen when the process starts; changes only on reload / clear ip ospf process
-  function ospfIfaces(){ if (!st.ospf || !routingOn()) return [];
-    return ifNames().map(n=>{ const i = st.intfs[n]; const area = ospfAreaOf(n); if (area==null) return null; const hello = i.ospfHello || 10;
-      return {ios:n, ip:i.ip, mask:i.mask, len:maskLen(i.mask), area, cost:ospfCost(n), prio: i.ospfPrio!=null ? i.ospfPrio : 1, hello, dead: i.ospfDead || hello*4,
-        net: ospfNetType(n), passive: ospfPassive(n), loop: !!i.loop, up: up(n), mac:i.mac, via: i.ospfArea ? "Interface Configuration" : "Network Statement"}; }).filter(Boolean); }
+  const ospfCost = (n, o) => { o = o || procOfIf(n); const i = st.intfs[n]; if (i.ospfCost) return i.ospfCost; const ref = (o && o.refBw) || 100; return Math.max(1, Math.floor(ref*1000 / bwKbit(n))); };
+  const ospfNetType = n => { const i = st.intfs[n]; if (i.ospfNet==="point-to-point") return "POINT_TO_POINT"; if (i.ospfNet==="broadcast") return "BROADCAST"; if (i.tun) return "POINT_TO_POINT"; return i.loop ? "LOOPBACK" : "BROADCAST"; };   // a GRE tunnel is point-to-point by default
+  function ospfRidPick(o){ o = o || st.ospf; if (!o) return null; if (o.rid) return o.rid; const V = o.vrf || null;
+    const hi = arr => arr.sort((a,b)=>toInt(b)-toInt(a))[0] || null;   // highest loopback IP, else highest active interface IP (a VRF process looks only at its VRF's interfaces)
+    return hi(ifNames().filter(n=>st.intfs[n].loop && st.intfs[n].ip && vrfOf(n)===V && up(n)).map(n=>st.intfs[n].ip)) || hi(ifNames().filter(n=>!st.intfs[n].loop && st.intfs[n].ip && vrfOf(n)===V && up(n)).map(n=>st.intfs[n].ip)); }
+  function ospfRid(o){ o = o || st.ospf; if (!o || !routingOn()) return null;   // chosen when the process starts; changes only on reload / clear ip ospf process
+    if (o===st.ospf){ if (!st.ospfRidActive) st.ospfRidActive = ospfRidPick(o); return st.ospfRidActive; }
+    st.ospfRidV = st.ospfRidV || {}; if (!st.ospfRidV[o.pid]) st.ospfRidV[o.pid] = ospfRidPick(o); return st.ospfRidV[o.pid]; }
+  function ospfIfaces(o){ o = o || st.ospf; if (!o || !routingOn()) return [];
+    return ifNames().map(n=>{ const i = st.intfs[n]; const area = ospfAreaOf(n, o); if (area==null) return null; const hello = i.ospfHello || 10;
+      return {ios:n, ip:i.ip, mask:i.mask, len:maskLen(i.mask), area, cost:ospfCost(n, o), prio: i.ospfPrio!=null ? i.ospfPrio : 1, hello, dead: i.ospfDead || hello*4,
+        net: ospfNetType(n), passive: ospfPassive(n, o), loop: !!i.loop, tun: !!i.tun, up: up(n), mac:i.mac, via: i.ospfArea ? "Interface Configuration" : "Network Statement", pid:o.pid}; }).filter(Boolean); }
   const areaStr = a => String(a);
   // static routes are installed only when they resolve: exit interface up, or the next hop reachable through another route
   function resolveStatic(r, cand){
     const len = maskLen(r.mask), base = {code: len===0 ? "S*" : "S", net:r.net, len, ad: r.ad || 1, metric:0};
     if (r.ios){ if (!st.intfs[r.ios] || !up(r.ios)) return null; return Object.assign(base, {nhs:[{ios:r.ios, nh:r.nh||null, cfgNh:r.nh||null, direct:!r.nh, full:!!r.nh}]}); }
-    const m = bestMatch(cand, r.nh, r.net+"/"+len); if (!m || m.code==="L") return null;
-    const via = m.nhs[0]; return Object.assign(base, {nhs:[{ios:via.ios, nh: via.nh || r.nh, cfgNh:r.nh}]});
+    const m = r.global ? bestMatch(ribAll(null), r.nh) : bestMatch(cand, r.nh, r.net+"/"+len); if (!m || m.code==="L") return null;   // "global": the next hop is looked up in the global table (route leaking)
+    const via = m.nhs[0]; return Object.assign(base, {nhs:[{ios:via.ios, nh: via.nh || r.nh, cfgNh:r.nh, global:!!r.global}]});
   }
   function bestMatch(entries, ip, skipKey){ let b = null; for (const e of entries){ if (skipKey && e.net+"/"+e.len===skipKey) continue; if (inNet(ip, e.net, e.len) && (!b || e.len > b.len || (e.len===b.len && e.ad < b.ad))) b = e; } return b; }
-  function ribAll(){
-    const cand = [];
-    for (const n of ifNames()){ const i = st.intfs[n]; if (!i.ip || !up(n)) continue; const len = maskLen(i.mask);
+  // one routing table per VRF (null = the global table); noTun = the underlay view a tunnel uses to reach its destination (nothing through a tunnel)
+  function ribAll(vrf, noTun){
+    const cand = [], V = vrf || null, isTun = n => !!(st.intfs[n] && st.intfs[n].tun);
+    for (const n of ifNames()){ const i = st.intfs[n]; if (!i.ip || vrfOf(n)!==V || (noTun && i.tun) || !up(n)) continue; const len = maskLen(i.mask);
       cand.push({code:"C", net:netOf(i.ip,i.mask), len, ad:0, metric:0, nhs:[{ios:n, nh:null}]});
       if (len<32) cand.push({code:"L", net:i.ip, len:32, ad:0, metric:0, nhs:[{ios:n, nh:null}]}); }
-    if (routingOn()) for (const r of ((hooks.ospfRoutes && hooks.ospfRoutes()) || [])) cand.push({code:r.type, net:r.net, len:r.len, ad:110, metric:r.cost, fwd:r.fwd, nhs:r.nhs.map(x=>({ios:x.ios, nh:x.nh, from:x.from}))});
-    if (routingOn()){ let pend = st.routes.concat(ifNames().filter(n=>{ const i = st.intfs[n]; return i.dhcpClient && i.ip && i.dhcpGw && up(n); }).map(n=>({net:"0.0.0.0", mask:"0.0.0.0", nh:st.intfs[n].dhcpGw, ad:254, dhcp:true})));
+    if (routingOn()) for (const r of ((hooks.ospfRoutes && hooks.ospfRoutes(V)) || [])){ const nhs = r.nhs.filter(x=>!(noTun && isTun(x.ios))); if (nhs.length) cand.push({code:r.type, net:r.net, len:r.len, ad:110, metric:r.cost, fwd:r.fwd, nhs:nhs.map(x=>({ios:x.ios, nh:x.nh, from:x.from}))}); }
+    if (routingOn()){ let pend = st.routes.filter(r=>(r.vrf||null)===V && !(noTun && r.ios && isTun(r.ios))).concat(ifNames().filter(n=>{ const i = st.intfs[n]; return i.dhcpClient && i.ip && i.dhcpGw && vrfOf(n)===V && up(n); }).map(n=>({net:"0.0.0.0", mask:"0.0.0.0", nh:st.intfs[n].dhcpGw, ad:254, dhcp:true})));
       for (let pass=0; pass<4 && pend.length; pass++){ const left = []; for (const r of pend){ const e = resolveStatic(r, cand); if (e) cand.push(e); else left.push(r); } if (left.length===pend.length) break; pend = left; } }
     const best = new Map();   // per prefix: the lowest administrative distance wins; equal-distance statics share the load
     for (const c of cand){ const k = c.net+"/"+c.len, b = best.get(k);
@@ -447,11 +506,17 @@ function ios2Env(opts){
     return [...best.values()];
   }
   // forwarding decision: longest match, then (equal-cost) one path per destination like CEF
-  st.lookup = dst => { if (!routingOn()) return null; const e = bestMatch(ribAll(), dst); if (!e) return null;
-    const x = e.nhs[e.nhs.length>1 ? toInt(dst) % e.nhs.length : 0]; return {ios:x.ios, nh: x.nh || dst, code:e.code, net:e.net, len:e.len}; };
-  st.rib = () => ribAll();
-  st.ospfInfo = () => st.ospf && routingOn() ? {pid:st.ospf.pid, rid:ospfRid(), ifaces:ospfIfaces(), defOrig:st.ospf.defOrig, defAlways:st.ospf.defAlways, resets:st.ospfResets||0,
-    hasDefault: ribAll().some(e=>e.len===0 && e.code!=="O*E2")} : null;
+  function lookupIn(dst, vrf, noTun){ if (!routingOn()) return null; const e = bestMatch(ribAll(vrf, noTun), dst); if (!e) return null;
+    const x = e.nhs[e.nhs.length>1 ? toInt(dst) % e.nhs.length : 0]; return {ios:x.ios, nh: x.nh || dst, code:e.code, net:e.net, len:e.len}; }
+  st.lookup = (dst, vrf) => lookupIn(dst, vrf || null, false);
+  st.lookupUnder = (dst, vrf) => lookupIn(dst, vrf || null, true);   // the underlay view (what a tunnel's destination check uses)
+  st.rib = vrf => ribAll(vrf || null);
+  st.vrfNames = () => Object.keys(st.vrfs).sort();
+  st.ownIn = (ip, vrf) => ifNames().find(n=>st.intfs[n].ip===ip && vrfOf(n)===(vrf||null) && !st.intfs[n].shut) || null;
+  const procInfo = o => ({pid:o.pid, vrf:o.vrf||null, rid:ospfRid(o), ifaces:ospfIfaces(o), defOrig:o.defOrig, defAlways:o.defAlways, resets:st.ospfResets||0,
+    hasDefault: ribAll(o.vrf||null).some(e=>e.len===0 && e.code!=="O*E2")});
+  st.ospfInfo = () => st.ospf && routingOn() ? procInfo(st.ospf) : null;
+  st.ospfInfoAll = () => routingOn() ? procs().map(procInfo) : [];   // the global process and every VRF process (each is its own OSPF router)
   st.hsrpGroups = () => { const out = []; for (const n of ifNames()){ const i = st.intfs[n]; if (i.hsrp) for (const [g, h] of Object.entries(i.hsrp)) if (h.ip) out.push({ios:n, grp:+g, vip:h.ip, prio: h.prio!=null ? h.prio : 100, preempt:!!h.preempt, ver: i.hsrpVer||1, ip:i.ip, up: up(n) && !!i.ip && sameNet(i.ip, h.ip, i.mask), badVip: !!i.ip && !sameNet(i.ip, h.ip, i.mask)}); } return out; };
   /* ---------- IPv6: link-local + global addresses, a separate RIB (C, L, S), longest match, ND neighbours from the bench ---------- */
   const I6 = window.IP6;
@@ -548,48 +613,49 @@ function ios2Env(opts){
     if (e.code[0]==="S") return e.nhs.map((h,k)=>{ const body = h.direct ? `is directly connected, ${h.ios}` : `[${e.ad}/0] via ${h.cfgNh||h.nh}${h.full ? ", "+h.ios : ""}`; return (k ? ind : `${code}${pfx} `) + body; }).join("\n");
     return e.nhs.map((h,k)=>(k ? ind : `${code}${pfx} `) + `[110/${e.metric}] via ${h.nh}, ${ageOf(pfx)}, ${h.ios}`).join("\n");
   }
-  function routeEntryFor(ip){
-    if (ip==="0.0.0.0"){ const d = ribAll().find(x=>x.len===0); if (!d) return "% Network not in table";   // asking for the default route itself
+  function routeEntryFor(ip, vrf){ const V = vrf || null, rib = () => ribAll(V), opid = (procOfVrf(V) || {pid:1}).pid;
+    if (ip==="0.0.0.0"){ const d = rib().find(x=>x.len===0); if (!d) return "% Network not in table";   // asking for the default route itself
       const blk = d.nhs.map((h,k)=>`  ${k?" ":"*"} ` + (d.code[0]==="S" ? (h.direct ? `directly connected, via ${h.ios}` : (h.cfgNh||h.nh) + (h.full ? `, via ${h.ios}` : "")) + "\n      Route metric is 0, traffic share count is 1"
         : `${h.nh}, from ${h.from||h.nh}, ${ageOf("0.0.0.0/0")} ago, via ${h.ios}\n      Route metric is ${d.metric}, traffic share count is 1\n      Route tag 1`)).join("\n");
       if (d.code[0]==="S") return `Routing entry for 0.0.0.0/0, supernet\n  Known via "static", distance ${d.ad}, metric 0, candidate default path\n  Routing Descriptor Blocks:\n` + blk;
-      return `Routing entry for 0.0.0.0/0, supernet\n  Known via "ospf ${st.ospf?st.ospf.pid:1}", distance 110, metric ${d.metric}, candidate default path\n  Tag 1, type extern 2, forward metric ${d.fwd||1}\n  Last update from ${d.nhs[0].nh} on ${d.nhs[0].ios}, ${ageOf("0.0.0.0/0")} ago\n  Routing Descriptor Blocks:\n` + blk; }
-    const e = bestMatch(ribAll().filter(x=>x.len>0), ip);   // like IOS: a host lookup that only the default matches is "not in table"
+      return `Routing entry for 0.0.0.0/0, supernet\n  Known via "ospf ${opid}", distance 110, metric ${d.metric}, candidate default path\n  Tag 1, type extern 2, forward metric ${d.fwd||1}\n  Last update from ${d.nhs[0].nh} on ${d.nhs[0].ios}, ${ageOf("0.0.0.0/0")} ago\n  Routing Descriptor Blocks:\n` + blk; }
+    const e = bestMatch(rib().filter(x=>x.len>0), ip);   // like IOS: a host lookup that only the default matches is "not in table"
     if (!e){ const f = +ip.split(".")[0], p = f<128 ? 8 : f<192 ? 16 : 24, major = netOf(ip, [0,0,0,0].map((_,k)=>k<p/8?255:0).join("."));
-      return ribAll().some(x=>x.len>=p && netOf(x.net, [0,0,0,0].map((_,k)=>k<p/8?255:0).join("."))===major) ? "% Subnet not in table" : "% Network not in table"; }
+      return rib().some(x=>x.len>=p && netOf(x.net, [0,0,0,0].map((_,k)=>k<p/8?255:0).join("."))===major) ? "% Subnet not in table" : "% Network not in table"; }
     const pfx = `${e.net}/${e.len}`, tail = "\n      Route metric is ";
     if (e.code==="C"||e.code==="L") return `Routing entry for ${pfx}\n  Known via "connected", distance 0, metric 0 (connected, via interface)\n  Routing Descriptor Blocks:\n  * directly connected, via ${e.nhs[0].ios}${tail}0, traffic share count is 1`;
     if (e.code[0]==="S") return `Routing entry for ${pfx}\n  Known via "static", distance ${e.ad}, metric 0${e.nhs.some(h=>h.direct)?" (connected)":""}\n  Routing Descriptor Blocks:\n` +
       e.nhs.map((h,k)=>`  ${k?" ":"*"} ${h.direct ? `directly connected, via ${h.ios}` : (h.cfgNh||h.nh) + (h.full ? `, via ${h.ios}` : "")}${tail}0, traffic share count is 1`).join("\n");
     const type = e.code==="O IA" ? "inter area" : /E2/.test(e.code) ? `extern 2, forward metric ${e.fwd||1}` : "intra area";
-    return `Routing entry for ${pfx}\n  Known via "ospf ${st.ospf?st.ospf.pid:1}", distance 110, metric ${e.metric}, type ${type}\n  Last update from ${e.nhs[0].nh} on ${e.nhs[0].ios}, ${ageOf(pfx)} ago\n  Routing Descriptor Blocks:\n` +
+    return `Routing entry for ${pfx}\n  Known via "ospf ${opid}", distance 110, metric ${e.metric}, type ${type}\n  Last update from ${e.nhs[0].nh} on ${e.nhs[0].ios}, ${ageOf(pfx)} ago\n  Routing Descriptor Blocks:\n` +
       e.nhs.map((h,k)=>`  ${k?" ":"*"} ${h.nh}, from ${h.from||h.nh}, ${ageOf(pfx)} ago, via ${h.ios}${tail}${e.metric}, traffic share count is 1`).join("\n");
   }
 
   /* ---------- OSPF show commands (neighbours, DR/BDR and routes come from the bench through hooks) ---------- */
   const ospfIfState = (n, f) => { const x = hooks.ospfIf ? hooks.ospfIf(n) : null; if (x) return x;
-    return f.loop && f.net==="LOOPBACK" ? {state:"LOOP", nbrs:[], adj:0} : f.net==="POINT_TO_POINT" ? {state:"P2P", nbrs:[], adj:0} : {state:"DR", dr:{rid:ospfRid(), ip:f.ip}, bdr:null, nbrs:[], adj:0}; };
+    return f.loop && f.net==="LOOPBACK" ? {state:"LOOP", nbrs:[], adj:0} : f.net==="POINT_TO_POINT" ? {state:"P2P", nbrs:[], adj:0} : {state:"DR", dr:{rid:ospfRid(procByPid(f.pid)), ip:f.ip}, bdr:null, nbrs:[], adj:0}; };
+  const allOspfIfs = () => procs().flatMap(o=>ospfIfaces(o));
   function ospfNeighbors(){
-    if (!st.ospf) return "";
-    const rows = (hooks.ospfNbrs ? hooks.ospfNbrs() : []) || [];
+    if (!procs().length) return "";
+    const rows = (hooks.ospfNbrs ? hooks.ospfNbrs() : []) || [];   // every process's neighbours, one table (like IOS)
     let o = "\nNeighbor ID     Pri   State           Dead Time   Address         Interface\n";
     for (const r of rows) o += pad(r.rid,16) + String(r.prio).padStart(3) + "   " + pad(r.state,16) + pad(`00:00:${String(Math.max(1, r.dead - 1 - (toInt(r.ip)%7))).padStart(2,"0")}`,12) + pad(r.ip,16) + r.ios + "\n";
     return o.replace(/\n$/,"");
   }
   function ospfIntBrief(){
-    const fs = ospfIfaces(); if (!fs.length) return "";
+    const fs = allOspfIfs(); if (!fs.length) return "";
     let o = "Interface    PID   Area            IP Address/Mask    Cost  State Nbrs F/C\n";
     for (const f of fs){ const x = ospfIfState(f.ios, f); const st8 = !f.up ? "DOWN" : x.state==="DROTHER" ? "DROTH" : x.state;   // the brief view's State column is 5 wide
-      o += pad(short(f.ios),13) + pad(st.ospf.pid,6) + pad(areaStr(f.area),16) + pad(`${f.ip}/${f.loop && f.net==="LOOPBACK" ? 32 : f.len}`,19) + pad(f.cost,6) + pad(st8,6) + `${x.adj||0}/${(x.nbrs||[]).length}\n`; }
+      o += pad(short(f.ios),13) + pad(f.pid,6) + pad(areaStr(f.area),16) + pad(`${f.ip}/${f.loop && f.net==="LOOPBACK" ? 32 : f.len}`,19) + pad(f.cost,6) + pad(st8,6) + `${x.adj||0}/${(x.nbrs||[]).length}\n`; }
     return o.replace(/\n$/,"");
   }
   function ospfIntDetail(only){
-    const fs = ospfIfaces().filter(f=>!only || f.ios===only);
+    const fs = allOspfIfs().filter(f=>!only || f.ios===only);
     if (only && !fs.length){ const i = st.intfs[only]; return `${only} is ${i.shut?"administratively down":up(only)?"up":"down"}, line protocol is ${up(only)?"up":"down"}\n  OSPF not enabled on this interface`; }
-    return fs.map(f=>{ const i = st.intfs[f.ios], x = ospfIfState(f.ios, f), rid = ospfRid();
+    return fs.map(f=>{ const i = st.intfs[f.ios], x = ospfIfState(f.ios, f), rid = ospfRid(procByPid(f.pid));
       const L = [`${f.ios} is ${i.shut?"administratively down":f.up?"up":"down"}, line protocol is ${f.up?"up":"down"}`,
         `  Internet Address ${f.ip}/${f.len}, Interface ID ${ifNames().indexOf(f.ios)+1}, Area ${areaStr(f.area)}`, `  Attached via ${f.via==="Interface Configuration" ? "Interface Enable" : f.via}`,
-        `  Process ID ${st.ospf.pid}, Router ID ${rid}, Network Type ${f.net}, Cost: ${f.cost}`,
+        `  Process ID ${f.pid}, Router ID ${rid}, Network Type ${f.net}, Cost: ${f.cost}`,
         "  Topology-MTID    Cost    Disabled    Shutdown      Topology Name", `        0           ${pad(f.cost,10)}no          no            Base`];
       if (f.via==="Interface Configuration") L.push("  Enabled by interface config, including secondary ip addresses");
       if (f.net==="LOOPBACK"){ L.push("  Loopback interface is treated as a stub Host"); return L.join("\n"); }
@@ -606,43 +672,43 @@ function ios2Env(opts){
       L.push("  Suppress hello for 0 neighbor(s)");
       return L.join("\n"); }).join("\n");
   }
-  function ospfAreas(){ return [...new Set(ospfIfaces().map(f=>f.area))].sort((a,b)=>a-b); }
-  function ipProtocols(){
-    if (!st.ospf || !routingOn()) return "";
-    const o = st.ospf, fs = ospfIfaces(), areas = ospfAreas(), info = hooks.ospfSelf ? hooks.ospfSelf() || {} : {};
-    const L = [`Routing Protocol is "ospf ${o.pid}"`, "  Outgoing update filter list for all interfaces is not set", "  Incoming update filter list for all interfaces is not set", `  Router ID ${ospfRid()}`];
+  function ospfAreas(o){ return [...new Set(ospfIfaces(o).map(f=>f.area))].sort((a,b)=>a-b); }
+  function ipProtocols(vrf){
+    const o = procOfVrf(vrf || null); if (!o || !routingOn()) return "";
+    const fs = ospfIfaces(o), areas = ospfAreas(o), info = hooks.ospfSelf ? hooks.ospfSelf(o.vrf||null) || {} : {};
+    const L = [`Routing Protocol is "ospf ${o.pid}"`, "  Outgoing update filter list for all interfaces is not set", "  Incoming update filter list for all interfaces is not set", `  Router ID ${ospfRid(o)}`];
     if (info.abr) L.push("  It is an area border router"); if (o.defOrig) L.push("  It is an autonomous system boundary router", " Redistributing External Routes from,");
     L.push(`  Number of areas in this router is ${areas.length}. ${areas.length} normal 0 stub 0 nssa`, "  Maximum path: 4", "  Routing for Networks:");
     for (const w of o.networks) L.push(`    ${w.net} ${w.wild} area ${areaStr(w.area)}`);
     const expl = fs.filter(f=>f.via==="Interface Configuration"); if (expl.length){ for (const a of [...new Set(expl.map(f=>f.area))]){ L.push(`  Routing on Interfaces Configured Explicitly (Area ${areaStr(a)}):`); expl.filter(f=>f.area===a).forEach(f=>L.push(`    ${f.ios}`)); } }
-    const pas = ifNames().filter(n=>ospfPassive(n) && st.intfs[n].ip); if (pas.length){ L.push("  Passive Interface(s):"); pas.forEach(n=>L.push(`    ${n}`)); }
+    const pas = ifNames().filter(n=>ospfPassive(n, o) && st.intfs[n].ip && vrfOf(n)===(o.vrf||null)); if (pas.length){ L.push("  Passive Interface(s):"); pas.forEach(n=>L.push(`    ${n}`)); }
     L.push("  Routing Information Sources:", "    Gateway         Distance      Last Update");
-    const srcs = [...new Set(((hooks.ospfRoutes && hooks.ospfRoutes()) || []).flatMap(r=>r.nhs.map(x=>x.from)).filter(Boolean))].sort((a,b)=>toInt(a)-toInt(b));
+    const srcs = [...new Set(((hooks.ospfRoutes && hooks.ospfRoutes(o.vrf||null)) || []).flatMap(r=>r.nhs.map(x=>x.from)).filter(Boolean))].sort((a,b)=>toInt(a)-toInt(b));
     for (const g of srcs) L.push(`    ${pad(g,16)}${String(110).padStart(8)}      ${ageOf(g)}`);
     L.push(`  Distance: (default is 110)`);
     return L.join("\n");
   }
   function ospfProcess(){
-    if (!st.ospf || !routingOn()) return "";
-    const o = st.ospf, rid = ospfRid(), info = hooks.ospfSelf ? hooks.ospfSelf() || {} : {}, fs = ospfIfaces();
-    const L = [` Routing Process "ospf ${o.pid}" with ID ${rid}`, " Start time: 00:00:41.112, Time elapsed: 01:12:07.418", " Supports only single TOS(TOS0) routes", " Supports opaque LSA", " Supports Link-local Signaling (LLS)", " Supports area transit capability"];
-    if (info.abr) L.push(" It is an area border router"); if (o.defOrig) L.push(" It is an autonomous system boundary router");
-    L.push(" Router is not originating router-LSAs with maximum metric", " Initial SPF schedule delay 50 msecs", " Minimum hold time between two consecutive SPFs 200 msecs", " Maximum wait time between two consecutive SPFs 5000 msecs",
-      ` Number of areas in this router is ${ospfAreas().length}. ${ospfAreas().length} normal 0 stub 0 nssa`, ` Reference bandwidth unit is ${o.refBw||100} mbps`);
-    for (const a of ospfAreas()){ const inA = fs.filter(f=>f.area===a); L.push(`    Area ${a===0?"BACKBONE(0)":a}`, `        Number of interfaces in this area is ${inA.length}${inA.some(f=>f.loop)?` (${inA.filter(f=>f.loop).length} loopback)`:""}`, "        Area has no authentication", `        SPF algorithm last executed 00:0${(toInt(rid||"0.0.0.1")%8)+1}:12.448 ago`, `        SPF algorithm executed ${(info.spfRuns||3)} times`); }
-    return L.join("\n");
+    if (!procs().length || !routingOn()) return "";
+    return procs().map(o=>{ const rid = ospfRid(o), info = hooks.ospfSelf ? hooks.ospfSelf(o.vrf||null) || {} : {}, fs = ospfIfaces(o), areas = ospfAreas(o);
+      const L = [` Routing Process "ospf ${o.pid}" with ID ${rid}`, " Start time: 00:00:41.112, Time elapsed: 01:12:07.418", " Supports only single TOS(TOS0) routes", " Supports opaque LSA", " Supports Link-local Signaling (LLS)", " Supports area transit capability"];
+      if (info.abr) L.push(" It is an area border router"); if (o.defOrig) L.push(" It is an autonomous system boundary router");
+      L.push(" Router is not originating router-LSAs with maximum metric", " Initial SPF schedule delay 50 msecs", " Minimum hold time between two consecutive SPFs 200 msecs", " Maximum wait time between two consecutive SPFs 5000 msecs",
+        ` Number of areas in this router is ${areas.length}. ${areas.length} normal 0 stub 0 nssa`, ` Reference bandwidth unit is ${o.refBw||100} mbps`);
+      for (const a of areas){ const inA = fs.filter(f=>f.area===a); L.push(`    Area ${a===0?"BACKBONE(0)":a}`, `        Number of interfaces in this area is ${inA.length}${inA.some(f=>f.loop)?` (${inA.filter(f=>f.loop).length} loopback)`:""}`, "        Area has no authentication", `        SPF algorithm last executed 00:0${(toInt(rid||"0.0.0.1")%8)+1}:12.448 ago`, `        SPF algorithm executed ${(info.spfRuns||3)} times`); }
+      return L.join("\n"); }).join("\n\n");
   }
   function ospfDatabase(){
-    if (!st.ospf || !routingOn()) return "";
-    const rid = ospfRid(), db = (hooks.ospfLsdb && hooks.ospfLsdb()) || {areas:{}, ext:[]};
+    if (!procs().length || !routingOn()) return "";
     const hdr = "Link ID         ADV Router      Age         Seq#       Checksum", row = (id, adv, extra) => pad(id,16) + pad(adv,16) + pad(String(100 + toInt(id)%1500),12) + "0x80000" + String(1 + toInt(adv)%9).padStart(3,"0") + " 0x00" + ((toInt(id)+toInt(adv))%65536).toString(16).toUpperCase().padStart(4,"0") + (extra!=null ? " " + extra : "");
-    const L = ["", `            OSPF Router with ID (${rid}) (Process ID ${st.ospf.pid})`];
-    for (const a of ospfAreas()){ const A = db.areas[a] || {routers:[], nets:[], sums:[]};
-      L.push("", `                Router Link States (Area ${a})`, "", hdr + " Link count"); for (const r of A.routers) L.push(row(r.rid, r.rid, r.links));
-      if (A.nets.length){ L.push("", `                Net Link States (Area ${a})`, "", hdr); for (const nn of A.nets) L.push(row(nn.ip, nn.rid)); }
-      if (A.sums.length){ L.push("", `                Summary Net Link States (Area ${a})`, "", hdr); for (const sm of A.sums) L.push(row(sm.net, sm.rid)); } }
-    if (db.ext.length){ L.push("", "                Type-5 AS External Link States", "", hdr + " Tag"); for (const x of db.ext) L.push(row(x.net, x.rid, 1)); }
-    return L.join("\n");
+    return procs().map(o=>{ const rid = ospfRid(o), db = (hooks.ospfLsdb && hooks.ospfLsdb(o.vrf||null)) || {areas:{}, ext:[]};
+      const L = ["", `            OSPF Router with ID (${rid}) (Process ID ${o.pid})`];
+      for (const a of ospfAreas(o)){ const A = db.areas[a] || {routers:[], nets:[], sums:[]};
+        L.push("", `                Router Link States (Area ${a})`, "", hdr + " Link count"); for (const r of A.routers) L.push(row(r.rid, r.rid, r.links));
+        if (A.nets.length){ L.push("", `                Net Link States (Area ${a})`, "", hdr); for (const nn of A.nets) L.push(row(nn.ip, nn.rid)); }
+        if (A.sums.length){ L.push("", `                Summary Net Link States (Area ${a})`, "", hdr); for (const sm of A.sums) L.push(row(sm.net, sm.rid)); } }
+      if (db.ext.length){ L.push("", "                Type-5 AS External Link States", "", hdr + " Tag"); for (const x of db.ext) L.push(row(x.net, x.rid, 1)); }
+      return L.join("\n"); }).join("\n");
   }
   function standbyBrief(){
     const gs = st.hsrpGroups(); if (!gs.length) return "";
@@ -658,10 +724,10 @@ function ios2Env(opts){
         `  Preemption ${g.preempt?"enabled":"disabled"}`, `  Active router is ${x.active}${x.activePrio!=null && x.active!=="local" ? `, priority ${x.activePrio} (expires in 8.912 sec)` : ""}`,
         `  Standby router is ${x.standby}${x.standbyPrio!=null && x.standby!=="local" ? `, priority ${x.standbyPrio} (expires in 9.360 sec)` : ""}`, `  Priority ${g.prio} (${g.prio===100?"default 100":"configured "+g.prio})`, `  Group name is "hsrp-${short(g.ios)}-${g.grp}" (default)`].join("\n"); }).join("\n");
   }
-  function routeTable(only){
+  function routeTable(only, vrf){
     if (kind==="switch" && !st.ipRouting) return `Default gateway is ${st.defaultGw||"not set"}\n\nHost               Gateway           Last Use    Total Uses  Interface\nICMP redirect cache is empty`;   // a Layer 2 switch has no routing table until "ip routing"
-    const rib = ribAll(), def = rib.find(e=>e.len===0);
-    const L = ["Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP", "       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area",
+    const rib = ribAll(vrf || null), def = rib.find(e=>e.len===0);
+    const L = [...(vrf ? ["", `Routing Table: ${vrf}`] : []), "Codes: L - local, C - connected, S - static, R - RIP, M - mobile, B - BGP", "       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area",
       "       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2", "       E1 - OSPF external type 1, E2 - OSPF external type 2",
       "       i - IS-IS, su - IS-IS summary, L1 - IS-IS level-1, L2 - IS-IS level-2", "       ia - IS-IS inter area, * - candidate default, U - per-user static route",
       "       o - ODR, P - periodic downloaded static route, H - NHRP, l - LISP", "       a - application route", "       + - replicated route, % - next hop override, p - overrides from PfR", "",
@@ -705,9 +771,9 @@ function ios2Env(opts){
     X("show version", ()=>version()), X("show ip interface brief", ()=>ipIntBrief()), X("show interfaces status", ()=>kind==="switch"?intStatus():inv()),
     X("show interfaces", ()=>ifNames().filter(n=>!st.intfs[n].loop||true).map(showInt).join("\n")),
     X("show ip interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return "% Invalid input detected at '^' marker."; const i = st.intfs[n], l = up(n);
-      const L = [`${n} is ${i.shut?"administratively down":(l||(i.mode==="svi"&&st.vlans[i.vlan]))?"up":"down"}, line protocol is ${l?"up":"down"}`];
+      const L = [`${n} is ${i.shut?"administratively down":(l||i.tun||(i.mode==="svi"&&st.vlans[i.vlan]))?"up":"down"}, line protocol is ${l?"up":"down"}`];
       if (!i.ip) L.push("  Internet protocol processing disabled");
-      else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", "  MTU is 1500 bytes", ...(i.helpers && i.helpers.length ? (i.helpers.length===1 ? ["  Helper address is " + i.helpers[0]] : ["  Helper addresses are " + i.helpers[0], ...i.helpers.slice(1).map(h=>"                       " + h)]) : ["  Helper address is not set"]),
+      else L.push(`  Internet address is ${i.ip}/${maskLen(i.mask)}`, "  Broadcast address is 255.255.255.255", "  Address determined by setup command", `  MTU is ${i.ipMtu || (i.tun ? 1476 : 1500)} bytes`, ...(i.helpers && i.helpers.length ? (i.helpers.length===1 ? ["  Helper address is " + i.helpers[0]] : ["  Helper addresses are " + i.helpers[0], ...i.helpers.slice(1).map(h=>"                       " + h)]) : ["  Helper address is not set"]),
         "  Directed broadcast forwarding is disabled", "  Outgoing Common access list is not set", `  Outgoing access list is ${i.aclOut || "not set"}`, "  Inbound Common access list is not set", `  Inbound  access list is ${i.aclIn || "not set"}`,
         `  Proxy ARP is ${i.proxyArp===false?"disabled":"enabled"}`, "  Local Proxy ARP is disabled", "  Security level is default", "  Split horizon is enabled", "  ICMP redirects are always sent", `  ICMP unreachables are ${i.noUnreach ? "never" : "always"} sent`, "  ICMP mask replies are never sent");
       return L.join("\n"); }),
@@ -774,6 +840,15 @@ function ios2Env(opts){
         return `Temp IP addr: ${i.ip}  for peer on Interface: ${n}\nTemp  sub net mask: ${i.mask}\n   DHCP Lease server: ${z.server}, state: 3 Bound\n   DHCP transaction id: 1A2B\n   Lease: ${z.secs} secs,  Renewal: ${Math.floor(z.secs/2)} secs,  Rebind: ${Math.floor(z.secs*7/8)} secs\nTemp default-gateway addr: ${i.dhcpGw||"0.0.0.0"}\n   Next timer fires after: 11:59:38\n   Retry count: 0   Client-ID: ${cidText(n)}\n   Client-ID hex dump: ${cidHex(n)}\n   Hostname: ${st.host}`; }).join("\n"); }),
     X("show arp", ()=>arpTable()), X("show ip arp", ()=>arpTable()), X("show ip arp A:IP", a=>arpTable(a[0])), X("show arp A:IP", a=>arpTable(a[0])), X("show ip route", ()=>routeTable()), X("show ip route connected", ()=>routeTable("connected")), X("show ip route static", ()=>routeTable("static")), X("show ip route ospf", ()=>routeTable("ospf")),
     X("show ip route A:IP", a=>{ if (kind==="switch" && !st.ipRouting) return routeTable(); return routeEntryFor(a[0]); }),
+    // ---- VRF-Lite ----
+    X("show ip route vrf A:WORD", a=>noVrf(a[0]) || routeTable(null, a[0])), X("show ip route vrf A:WORD connected", a=>noVrf(a[0]) || routeTable("connected", a[0])),
+    X("show ip route vrf A:WORD static", a=>noVrf(a[0]) || routeTable("static", a[0])), X("show ip route vrf A:WORD ospf", a=>noVrf(a[0]) || routeTable("ospf", a[0])),
+    X("show ip route vrf A:WORD A:IP", a=>noVrf(a[0]) || (ipRe.test(a[1]) ? `\nRouting Table: ${a[0]}\n` + routeEntryFor(a[1], a[0]) : inv())),
+    X("show vrf", ()=>vrfTable(true)), X("show vrf brief", ()=>vrfTable(true)), X("show ip vrf", ()=>vrfTable(false)), X("show ip vrf brief", ()=>vrfTable(false)),
+    X("show ip vrf interfaces", ()=>{ const rows = ifNames().filter(n=>st.intfs[n].vrf && st.vrfs[st.intfs[n].vrf] && st.vrfs[st.intfs[n].vrf].af4);
+      return "Interface              IP-Address      VRF                              Protocol\n" + rows.map(n=>pad(short(n), 23) + pad(st.intfs[n].ip || "unassigned", 16) + pad(st.intfs[n].vrf, 33) + (up(n) ? "up" : "down")).join("\n"); }),
+    X("show ip arp vrf A:WORD", a=>noVrf(a[0]) || arpTable(null, a[0])), X("show arp vrf A:WORD", a=>noVrf(a[0]) || arpTable(null, a[0])),
+    X("show ip protocols vrf A:WORD", a=>noVrf(a[0]) || ipProtocols(a[0])),
     X("show ip ospf neighbor", ()=>ospfNeighbors()), X("show ip ospf interface brief", ()=>ospfIntBrief()), X("show ip ospf interface", ()=>ospfIntDetail(null)),
     X("show ip ospf interface A:IF", a=>{ const n = parseIf(a[0]); return n ? ospfIntDetail(n) : inv(); }), X("show ip ospf database", ()=>ospfDatabase()), X("show ip ospf", ()=>ospfProcess()),
     X("show ip protocols", ()=>ipProtocols()), X("show standby brief", ()=>standbyBrief()), X("show standby", ()=>standbyDetail()),
@@ -796,7 +871,9 @@ function ios2Env(opts){
   const execCommon = [
     X("show ip dhcp binding", ()=>window.DHCP.showBinding(st.dhcp)), X("show ip dhcp pool", ()=>window.DHCP.showPool(st.dhcp, null, ownIps())), X("show ip dhcp pool A:WORD", a=>window.DHCP.showPool(st.dhcp, a[0], ownIps())),
     X("show ip dhcp conflict", ()=>window.DHCP.showConflict(st.dhcp)),
-    X("ping A:WORD", a=>doPing(a[0])), X("ping ipv6 A:WORD", a=>I6.valid(a[0]) ? doPing6(a[0], null) : inv()), X("traceroute ipv6 A:WORD", a=>I6.valid(a[0]) ? doTrace6(a[0]) : inv()), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("ping A:WORD source A:WORD A:WORD", a=>doPing(a[0], a[1] + a[2])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("traceroute A:WORD source A:WORD A:WORD", a=>doTrace(a[0], a[1] + a[2])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
+    X("ping A:WORD", a=>doPing(a[0])), X("ping ipv6 A:WORD", a=>I6.valid(a[0]) ? doPing6(a[0], null) : inv()), X("traceroute ipv6 A:WORD", a=>I6.valid(a[0]) ? doTrace6(a[0]) : inv()), X("ping A:WORD source A:WORD", a=>doPing(a[0], a[1])), X("ping A:WORD source A:WORD A:WORD", a=>doPing(a[0], a[1] + a[2])), X("traceroute A:WORD", a=>doTrace(a[0])), X("traceroute A:WORD source A:WORD", a=>doTrace(a[0], a[1])), X("traceroute A:WORD source A:WORD A:WORD", a=>doTrace(a[0], a[1] + a[2])),
+    X("ping vrf A:WORD A:WORD", a=>doPing(a[1], null, a[0])), X("ping vrf A:WORD A:WORD source A:WORD", a=>doPing(a[1], a[2], a[0])), X("ping vrf A:WORD A:WORD source A:WORD A:WORD", a=>doPing(a[1], a[2] + a[3], a[0])),
+    X("traceroute vrf A:WORD A:WORD", a=>doTrace(a[1], null, a[0])), X("traceroute vrf A:WORD A:WORD source A:WORD", a=>doTrace(a[1], a[2], a[0])), X("traceroute vrf A:WORD A:WORD source A:WORD A:WORD", a=>doTrace(a[1], a[2] + a[3], a[0])), X("exit", ()=>{ st.mode="user"; return {logout:true}; }), X("logout", ()=>({logout:true})),
     X("terminal length A:NUM", ()=>""), X("terminal no monitor", ()=>""),
   ];
   const T = {
@@ -824,7 +901,7 @@ function ios2Env(opts){
       X("clear access-list counters", ()=>{ window.ACL.clear(st.acl); return ""; }), X("clear access-list counters A:WORD", a=>{ window.ACL.clear(st.acl, a[0]); return ""; }),
       X("clear ip access-list counters", ()=>{ window.ACL.clear(st.acl); return ""; }), X("clear ip access-list counters A:WORD", a=>{ window.ACL.clear(st.acl, a[0]); return ""; }),
       X("clear arp-cache", ()=>""), X("clear ip route *", ()=>""),
-      X("clear ip ospf process", ()=>{ if (!st.ospf) return ""; return ask("Reset ALL OSPF processes? [no]: ", l=>{ if (!/^y/i.test(l.trim())) return ""; st.ospfRidActive = null; st.ospfResets = (st.ospfResets||0) + 1; ospfRid(); return ""; }); }), X("clear counters", ()=>ask("Clear \"show interface\" counters on all interfaces [confirm]", ()=>"")),
+      X("clear ip ospf process", ()=>{ if (!procs().length) return ""; return ask("Reset ALL OSPF processes? [no]: ", l=>{ if (!/^y/i.test(l.trim())) return ""; st.ospfRidActive = null; st.ospfRidV = {}; st.ospfResets = (st.ospfResets||0) + 1; for (const o of procs()) ospfRid(o); return ""; }); }), X("clear counters", ()=>ask("Clear \"show interface\" counters on all interfaces [confirm]", ()=>"")),
     ],
     config: [
       X("hostname A:WORD", a=>{ if (!/^[A-Za-z][\w-]{0,62}$/.test(a[0])) return "% Hostname contains one or more illegal characters."; st.host = a[0]; return ""; }),
@@ -836,8 +913,8 @@ function ios2Env(opts){
       X("banner motd A:LINE", a=>{ const s = a[0]; const d = s[0]; const end = s.indexOf(d,1); if (end<0) return ask(`Enter TEXT message.  End with the character '${d}'.`, l=>{ st.banner = (s.slice(1)+"\n"+l).replace(new RegExp("\\"+d+".*$"),""); return ""; }); st.banner = s.slice(1,end); return ""; }),
       X("no banner motd", ()=>{ st.banner=null; return ""; }),
       X("interface range A:LINE", a=>{ const list = parseRange(a[0]); if (!list) return "% Invalid input detected — try: interface range g0/1 - 4"; st.mode="config-if"; st.cur=list[0]; st.curList=list; return ""; }),
-      X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.mode="config-if"; st.cur=n; st.curList=[n]; return ""; }),
-      X("no interface A:IF", a=>{ const n = parseIf(a[0]); if (n && (n.startsWith("Vlan")||n.startsWith("Loopback")) && n!=="Vlan1"){ delete st.intfs[n]; return ""; } return "% Cannot remove a physical interface"; }),
+      X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.mode="config-if"; st.cur=n; st.curList=[n]; return newTunMsg(); }),
+      X("no interface A:IF", a=>{ const n = parseIf(a[0]); if (n && (n.startsWith("Vlan")||n.startsWith("Loopback")||n.startsWith("Tunnel")||(st.intfs[n] && st.intfs[n].sub)) && n!=="Vlan1"){ delete st.intfs[n]; if (st.tunWas) delete st.tunWas[n]; return ""; } return "% Cannot remove a physical interface"; }),
       X("vlan A:WORD", a=>{ if (kind!=="switch") return inv(); if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(a[0])) return inv(); const vs = vlist(a[0]); if (!vs.length || vs.length !== vlistRaw(a[0]).length) return "% Bad VLAN list - a VLAN number is out of the range 1..4094.";
         const def = vs.find(v=>v>=1002&&v<=1005); if (def && vs.length===1) return "Default VLAN "+def+" may not have its name changed.";
         const ext = vs.filter(v=>v>1005); if (ext.length && /^(server|client)$/.test(st.vtpMode)) return "Extended VLAN(s) not allowed in current VTP mode.\n%Failed to commit extended VLAN(s) changes.\n(VTP version 1 or 2 only allows VLANs 1006-4094 in VTP transparent or off mode: vtp mode transparent)";
@@ -862,17 +939,46 @@ function ios2Env(opts){
       X("ip default-gateway A:IP", a=>{ if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; st.defaultGw=a[0]; return ""; }), X("no ip default-gateway", ()=>{ st.defaultGw=null; return ""; }),
       X("ip route A:IP A:MASK A:LINE", a=>{ const mOk = a[1]==="0.0.0.0" || maskOk(a[1]); if (!ipRe.test(a[0]) || !mOk || netOf(a[0], a[1])!==a[0]) return "%Inconsistent address and mask";
         const r = parseRouteArgs(a[2]); if (r.err) return r.err;
-        if (r.nh && Object.values(st.intfs).some(i=>i.ip===r.nh)) return "%Invalid next hop address (it's this router)";
-        const same = x => x.net===a[0] && x.mask===a[1] && (x.ios||null)===(r.ios||null) && (x.nh||null)===(r.nh||null);
+        if (r.nh && ifNames().some(n=>st.intfs[n].ip===r.nh && !vrfOf(n))) return "%Invalid next hop address (it's this router)";
+        const same = x => !x.vrf && x.net===a[0] && x.mask===a[1] && (x.ios||null)===(r.ios||null) && (x.nh||null)===(r.nh||null);
         const ex = st.routes.find(same); if (ex){ if (r.ad) ex.ad = r.ad; else delete ex.ad; return ""; }
         const e = {net:a[0], mask:a[1]}; if (r.ios) e.ios = r.ios; if (r.nh) e.nh = r.nh; if (r.ad) e.ad = r.ad; st.routes.push(e); return ""; }),
-      X("no ip route A:IP A:MASK", a=>{ st.routes = st.routes.filter(r=>!(r.net===a[0]&&r.mask===a[1])); return ""; }),
-      X("no ip route A:IP A:MASK A:LINE", a=>{ const r = parseRouteArgs(a[2]); if (r.err) return r.err; st.routes = st.routes.filter(x=>!(x.net===a[0]&&x.mask===a[1]&&(!r.ios||x.ios===r.ios)&&(!r.nh||x.nh===r.nh))); return ""; }),
+      X("no ip route A:IP A:MASK", a=>{ st.routes = st.routes.filter(r=>!(!r.vrf&&r.net===a[0]&&r.mask===a[1])); return ""; }),
+      X("no ip route A:IP A:MASK A:LINE", a=>{ const r = parseRouteArgs(a[2]); if (r.err) return r.err; st.routes = st.routes.filter(x=>!(!x.vrf&&x.net===a[0]&&x.mask===a[1]&&(!r.ios||x.ios===r.ios)&&(!r.nh||x.nh===r.nh))); return ""; }),
+      // ---- VRF-Lite: vrf definition (multiprotocol) or the older ip vrf; per-VRF static routes ----
+      X("vrf definition A:WORD", a=>{ const n = a[0]; if (n.length > 32) return inv(); const v = st.vrfs[n];
+        if (v && v.style==="ip") return `% VRF ${n} was created with "ip vrf" (single-protocol) — keep using "ip vrf ${n}", or remove it first`;
+        st.vrfs[n] = v || {style:"def", af4:false, af6:false, rd:null, desc:null, rt:[]}; st.mode = "config-vrf"; st.curVrf = n; return ""; }),
+      X("ip vrf A:WORD", a=>{ const n = a[0]; if (n.length > 32) return inv(); const v = st.vrfs[n];
+        if (v && v.style==="def") return `% VRF ${n} was created with "vrf definition" — configure it with "vrf definition ${n}"`;
+        st.vrfs[n] = v || {style:"ip", af4:true, af6:false, rd:null, desc:null, rt:[]}; st.mode = "config-vrf"; st.curVrf = n; return ""; }),
+      X("no vrf definition A:WORD", a=>delVrf(a[0], "def")), X("no ip vrf A:WORD", a=>delVrf(a[0], "ip")),
+      X("ip route vrf A:WORD A:IP A:MASK A:LINE", a=>{ const v = a[0]; if (!st.vrfs[v]) return `% IP routing table ${v} does not exist. Create first`;
+        const mOk = a[2]==="0.0.0.0" || maskOk(a[2]); if (!ipRe.test(a[1]) || !mOk || netOf(a[1], a[2])!==a[1]) return "%Inconsistent address and mask";
+        const t = tokens(a[3]), glob = t[t.length-1] && t[t.length-1].toLowerCase()==="global"; const r = parseRouteArgs(glob ? t.slice(0,-1).join(" ") : a[3]); if (r.err) return r.err;
+        if (r.nh && !glob && ifNames().some(n=>st.intfs[n].ip===r.nh && vrfOf(n)===v)) return "%Invalid next hop address (it's this router)";
+        const same = x => x.vrf===v && x.net===a[1] && x.mask===a[2] && (x.ios||null)===(r.ios||null) && (x.nh||null)===(r.nh||null);
+        const ex = st.routes.find(same); if (ex){ if (r.ad) ex.ad = r.ad; else delete ex.ad; if (glob) ex.global = true; else delete ex.global; return ""; }
+        const e = {vrf:v, net:a[1], mask:a[2]}; if (r.ios) e.ios = r.ios; if (r.nh) e.nh = r.nh; if (r.ad) e.ad = r.ad; if (glob) e.global = true; st.routes.push(e); return ""; }),
+      X("no ip route vrf A:WORD A:IP A:MASK", a=>{ st.routes = st.routes.filter(r=>!(r.vrf===a[0] && r.net===a[1] && r.mask===a[2])); return ""; }),
+      X("no ip route vrf A:WORD A:IP A:MASK A:LINE", a=>{ const t = tokens(a[3]).filter(x=>x.toLowerCase()!=="global"); const r = parseRouteArgs(t.join(" ")); if (r.err) return r.err;
+        st.routes = st.routes.filter(x=>!(x.vrf===a[0] && x.net===a[1] && x.mask===a[2] && (!r.ios||x.ios===r.ios) && (!r.nh||x.nh===r.nh))); return ""; }),
       X("router ospf A:NUM", a=>{ const pid = +a[0]; if (!(pid>=1 && pid<=65535)) return inv(); if (kind==="switch" && !st.ipRouting) return "% IP routing not enabled";
+        if (st.ospfV[pid]){ st.mode = "config-router"; st.curOspf = pid; return ""; }   // an existing VRF process can be re-entered without its vrf keyword
         if (st.ospf && st.ospf.pid!==pid) return `% This lab runs one OSPF process — this router already has "router ospf ${st.ospf.pid}"`;
-        if (!st.ospf) st.ospf = {pid, rid:null, networks:[], passive:[], noPassive:[], passiveDefault:false, defOrig:false, defAlways:false, refBw:100};
-        st.mode = "config-router"; const rid = ospfRid(); return rid ? "" : `%OSPF-4-NORTRID: OSPF process ${pid} failed to allocate unique router-id and cannot start`; }),
-      X("no router ospf A:NUM", a=>{ if (!st.ospf || st.ospf.pid!==+a[0]) return ""; st.ospf = null; st.ospfRidActive = null; for (const i of Object.values(st.intfs)) if (i.ospfArea) delete i.ospfArea; return ""; }),
+        if (!st.ospf) st.ospf = newProc(pid, null);
+        st.mode = "config-router"; st.curOspf = null; const rid = ospfRid(); return rid ? "" : `%OSPF-4-NORTRID: OSPF process ${pid} failed to allocate unique router-id and cannot start`; }),
+      X("router ospf A:NUM vrf A:WORD", a=>{ const pid = +a[0], v = a[1]; if (!(pid>=1 && pid<=65535)) return inv(); if (kind==="switch" && !st.ipRouting) return "% IP routing not enabled";
+        if (!st.vrfs[v]) return `% VRF ${v} not configured`;
+        if (st.ospf && st.ospf.pid===pid) return `% OSPF process ${pid} already runs in the global table — a VRF needs its own process ID`;
+        if (st.ospfV[pid] && st.ospfV[pid].vrf!==v) return `% OSPF process ${pid} is already in VRF ${st.ospfV[pid].vrf}`;
+        const other = procOfVrf(v); if (other && other.pid!==pid) return `% This lab runs one OSPF process per VRF — VRF ${v} already has "router ospf ${other.pid} vrf ${v}"`;
+        if (!st.ospfV[pid]) st.ospfV[pid] = newProc(pid, v);
+        st.mode = "config-router"; st.curOspf = pid; const rid = ospfRid(st.ospfV[pid]); return rid ? "" : `%OSPF-4-NORTRID: OSPF process ${pid} failed to allocate unique router-id and cannot start`; }),
+      X("no router ospf A:NUM", a=>{ const pid = +a[0];
+        if (st.ospfV[pid]){ delete st.ospfV[pid]; if (st.ospfRidV) delete st.ospfRidV[pid]; for (const i of Object.values(st.intfs)) if (i.ospfArea && i.ospfArea.pid===pid) delete i.ospfArea; return ""; }
+        if (!st.ospf || st.ospf.pid!==pid) return ""; st.ospf = null; st.ospfRidActive = null; for (const i of Object.values(st.intfs)) if (i.ospfArea && i.ospfArea.pid===pid) delete i.ospfArea; return ""; }),
+      X("no router ospf A:NUM vrf A:WORD", a=>{ const pid = +a[0]; if (st.ospfV[pid] && st.ospfV[pid].vrf===a[1]){ delete st.ospfV[pid]; if (st.ospfRidV) delete st.ospfRidV[pid]; for (const i of Object.values(st.intfs)) if (i.ospfArea && i.ospfArea.pid===pid) delete i.ospfArea; } return ""; }),
       X("cdp run", ()=>{ st.cdpRun=true; return ""; }), X("no cdp run", ()=>{ st.cdpRun=false; return ""; }),
       X("spanning-tree mode A:WORD", a=>{ const m = a[0].toLowerCase(); if (!["pvst","rapid-pvst","mst"].includes(m)) return inv(); if (kind!=="switch") return inv(); st.stpMode = m==="mst" ? "rapid-pvst" : m; return m==="mst" ? "(MST isn't modelled in this lab — staying in rapid-pvst)" : ""; }),
       X("spanning-tree vlan A:WORD priority A:NUM", a=>{ if (kind!=="switch") return inv(); const p = +a[1]; if (p%4096 || p<0 || p>61440) return "% Bridge Priority must be in increments of 4096.\n% Allowed values are:\n  0     4096  8192  12288 16384 20480 24576 28672\n  32768 36864 40960 45056 49152 53248 57344 61440"; for (const v of vlist(a[0])) st.stpPrio[v] = p; return ""; }),   // stored as typed; the bridge ID adds the VLAN (sys-id-ext)
@@ -988,12 +1094,13 @@ function ios2Env(opts){
     ],
     "config-if": [
       X("description A:LINE", a=>{ forCur(i=>i.desc=a[0].slice(0,240)); return ""; }), X("no description", ()=>{ forCur(i=>i.desc=""); return ""; }),
-      X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ i.errdis = null; if (i.psecMacs) i.psecMacs = i.psecMacs.filter(m=>m.type!=="dynamic"); if (!i.shut){ i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
-      X("no shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (i.shut){ i.shut=false; if (up(n)) out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to up`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to up`); else if (i.mode!=="svi") out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
+      X("shutdown", ()=>{ const out=[]; forCur((i,n)=>{ i.errdis = null; if (i.psecMacs) i.psecMacs = i.psecMacs.filter(m=>m.type!=="dynamic"); if (!i.shut){ const was = up(n); i.shut=true; out.push(`%LINK-5-CHANGED: Interface ${n}, changed state to administratively down`); if (!i.tun || was) out.push(`%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down`); if (i.tun) st.tunWas = Object.assign({}, st.tunWas, {[n]: false}); } }); return out.join("\n"); }),
+      X("no shutdown", ()=>{ const out=[]; forCur((i,n)=>{ if (i.shut){ i.shut=false; if (i.tun){ out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to up`); const u = up(n); if (u) out.push(`%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to up`); st.tunWas = Object.assign({}, st.tunWas, {[n]: u}); return; } if (up(n)) out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to up`, `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to up`); else if (i.mode!=="svi") out.push(`%LINK-3-UPDOWN: Interface ${n}, changed state to down`); } }); return out.join("\n"); }),
       X("ip address A:IP A:MASK", a=>{ const i = st.intfs[st.cur]; if (i.sub && !i.encap) return "% Configuring IP routing on a LAN subinterface is only allowed if that\nsubinterface is already configured as part of an IEEE 802.10, IEEE 802.1Q,\nor ISL vLAN."; if (kind==="switch" && i.mode!=="svi" && i.mode!=="routed" && !i.loop) return "                                   ^\n% Invalid input detected at '^' marker.\n(a Layer 2 switch port has no IP address — configure the management IP on interface vlan 1)"; if (!ipRe.test(a[0])) return "% Invalid input detected at '^' marker."; if (!maskOk(a[1])) return ipRe.test(a[1]) ? `% Bad mask 0x${toInt(a[1]).toString(16).toUpperCase().padStart(8,"0")} for address ${a[0]}` : "% Invalid input detected at '^' marker.";
         const len = maskLen(a[1]);
         if (len<31 && (a[0]===netOf(a[0],a[1]) || a[0]===bcastOf(a[0],a[1]))) return `% Bad mask /${len} for address ${a[0]}`;
-        for (const [n,o] of Object.entries(st.intfs)) if (n!==st.cur && o.ip){ const shorter = maskLen(o.mask) <= len ? o.mask : a[1]; if (sameNet(o.ip, a[0], shorter)) return `% ${netOf(a[0],a[1])} overlaps with ${n}`; }
+        if (i.vrf && st.vrfs[i.vrf] && !st.vrfs[i.vrf].af4) return `% VRF ${i.vrf} has no IPv4 address family — add "address-family ipv4" under "vrf definition ${i.vrf}" first`;
+        for (const [n,o] of Object.entries(st.intfs)) if (n!==st.cur && o.ip && (o.vrf||null)===(i.vrf||null)){ const shorter = maskLen(o.mask) <= len ? o.mask : a[1]; if (sameNet(o.ip, a[0], shorter)) return `% ${netOf(a[0],a[1])} overlaps with ${n}`; }   // overlap is checked within one routing table: other VRFs may reuse the subnet
         i.ip=a[0]; i.mask=a[1]; delete i.dhcpClient; delete i.dhcpGw; delete i.dhcpLease;
         return len===31 && !i.loop ? "% Warning: use /31 mask on non point-to-point interface cautiously" : ""; }),
       X("no ip address", ()=>{ forCur(i=>{ i.ip=null; i.mask=null; delete i.dhcpClient; delete i.dhcpGw; delete i.dhcpLease; }); return ""; }),
@@ -1067,10 +1174,12 @@ function ios2Env(opts){
       X("ip ospf hello-interval A:NUM", a=>{ const h = +a[0]; if (!(h>=1 && h<=65535)) return inv(); forCur(i=>{ const autoDead = !i.ospfDead || i.ospfDead===(i.ospfHello||10)*4; i.ospfHello=h; if (autoDead) i.ospfDead = h*4; }); return ""; }),
       X("no ip ospf hello-interval", ()=>{ forCur(i=>{ const autoDead = !i.ospfDead || i.ospfDead===(i.ospfHello||10)*4; delete i.ospfHello; if (autoDead) delete i.ospfDead; }); return ""; }),
       X("ip ospf dead-interval A:NUM", a=>{ const d = +a[0]; if (!(d>=1 && d<=65535)) return inv(); forCur(i=>i.ospfDead=d); return ""; }), X("no ip ospf dead-interval", ()=>{ forCur(i=>{ delete i.ospfDead; }); return ""; }),
-      X("ip ospf network point-to-point", ()=>{ forCur(i=>i.ospfNet="point-to-point"); return ""; }), X("ip ospf network broadcast", ()=>{ forCur(i=>{ delete i.ospfNet; }); return ""; }), X("no ip ospf network", ()=>{ forCur(i=>{ delete i.ospfNet; }); return ""; }),
+      X("ip ospf network point-to-point", ()=>{ forCur(i=>{ if (i.tun) delete i.ospfNet; else i.ospfNet="point-to-point"; }); return ""; }), X("ip ospf network broadcast", ()=>{ forCur(i=>{ if (i.tun) i.ospfNet = "broadcast"; else delete i.ospfNet; }); return ""; }), X("no ip ospf network", ()=>{ forCur(i=>{ delete i.ospfNet; }); return ""; }),
       X("ip ospf A:NUM area A:WORD", a=>{ const pid = +a[0], area = areaParse(a[1]); if (area==null || !(pid>=1&&pid<=65535)) return inv(); if (kind==="switch" && !st.ipRouting) return "% IP routing not enabled";
-        if (st.ospf && st.ospf.pid!==pid) return `% This lab runs one OSPF process — this router already has "router ospf ${st.ospf.pid}"`;
-        if (!st.ospf) st.ospf = {pid, rid:null, networks:[], passive:[], noPassive:[], passiveDefault:false, defOrig:false, defAlways:false, refBw:100};
+        const v = vrfOf(st.cur), ex = procByPid(pid);
+        if (ex && (ex.vrf||null)!==v) return `% Interface ${st.cur} is ${v ? "in VRF " + v : "in the global table"}, but OSPF process ${pid} is ${ex.vrf ? "in VRF " + ex.vrf : "in the global table"}`;
+        if (!ex){ if (v){ if (procOfVrf(v)) return `% This lab runs one OSPF process per VRF — VRF ${v} already has "router ospf ${procOfVrf(v).pid} vrf ${v}"`; st.ospfV[pid] = newProc(pid, v); }   // like IOS: the process is created in the interface's VRF
+          else { if (st.ospf) return `% This lab runs one OSPF process — this router already has "router ospf ${st.ospf.pid}"`; st.ospf = newProc(pid, null); } }
         forCur(i=>i.ospfArea = {pid, area}); return ""; }),
       X("no ip ospf A:NUM area A:WORD", ()=>{ forCur(i=>{ delete i.ospfArea; }); return ""; }),
       X("standby A:NUM ip A:IP", a=>{ const g = +a[0]; if (!(g>=0 && g<=4095)) return inv(); const i = st.intfs[st.cur]; if (!i.ip) return "% Address must be configured on the interface first";
@@ -1100,7 +1209,28 @@ function ios2Env(opts){
       X("no ipv6 address A:WORD link-local", ()=>{ delete st.intfs[st.cur].ll; return ""; }), X("no ipv6 address autoconfig", ()=>{ delete st.intfs[st.cur].ip6auto; return ""; }),
       X("ipv6 enable", ()=>{ forCur(i=>i.ip6en = true); return ""; }), X("no ipv6 enable", ()=>{ forCur(i=>{ delete i.ip6en; }); return ""; }),
       X("standby version A:NUM", a=>{ if (!/^[12]$/.test(a[0])) return inv(); forCur(i=>i.hsrpVer = +a[0]); return ""; }),
-      X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return ""; }),
+      // ---- VRF membership (vrf definition → vrf forwarding; ip vrf → ip vrf forwarding) ----
+      X("vrf forwarding A:WORD", a=>{ if (!routedIf()) return inv(); if (!st.vrfs[a[0]]) return `% VRF ${a[0]} not configured.`; return setVrf(a[0], "vrf forwarding"); }),
+      X("ip vrf forwarding A:WORD", a=>{ if (!routedIf()) return inv(); if (!st.vrfs[a[0]]) return `% VRF ${a[0]} not configured.`; return setVrf(a[0], "ip vrf forwarding"); }),
+      X("no vrf forwarding", ()=>setVrf(null)), X("no vrf forwarding A:WORD", ()=>setVrf(null)), X("no ip vrf forwarding", ()=>setVrf(null)), X("no ip vrf forwarding A:WORD", ()=>setVrf(null)),
+      // ---- IP MTU / TCP MSS clamping (any routed interface; the usual GRE pair is ip mtu 1400 + ip tcp adjust-mss 1360) ----
+      X("ip mtu A:NUM", a=>{ const m = +a[0], i = st.intfs[st.cur]; if (!(m>=68 && m<=(i.tun ? 9976 : 1500))) return inv(); forCur(x=>{ x.ipMtu = m; }); return ""; }), X("no ip mtu", ()=>{ forCur(x=>{ delete x.ipMtu; }); return ""; }), X("no ip mtu A:NUM", ()=>{ forCur(x=>{ delete x.ipMtu; }); return ""; }),
+      X("ip tcp adjust-mss A:NUM", a=>{ const m = +a[0]; if (!(m>=500 && m<=1460)) return inv(); forCur(x=>{ x.mss = m; }); return ""; }), X("no ip tcp adjust-mss", ()=>{ forCur(x=>{ delete x.mss; }); return ""; }), X("no ip tcp adjust-mss A:NUM", ()=>{ forCur(x=>{ delete x.mss; }); return ""; }),
+      // ---- GRE tunnel interface ----
+      X("tunnel source A:LINE", a=>tunOnly((i, t)=>{ const raw = a[0].trim(); if (ipRe.test(raw)){ t.src = raw; return ""; } const n = parseIf(raw.replace(/\s+/g, "")); if (!n || n===st.cur) return inv(); t.src = n; return ""; })),
+      X("no tunnel source", ()=>tunOnly((i, t)=>{ t.src = null; return ""; })), X("no tunnel source A:LINE", ()=>tunOnly((i, t)=>{ t.src = null; return ""; })),
+      X("tunnel destination A:WORD", a=>tunOnly((i, t)=>{ if (!ipRe.test(a[0])) return inv(); t.dst = a[0]; return ""; })),
+      X("no tunnel destination", ()=>tunOnly((i, t)=>{ t.dst = null; return ""; })), X("no tunnel destination A:WORD", ()=>tunOnly((i, t)=>{ t.dst = null; return ""; })),
+      X("tunnel mode A:LINE", a=>tunOnly((i, t)=>{ const m = a[0].trim().toLowerCase().replace(/\s+/g, " ");
+        if (m==="gre ip"){ t.mode = "gre ip"; return ""; }
+        if (/^(gre multipoint|gre ipv6|ipip|ipsec ipv4|ipsec ipv6)$/.test(m)) return `% (Only point-to-point GRE over IPv4 — tunnel mode gre ip, the default — is modelled in this lab)`; return inv(); })),
+      X("no tunnel mode", ()=>tunOnly((i, t)=>{ t.mode = "gre ip"; return ""; })),
+      X("tunnel vrf A:WORD", a=>tunOnly((i, t)=>{ if (!st.vrfs[a[0]]) return `% VRF ${a[0]} not configured.`; t.vrf = a[0]; return ""; })), X("no tunnel vrf", ()=>tunOnly((i, t)=>{ delete t.vrf; return ""; })), X("no tunnel vrf A:WORD", ()=>tunOnly((i, t)=>{ delete t.vrf; return ""; })),
+      X("keepalive", ()=>{ const i = st.intfs[st.cur]; if (i.tun) i.tun.ka = {period:10, retries:3}; return ""; }),
+      X("keepalive A:NUM", a=>{ const p = +a[0]; if (!(p>=0 && p<=32767)) return inv(); const i = st.intfs[st.cur]; if (i.tun) i.tun.ka = p ? {period:p, retries:3} : null; return ""; }),
+      X("keepalive A:NUM A:NUM", a=>{ const p = +a[0], r = +a[1]; if (!(p>=0 && p<=32767) || !(r>=1 && r<=255)) return inv(); const i = st.intfs[st.cur]; if (i.tun) i.tun.ka = p ? {period:p, retries:r} : null; return ""; }),
+      X("no keepalive", ()=>{ const i = st.intfs[st.cur]; if (i.tun) i.tun.ka = null; return ""; }),
+      X("interface A:IF", a=>{ const n = parseIf(a[0], true); if (!n) return "% Invalid input detected at '^' marker."; st.cur=n; st.curList=[n]; return newTunMsg(); }),
     ],
     "config-line": [
       X("password A:LINE", a=>{ const e = tooShort(a[0]); if (e) return e; st.lines[st.curLine].password=unhash(a[0]); return ""; }),
@@ -1126,25 +1256,37 @@ function ios2Env(opts){
       X("network A:IP A:IP area A:WORD", a=>{ const area = areaParse(a[2]); if (area==null || !ipRe.test(a[0]) || !ipRe.test(a[1])) return inv();
         // current IOS converts a subnet mask typed in place of a wildcard (255.255.255.0 → 0.0.0.255); all-ones stays "match everything"
         const wild = maskOk(a[1]) && a[1]!=="255.255.255.255" ? a[1].split(".").map(o=>255-(+o)).join(".") : a[1];
-        const o = st.ospf; if (!o.networks.some(w=>w.net===a[0] && w.wild===wild)) o.networks.push({net:a[0], wild, area}); else o.networks.find(w=>w.net===a[0] && w.wild===wild).area = area;
+        const o = OS(); if (!o.networks.some(w=>w.net===a[0] && w.wild===wild)) o.networks.push({net:a[0], wild, area}); else o.networks.find(w=>w.net===a[0] && w.wild===wild).area = area;
         // IOS lists overlapping statements most specific first (fewest wildcard bits), keeping typed order otherwise
         const bits = w => ones32(toInt(w.wild)); o.networks = o.networks.map((w,k)=>({w,k})).sort((x,y)=>bits(x.w)-bits(y.w) || x.k-y.k).map(x=>x.w); return ""; }),
-      X("no network A:IP A:IP area A:WORD", a=>{ st.ospf.networks = st.ospf.networks.filter(w=>!(w.net===a[0] && w.wild===a[1])); return ""; }),
-      X("router-id A:IP", a=>{ if (!ipRe.test(a[0])) return inv(); st.ospf.rid = a[0]; if (st.ospfRidActive && st.ospfRidActive!==a[0]) return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; st.ospfRidActive = a[0]; return ""; }),
-      X("no router-id", ()=>{ st.ospf.rid = null; return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; }),
-      X("passive-interface default", ()=>{ st.ospf.passiveDefault = true; st.ospf.noPassive = []; return ""; }), X("no passive-interface default", ()=>{ st.ospf.passiveDefault = false; st.ospf.passive = []; return ""; }),
-      X("passive-interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return inv(); const o = st.ospf; if (o.passiveDefault) o.noPassive = o.noPassive.filter(x=>x!==n); else if (!o.passive.includes(n)) o.passive.push(n); return ""; }),
-      X("no passive-interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return inv(); const o = st.ospf; if (o.passiveDefault){ if (!o.noPassive.includes(n)) o.noPassive.push(n); } else o.passive = o.passive.filter(x=>x!==n); return ""; }),
-      X("default-information originate", ()=>{ st.ospf.defOrig = true; st.ospf.defAlways = false; return ""; }), X("default-information originate always", ()=>{ st.ospf.defOrig = true; st.ospf.defAlways = true; return ""; }),
-      X("no default-information originate", ()=>{ st.ospf.defOrig = false; st.ospf.defAlways = false; return ""; }),
-      X("auto-cost reference-bandwidth A:NUM", a=>{ const b = +a[0]; if (!(b>=1 && b<=4294967)) return inv(); st.ospf.refBw = b; return "% OSPF: Reference bandwidth is changed.\n        Please ensure reference bandwidth is consistent across all routers."; }),
-      X("no auto-cost reference-bandwidth", ()=>{ st.ospf.refBw = 100; return "% OSPF: Reference bandwidth is changed.\n        Please ensure reference bandwidth is consistent across all routers."; }),
+      X("no network A:IP A:IP area A:WORD", a=>{ OS().networks = OS().networks.filter(w=>!(w.net===a[0] && w.wild===a[1])); return ""; }),
+      X("router-id A:IP", a=>{ if (!ipRe.test(a[0])) return inv(); const o = OS(); o.rid = a[0]; const act = ridActive(o); if (act && act!==a[0]) return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; ridActive(o, a[0]); return ""; }),
+      X("no router-id", ()=>{ OS().rid = null; return '% OSPF: Reload or use "clear ip ospf process" command, for this to take effect'; }),
+      X("passive-interface default", ()=>{ OS().passiveDefault = true; OS().noPassive = []; return ""; }), X("no passive-interface default", ()=>{ OS().passiveDefault = false; OS().passive = []; return ""; }),
+      X("passive-interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return inv(); const o = OS(); if (o.passiveDefault) o.noPassive = o.noPassive.filter(x=>x!==n); else if (!o.passive.includes(n)) o.passive.push(n); return ""; }),
+      X("no passive-interface A:IF", a=>{ const n = parseIf(a[0]); if (!n) return inv(); const o = OS(); if (o.passiveDefault){ if (!o.noPassive.includes(n)) o.noPassive.push(n); } else o.passive = o.passive.filter(x=>x!==n); return ""; }),
+      X("default-information originate", ()=>{ OS().defOrig = true; OS().defAlways = false; return ""; }), X("default-information originate always", ()=>{ OS().defOrig = true; OS().defAlways = true; return ""; }),
+      X("no default-information originate", ()=>{ OS().defOrig = false; OS().defAlways = false; return ""; }),
+      X("auto-cost reference-bandwidth A:NUM", a=>{ const b = +a[0]; if (!(b>=1 && b<=4294967)) return inv(); OS().refBw = b; return "% OSPF: Reference bandwidth is changed.\n        Please ensure reference bandwidth is consistent across all routers."; }),
+      X("no auto-cost reference-bandwidth", ()=>{ OS().refBw = 100; return "% OSPF: Reference bandwidth is changed.\n        Please ensure reference bandwidth is consistent across all routers."; }),
     ],
+    // vrf definition NAME / ip vrf NAME → (config-vrf)#; vrf definition's address families → (config-vrf-af)#
+    "config-vrf": [
+      X("rd A:WORD", a=>{ if (!/^(\d{1,10}|\d{1,3}(\.\d{1,3}){3}):\d{1,10}$/.test(a[0])) return inv(); st.vrfs[st.curVrf].rd = a[0]; return ""; }),
+      X("no rd", ()=>{ st.vrfs[st.curVrf].rd = null; return ""; }), X("no rd A:WORD", ()=>{ st.vrfs[st.curVrf].rd = null; return ""; }),
+      X("description A:LINE", a=>{ st.vrfs[st.curVrf].desc = a[0].slice(0, 244); return ""; }), X("no description", ()=>{ st.vrfs[st.curVrf].desc = null; return ""; }),
+      ...["ipv4","ipv6"].flatMap(af=>[
+        X("address-family " + af, ()=>vrfAf(af)), X("address-family " + af + " unicast", ()=>vrfAf(af)),
+        X("no address-family " + af, ()=>{ const v = st.vrfs[st.curVrf]; if (v.style!=="def") return inv(); v["af" + af.slice(-1)] = false; return ""; }) ]),
+      X("route-target A:WORD A:WORD", a=>rtCmd(a[0], a[1])), X("route-target A:WORD", a=>rtCmd("both", a[0])),
+    ],
+    "config-vrf-af": [ X("exit-address-family", ()=>{ st.mode = "config-vrf"; return ""; }), X("exit", ()=>{ st.mode = "config-vrf"; return ""; }),
+      X("route-target A:WORD A:WORD", a=>rtCmd(a[0], a[1])) ],
     "config-vlan": [ X("name A:WORD", a=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=a[0].slice(0,32); return ""; }), X("no name", ()=>{ for (const v of (st.curVlans||[st.curVlan])) st.vlans[v]=`VLAN${String(v).padStart(4,"0")}`; return ""; }) ],
   };
   const cfgDone = () => st.viaVty ? `%SYS-5-CONFIG_I: Configured from console by ${st.viaVty.user} on vty0 (${st.viaVty.ip})` : `%SYS-5-CONFIG_I: Configured from console by ${opts.via||"console"}`;
   const cfgCommon = [ X("end", ()=>{ st.mode="priv"; return cfgDone(); }), X("exit", ()=>{ if (st.mode==="config"){ st.mode="priv"; return cfgDone(); } st.mode="config"; return ""; }) ];
-  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp","config-arp-nacl","config-radius-server","config-server-tacacs"]) T[m].push(...cfgCommon);
+  for (const m of ["config","config-if","config-line","config-vlan","config-router","config-std-nacl","config-ext-nacl","config-dhcp","config-arp-nacl","config-radius-server","config-server-tacacs","config-vrf","config-vrf-af"]) T[m].push(...cfgCommon);
 
   function inv(){ return "% Invalid input detected at '^' marker."; }
   const parseVlanList = t => { const out = []; for (const part of String(t).replace(/\s+/g, "").split(",")){ const m = part.match(/^(\d+)(?:-(\d+))?$/); if (!m) return null; const a = +m[1], b = m[2] ? +m[2] : a; if (a<1 || b>4094 || b<a) return null; for (let v = a; v <= b; v++) out.push(v); } return out; };
@@ -1231,6 +1373,38 @@ function ios2Env(opts){
     return [ ...["permit","deny","remark"].flatMap(k=>[ X(k + " A:LINE", a=>run(k + " ", a)), X("A:NUM " + k + " A:LINE", a=>run(a[0] + " " + k + " ", [a[1]])) ]),
       X("no A:NUM", a=>run("no " + a[0], [])), X("no permit A:LINE", a=>run("no permit ", a)), X("no deny A:LINE", a=>run("no deny ", a)), X("no remark A:LINE", a=>run("no remark ", a)) ]; }
   function forCur(fn){ for (const n of (st.curList||[st.cur])) fn(st.intfs[n], n); }
+  // removing a VRF takes its interfaces out of it (their addresses go too), and its static routes and OSPF process with it
+  function delVrf(n, style){ const v = st.vrfs[n]; if (!v) return `% VRF ${n} not configured`; if (v.style!==style) return inv();
+    for (const i of Object.values(st.intfs)) if (i.vrf===n){
+      i.ip = null; i.mask = null; delete i.dhcpClient; delete i.dhcpGw; delete i.dhcpLease; delete i.ip6; delete i.ll; delete i.ip6auto; delete i.vrf; delete i.vrfCmd; }
+    for (const i of Object.values(st.intfs)) if (i.tun && i.tun.vrf===n) delete i.tun.vrf;
+    st.routes = st.routes.filter(r=>r.vrf!==n);
+    for (const [pid, o] of Object.entries(st.ospfV)) if (o.vrf===n){ delete st.ospfV[pid]; for (const i of Object.values(st.intfs)) if (i.ospfArea && i.ospfArea.pid===+pid) delete i.ospfArea; }
+    delete st.vrfs[n];
+    return ""; }   // (IOS's console note here is unconfirmed, so the lab prints nothing)
+  // vrf forwarding: moving an interface into (or out of) a VRF removes its IP addresses — IOS says so; re-enter them afterwards
+  function setVrf(n, cmdForm){ const out = [];
+    for (const nm of (st.curList||[st.cur])){ const i = st.intfs[nm], old = i.vrf || null; if (old===(n||null)) continue;
+      const had4 = !!(i.ip || i.dhcpClient), had6 = !!((i.ip6||[]).length || i.ll || i.ip6auto), why = n ? `enabling VRF ${n}` : `disabling VRF ${old}`;
+      i.ip = null; i.mask = null; delete i.dhcpClient; delete i.dhcpGw; delete i.dhcpLease; delete i.ip6; delete i.ll; delete i.ip6auto;
+      if (n){ i.vrf = n; i.vrfCmd = cmdForm; } else { delete i.vrf; delete i.vrfCmd; }
+      if (had4) out.push(`% Interface ${nm} IPv4 disabled and address(es) removed due to ${why}`); if (had6) out.push(`% Interface ${nm} IPv6 disabled and address(es) removed due to ${why}`); }
+    return out.join("\n"); }
+  function vrfAf(af){ const v = st.vrfs[st.curVrf]; if (v.style!=="def") return inv(); v["af" + af.slice(-1)] = true; st.curAf = af; st.mode = "config-vrf-af"; return ""; }
+  function rtCmd(dir, val){ const d = ["both","import","export"].find(x=>x===String(dir).toLowerCase()); if (!d || !/^(\d{1,10}|\d{1,3}(\.\d{1,3}){3}):\d{1,10}$/.test(val)) return inv();
+    const v = st.vrfs[st.curVrf], af = st.mode==="config-vrf-af" ? st.curAf : null; v.rt = (v.rt||[]).filter(x=>!(x.val===val && x.af===af && (x.dir===d || d==="both")));
+    if (d==="both") v.rt.push({dir:"export", val, af}, {dir:"import", val, af}); else v.rt.push({dir:d, val, af}); return ""; }
+  const noVrf = v => st.vrfs[v] ? null : `% IP routing table ${v} does not exist`;
+  // show vrf (Protocols column) / show ip vrf (IPv4 VRFs only, no Protocols column)
+  function vrfTable(multi){ const L = [multi ? "  Name                             Default RD            Protocols   Interfaces" : "  Name                             Default RD            Interfaces"];
+    for (const n of Object.keys(st.vrfs).sort()){ const v = st.vrfs[n]; if (!multi && !v.af4) continue;
+      const ifs = ifNames().filter(x=>st.intfs[x].vrf===n).map(short), pr = [v.af4 ? "ipv4" : null, v.af6 ? "ipv6" : null].filter(Boolean).join(",");
+      const head = "  " + pad(n, 33) + pad(v.rd || "<not set>", 22) + (multi ? pad(pr, 12) : ""), ind = " ".repeat(head.length);
+      L.push((head + (ifs[0] || "")).trimEnd(), ...ifs.slice(1).map(x=>ind + x)); }
+    return L.join("\n"); }
+  const newTunMsg = () => { const n = st.tunNew; st.tunNew = null; return n ? `%LINEPROTO-5-UPDOWN: Line protocol on Interface ${n}, changed state to down` : ""; };
+  const routedIf = () => (st.curList||[st.cur]).every(n=>{ const i = st.intfs[n]; return kind==="router" || i.mode==="routed" || i.mode==="svi" || i.loop || i.tun; });
+  const tunOnly = fn => { const i = st.intfs[st.cur]; if (!i || !i.tun) return inv(); return fn(i, i.tun); };
   function l2(fn){ const bad = (st.curList||[st.cur]).find(n=>st.intfs[n].mode==="routed"||st.intfs[n].mode==="svi"); if (bad || kind!=="switch") return inv(); forCur(fn);
     for (const n of (st.curList||[st.cur])) if (n.startsWith("Port-channel")){ const g = +n.slice(12); for (const m of physical){ const i = st.intfs[m]; if (i.channel && i.channel.group===g){ const keep = i.channel; fn(i, m); i.channel = keep; } } }
     return ""; }
@@ -1255,7 +1429,7 @@ function ios2Env(opts){
     return out.length ? out : null; }
   function save(){ st.startup = snapshot(); st.savedOnce = true; return "Building configuration...\n[OK]"; }
   function runningCfgFrom(snap){ const cur = snapshot(); restore(snap); const out = runningCfg().replace("Current configuration","Using 2104 out of 524288 bytes\n!\n! Last configuration change"); restore(cur); return out; }
-  function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; st.ospfRidActive = null; st.ospfResets = (st.ospfResets||0) + 1; if (st.confregNext) st.confreg = st.confregNext;
+  function doReload(){ if (st.startup) restore(st.startup); else restore(factory()); st.mode="user"; st.pending=null; st.ospfRidActive = null; st.ospfRidV = {}; st.tunRec = {}; st.ospfResets = (st.ospfResets||0) + 1; if (st.confregNext) st.confreg = st.confregNext;
     if (hooks.clearMac) hooks.clearMac(); return {reload:true, text:"\n%SYS-5-RELOAD: Reload requested by console. Reload Reason: Reload Command.\n\n...System restarting...\n\n" + (st.startup ? `${st.host} con0 is now available\n\nPress RETURN to get started.` : "         --- System Configuration Dialog ---\n\nWould you like to enter the initial configuration dialog? [yes/no]: no\n\nPress RETURN to get started.") + (st.banner?`\n\n${st.banner}`:"")}; }
   function ask(prompt, handle){ st.pending = {prompt, handle}; return {ask:prompt}; }
   // TFTP: back the configuration up to a server, or merge a saved file into the running-config
@@ -1279,7 +1453,7 @@ function ios2Env(opts){
     const tryPw = l => { if (l===(st.enableSecret||st.enablePassword)){ st.noEcho=false; st.mode="priv"; return ""; } if (++tries>=3){ st.noEcho=false; return "% Bad secrets"; } st.noEcho=true; return ask("Password: ", tryPw); };
     st.noEcho=true; return ask("Password: ", tryPw);
   }
-  function doPing(ip, srcArg){
+  function doPing(ip, srcArg, vrf){ const V = vrf || null; if (V && !st.vrfs[V]) return "% Unrecognized host or address, or protocol not running."; if (V && !ipRe.test(ip)) return "% Unrecognized host or address, or protocol not running.";
     if (!ipRe.test(ip) && !I6.valid(ip) && /^[a-z0-9][a-z0-9.-]*$/i.test(ip)){ const r = resolveName(ip);
       if (r.ip){ const head = r.how==="dns" ? `Translating "${ip}"...domain server (${r.server}) [OK]\n\n` : "";
         const res = doPing(r.ip, srcArg); return typeof res==="string" ? head + res : res; }
@@ -1293,24 +1467,24 @@ function ios2Env(opts){
       if (!sa) return "% Invalid source address- IPv6 address not on any of our up interfaces";
       return doPing6(ip, I6.isLL(ip) ? sIf : null, I6.isLL(ip) ? null : sa); }
     if (!ipRe.test(ip)) return st.domainLookup ? `Translating "${ip}"...domain server (255.255.255.255)\n% Unrecognized host or address, or protocol not running.` : `% Unrecognized host or address, or protocol not running.`;
-    let src = null;   // extended ping: ping <ip> source <interface|own address> — tests the return path to that address
-    if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
-      if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
-    const r = hooks.ping(ip, src) || {};
+    let src = null;   // extended ping: ping <ip> source <interface|own address> — tests the return path to that address (in the same VRF)
+    if (srcArg){ const n = parseIf(srcArg); const nn = n || ifNames().find(x=>st.intfs[x].ip===srcArg && vrfOf(x)===V); const i = nn ? st.intfs[nn] : null;
+      if (!i || !i.ip || vrfOf(nn)!==V || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
+    const r = hooks.ping(ip, src, V) || {};
     const bar = r.ok ? (r.firstMiss ? ".!!!!" : "!!!!!") : (r.kind==="netunreach" || r.kind==="prohib") ? "U.U.U" : r.kind==="ttlexpired" ? "&&&&&" : ".....";   // U = an ICMP unreachable came back (IOS rate-limits them, hence U.U.U)
     const n = (bar.match(/!/g)||[]).length;
     return `Type escape sequence to abort.\nSending 5, 100-byte ICMP Echos to ${ip}, timeout is 2 seconds:\n${src ? `Packet sent with a source address of ${src} \n` : ""}${bar}\nSuccess rate is ${n*20} percent (${n}/5)${n?", round-trip min/avg/max = 1/1/3 ms":""}`;
   }
-  function doTrace(ip, srcArg){
+  function doTrace(ip, srcArg, vrf){ const V = vrf || null; if (V && !st.vrfs[V]) return "% Unrecognized host or address, or protocol not running."; if (V && !ipRe.test(ip)) return "% Unrecognized host or address, or protocol not running.";
     if (!ipRe.test(ip) && !I6.valid(ip) && /^[a-z0-9][a-z0-9.-]*$/i.test(ip) && /[a-z]/i.test(ip)){ const r = resolveName(ip);
       if (!r.ip) return r.how==="dns" ? `Translating "${ip}"...domain server (${r.server})\n% Unrecognized host or address, or protocol not running.` : "% Unrecognized host or address, or protocol not running.";
       const res = doTrace(r.ip, srcArg); if (typeof res!=="string") return res;
       const nm = r.how==="dns" ? r.tried : ip.toLowerCase();
       return (r.how==="dns" ? `Translating "${ip}"...domain server (${r.server}) [OK]\n` : "") + res.replace(`Tracing the route to ${r.ip}`, `Tracing the route to ${nm} (${r.ip})`); }
     if (I6.valid(ip)) return doTrace6(ip);
-    let src = null; if (srcArg){ const n = parseIf(srcArg); const i = n ? st.intfs[n] : Object.values(st.intfs).find(x=>x.ip===srcArg);
-      if (!i || !i.ip || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
-    if (hooks.trace) return hooks.trace(ip, src); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
+    let src = null; if (srcArg){ const n = parseIf(srcArg); const nn = n || ifNames().find(x=>st.intfs[x].ip===srcArg && vrfOf(x)===V); const i = nn ? st.intfs[nn] : null;
+      if (!i || !i.ip || vrfOf(nn)!==V || !(n ? up(n) : true)) return "% Invalid source address- IP address not on any of our up interfaces"; src = i.ip; }
+    if (hooks.trace) return hooks.trace(ip, src, V); const r = hooks.ping(ip) || {}; return `Type escape sequence to abort.\nTracing the route to ${ip}\nVRF info: (vrf in name/id, vrf out name/id)\n  1 ${r.ok?ip+" 1 msec 1 msec 1 msec":"*  *  *"}`; }
 
   /* ---------- parser ---------- */
   const isArg = p => p.startsWith("A:");
@@ -1383,7 +1557,7 @@ function ios2Env(opts){
   st.prompt = () => {
     if (st.pending) return "";
     const h = st.host;
-    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-arp-nacl":h+"(config-arp-nacl)#", "config-radius-server":h+"(config-radius-server)#", "config-server-tacacs":h+"(config-server-tacacs)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#" }[st.mode] || h+"#";
+    return { user:h+">", priv:h+"#", config:h+"(config)#", "config-if": h+(st.curList&&st.curList.length>1?"(config-if-range)#":(st.intfs[st.cur]&&st.intfs[st.cur].sub)?"(config-subif)#":"(config-if)#"), "config-line":h+"(config-line)#", "config-vlan":h+"(config-vlan)#", "config-router":h+"(config-router)#", "config-std-nacl":h+"(config-std-nacl)#", "config-arp-nacl":h+"(config-arp-nacl)#", "config-radius-server":h+"(config-radius-server)#", "config-server-tacacs":h+"(config-server-tacacs)#", "config-ext-nacl":h+"(config-ext-nacl)#", "config-dhcp":h+"(dhcp-config)#", "config-vrf":h+"(config-vrf)#", "config-vrf-af":h+"(config-vrf-af)#" }[st.mode] || h+"#";
   };
   st.complete = line => {
     const t = tokens(line); if (!t.length || /\s$/.test(line)) return line;
@@ -1443,7 +1617,7 @@ function ios2Env(opts){
     if (t[0] && "do".startsWith(t[0].toLowerCase()) && t[0].length>=2 && t.length>1) t = t.slice(1);
     const out = new Set(); for (const mode of Object.keys(T)){ const m = match(T[mode], t); if (!m.err) out.add(m.def.p.map(p=>isArg(p) ? "*" : p).join(" ")); }
     return [...out]; };
-  st.baseline = () => { st.startup = snapshot(); st.ospfRidActive = null; };   // a pre-built device behaves as if it booted from this config (its router-id applies)
+  st.baseline = () => { st.startup = snapshot(); st.ospfRidActive = null; st.ospfRidV = {}; };   // a pre-built device behaves as if it booted from this config (its router-id applies)
   st.exportConfig = () => snapshot();                                   // the whole config, for saving a topology
   st.importConfig = snap => { restore(snap); st.startup = snapshot(); };   // load it back as the saved startup-config
   st.isUp = n => up(n);        // for the bench: is this interface (incl. SVIs, subinterfaces, port-channels) up/up?
@@ -1494,9 +1668,15 @@ function ios2Env(opts){
   st.log = [];          // [{cmd, out, mode}] — what the learner typed and saw (text output only), newest last
   st.exec = function(line){
     const before = st.mode; let r = execInner(line);
+    // GRE tunnel line-protocol changes caused by this command (and %TUN-5-RECURDOWN) appear on the console after it, like IOS
+    if (!st.pending && !(hooks.ready && !hooks.ready()) && (Object.keys(st.tunWas||{}).length || (st.tunMsgs||[]).length) && (typeof r==="string" || (r && r.text!=null && !r.ask))){
+      if (hooks.settle) hooks.settle(); const add = st.tunCheck().filter(m=>!String(typeof r==="string" ? r : r.text).includes(m));
+      if (add.length){ if (typeof r==="string") r = (r ? r + "\n" : "") + add.join("\n"); else r.text = (r.text ? r.text + "\n" : "") + add.join("\n"); } }
+    const pre = st.tunMsgs || []; st.tunMsgs = [];   // %TUN-5-RECURDOWN (already in the log, already time-stamped)
     // console messages are logged; on the console they carry the same timestamp as in the log buffer ("*" = clock not synchronised)
     const stamp = txt => txt.split("\n").map(l=>{ if (!/^%[A-Z0-9_]+-[0-7]-[A-Z0-9_]+:/.test(l.trim())) return l; const e = hooks.emit(l.trim()); return e && e.t ? (ntpRaw().synced ? "" : "*") + e.t + ": " + l.trim() : l; }).join("\n");
     if (typeof r==="string") r = stamp(r); else if (r && r.text) r.text = stamp(r.text);
+    if (pre.length){ if (typeof r==="string") r = (r ? r + "\n" : "") + pre.join("\n"); else if (r) r.text = (r.text ? r.text + "\n" : "") + pre.join("\n"); }
     if (typeof r==="string" || (r && r.text)) { st.log.push({cmd:line, out: typeof r==="string" ? r : r.text, mode:before}); if (st.log.length>200) st.log.shift(); }
     return r;
   };
