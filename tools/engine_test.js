@@ -29,7 +29,7 @@ ok(/running-config/.test(out(B,["term","show ?"])),"show ? lists options");
 ok(B.devs.sw.env.complete("sh")==="show ","Tab completes sh to show");
 // 2 VLAN isolation
 run(B,["term","conf t"]); run(B,["term","int g0/2"]); run(B,["term","switchport access vlan 20"]); run(B,["term","end"]);
-ok(/unreachable/.test(out(B,["pc","pc1","ping 10.0.0.2"])),"different VLANs can't talk at L2");
+ok(/Request timed out\./.test(out(B,["pc","pc1","ping 10.0.0.2"])),"different VLANs can't talk at L2 (ARP was cached → Request timed out.)");
 ok(/20\s+VLAN0020\s+active\s+Gi0\/2/.test(out(B,["term","show vlan brief"])),"show vlan brief shows VLAN 20 with Gi0/2");
 // 3 hub
 B=Bench.create({devices:[{id:"hub",kind:"hub",label:"HUB"},{id:"a",kind:"pc",label:"A",ip:"10.0.0.1",mask:"255.0.0.0"},{id:"b",kind:"pc",label:"B",ip:"10.0.0.2",mask:"255.0.0.0"},{id:"c",kind:"pc",label:"C",ip:"10.0.0.3",mask:"255.0.0.0"}],

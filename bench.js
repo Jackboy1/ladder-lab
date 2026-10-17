@@ -246,7 +246,7 @@ function evaluateGuards(B, S){
   // BPDU guard: a port that should only face hosts receives BPDUs from another STP switch → err-disabled
   for (const id of B.order){ const d = B.devs[id]; if (!isSw(d)) continue;
     for (const p of d.ports){ if (!p.ios) continue; const i = d.env.intfs[p.ios]; if (i.errdis || i.shut || i.mode==="routed") continue;
-      const guard = i.stp && (i.stp.bpduguard===true || (i.stp.bpduguard!==false && i.stp.portfast && d.env.bpduDefault) || (i.stp.bpduguard!==false && d.env.pfDefault && d.env.bpduDefault && lpOp(d, p.id)==="access"));
+      const guard = i.stp && (i.stp.bpduguard===true || (i.stp.bpduguard!==false && (i.stp.portfast==="trunk" || (i.stp.portfast && lpOp(d, p.id)!=="trunk")) && d.env.bpduDefault) || (i.stp.bpduguard!==false && d.env.pfDefault && d.env.bpduDefault && lpOp(d, p.id)==="access"));
       if (!guard) continue; const ref = id+":"+p.id; const c = cableAt(B, ref); if (!c || CABLES[c.type].kind==="console") continue;
       const st = linkState(B, c); if (!st.up) continue;
       const f = farOf(B, ref); if (!f || !isSw(f.dev)) continue;
@@ -518,7 +518,7 @@ function hop(B, node, nhIp, label, ttl){
   if (!entry){
     arped = true;
     const req = deliver(B, fromSpec, {src:node.mac, dst:BCAST, kind:"arp", label:"ARP?", arpIp:node.ip, arpOp:"req", arpTarget:nhIp}, B.step);
-    if (req.storm){ out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast) from ${node.dev.label}: "Who has ${nhIp}?"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n)); B.step += 1; return Object.assign(out, {ok:false, arped:true, storm:true}); }
+    if (req.storm){ out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast) from ${node.dev.label}: "Who has ${nhIp}?"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n)); B.step += 1; return Object.assign(out, {ok:false, arped:true, storm:true, arpFail:true}); }
     out.frames.push(...req.hops); out.log.push(`<b>ARP request</b> (broadcast to ${BCAST}) from ${node.dev.label}: "Who has ${nhIp}? Tell ${node.ip}"`, ...req.notes.map(n=>"&nbsp;&nbsp;· "+n));
     B.step += Math.max(1, ...req.hops.map(h=>h.step+1-B.step));
     let owner = req.recv.find(r=>{ if (r.svi) return r.dev.env.intfs[r.svi].ip===nhIp || hsrpOwnsIp(B, r.dev, r.svi, nhIp); if (r.ios) return r.dev.env.intfs[r.ios].ip===nhIp || hsrpOwnsIp(B, r.dev, r.ios, nhIp) || natAlias(r.dev, r.ios, nhIp); return r.dev.ip===nhIp; });
@@ -528,7 +528,7 @@ function hop(B, node, nhIp, label, ttl){
       owner = req.recv.find(r=>{ if (!r.ios) return false; const i = r.dev.env.intfs[r.ios]; if (!i.ip || i.proxyArp===false || sameNet(i.ip, nhIp, i.mask)) return false; const rt = routeLookup(r.dev, nhIp, vrfAt(r.dev, r.ios)); return !!(rt && rt.ios!==r.ios); });
       viaProxy = !!owner;
     }
-    if (!owner){ out.log.push(`&nbsp;&nbsp;· No device answered — nothing on this network has ${nhIp} (or it can't be reached at Layer 2)`); return Object.assign(out, {ok:false, arped}); }
+    if (!owner){ out.log.push(`&nbsp;&nbsp;· No device answered — nothing on this network has ${nhIp} (or it can't be reached at Layer 2)`); return Object.assign(out, {ok:false, arped, arpFail:true}); }
     const vOwn = (owner.svi || owner.ios) && hsrpFor(B, owner.dev, owner.svi || owner.ios).find(v=>v.vip===nhIp);
     const ownerMac = vOwn ? vOwn.vmac : owner.svi ? owner.dev.env.intfs[owner.svi].mac : owner.ios ? owner.dev.env.intfs[owner.ios].mac : owner.dev.mac;
     const ownerFrom = owner.svi ? {svi:owner.dev.id, vlan:owner.vlan} : (owner.tag!=null ? {ref:owner.ref, tag:owner.tag} : owner.ref);   // a router subinterface answers with its 802.1Q tag
@@ -540,7 +540,7 @@ function hop(B, node, nhIp, label, ttl){
     out.frames.push(...rep.hops); out.log.push(viaProxy ? `<b>Proxy ARP reply</b> (unicast) from ${owner.dev.label} ${shortIf(owner.ios)}: "${nhIp} is at ${ownerMac}" — the router answers with ITS OWN MAC because it has a route to ${nhIp} out of another interface` : `<b>ARP reply</b> (unicast) from ${owner.dev.label}: "${nhIp} is at ${ownerMac}"`, ...rep.notes.map(n=>"&nbsp;&nbsp;· "+n));
     if (viaProxy) B.proxied = (B.proxied||0) + 1;
     B.step += Math.max(1, ...rep.hops.map(h=>h.step+1-B.step));
-    if (!rep.recv.some(r=>r.dev===node.dev)) return Object.assign(out, {ok:false, arped});
+    if (!rep.recv.some(r=>r.dev===node.dev)) return Object.assign(out, {ok:false, arped, arpFail:true});
     entry = cache[myKey] = {mac:ownerMac, intf: node.svi || node.ios || "eth"};
   }
   const f = deliver(B, fromSpec, {src:node.mac, dst:entry.mac, kind:"ip", label, gre:/^GRE\b/.test(label)}, B.step);
@@ -621,7 +621,9 @@ function sendIp(B, node, dstIp, label, pkt0){
     const h = hop(B, cur, nh, label, ttl);
     if (n < 12){ res.frames.push(...h.frames); res.log.push(...h.log); } else if (n===12) res.log.push("&nbsp;&nbsp;· … the same hops repeat: the packet keeps circling between these routers, losing 1 TTL per router …");
     if (n===0) res.arpedFirst = h.arped;
-    if (!h.ok){ res.kind = n===0 ? "unreach" : "timeout"; return res; }
+    if (!h.ok){ res.kind = n===0 && h.arpFail ? "unreach" : "timeout";
+      if (n===0 && !h.arpFail) res.log.push(`&nbsp;&nbsp;· ${cur.dev.label} already knew the MAC for ${nh} (ARP worked), so it just sent the frame — nothing answered, so it reports a timeout, not "Destination host unreachable"`);
+      return res; }
     const to = h.to;
     if (to.svi && pkt && isRouterDev(to.dev)){ const g = aclGate(B, res, to.dev, to.svi, "in", pkt, dstIp); if (g) return g; }
     if (to.svi){ if (to.dev.env.intfs[to.svi].ip===dstIp || hsrpOwnsIp(B, to.dev, to.svi, dstIp)){ res.ok=true; res.final={dev:to.dev, svi:to.svi, vlan:+to.svi.slice(4)}; seen(dstIp, {dev:to.dev, ios:to.svi}); return res; }
@@ -733,6 +735,7 @@ function l3Hear(B, d, ios){
   const r = deliver(B, from, {src:i.mac, dst:BCAST, kind:"ctl", label:"hello"}, 0);
   return (r.recv||[]).filter(x=>x.dev!==d && x.dev.env).map(x=>({dev:x.dev, ios: x.svi || x.ios}));
 }
+function markPing(B, key, ok){ B.pinged[key] = ok; (B.pingSig = B.pingSig || {})[key] = l3Sig(B); }
 function l3Sig(B){
   return JSON.stringify([B.order.map(id=>{ const d = B.devs[id]; return d.env ? [id, d.on!==false, d.env.exportConfig(), d.env.liveSig ? d.env.liveSig() : "", d.env.ospfResets||0, Object.keys(d.env.intfs).map(n=>d.env.isUp(n)?1:0).join("")] : [id, d.on!==false, d.ip, d.mask, d.ip6, !!d.dhcp, !!d.released, d.wlc ? JSON.stringify([d.wlc.mgmt, d.wlc.ifaces, d.wlc.wlans]) : "", d.wifi ? JSON.stringify(d.wifi) : "", d.apMode||"", d.primary||"", d._wifiKey||""]; }),
     B.cables.map(c=>[c.a, c.b, c.type])]);
@@ -745,7 +748,7 @@ function computeL3(B){
   B._l3busy = true; const keepStorm = B.stormSeen;
   try { let res, prevRt = null;
     // tunnels make routing and interface state depend on each other: repeat until nothing moves (tunnel up → OSPF over it → routes → tunnel state …)
-    for (let pass = 0; pass < 6; pass++){ if (hasTun) tunDiff(B); const hears = new Map(); res = {sig, ospf: computeOspf(B, hears), hsrp: computeHsrp(B, hears)}; B._l3 = res;
+    for (let pass = 0; pass < 6; pass++){ if (hasTun) tunDiff(B); const hears = new Map(); const hs = computeHsrp(B, hears); /* HSRP first: its 10 s hold time expires before OSPF's 40 s dead timer, so its log lines come first */ res = {sig, ospf: computeOspf(B, hears), hsrp: hs}; B._l3 = res;
       if (!hasTun) break;
       const changed = tunnelChecks(B), sig2 = l3Sig(B), rt = JSON.stringify(Object.entries(res.ospf).map(([k, v])=>[k, v.routes, v.nbrs.map(x=>x.rid+x.ios)]));
       if (!changed && sig2===sig && rt===prevRt) break; sig = sig2; res.sig = sig; prevRt = rt; }
@@ -1414,10 +1417,10 @@ function makeHooks(B, d){
       if (!node) return iosTraceText({hops:[], ok:false, kind:"timeout"}, ip); const t = trace(B, node, ip); B.traced = Object.assign(B.traced||{}, {[d.id+">"+(vrf ? vrf+":" : "")+ip]: t.ok}); return iosTraceText(t, ip); },
     linkUp: name => { if (name.startsWith("Port-channel")){ const S = l2State(B); const G = (S.bundles[d.id]||{})[+name.slice(12)]; return !!(G && G.up); } const ref = refOfIos(d, name); return !!(ref && linkUpAt(B, ref)); },
     ping: (ip, src, vrf) => {
-      if (d.kind==="router" || d.env.ipRouting){ const res = ping(B, src ? {dev:d, ip:src, vrf:vrf||null} : {dev:d, vrf:vrf||null}, ip); B.pinged[d.id+">"+(vrf ? vrf+":" : "")+ip] = res.ok; return res; }
+      if (d.kind==="router" || d.env.ipRouting){ const res = ping(B, src ? {dev:d, ip:src, vrf:vrf||null} : {dev:d, vrf:vrf||null}, ip); markPing(B, d.id+">"+(vrf ? vrf+":" : "")+ip, res.ok); return res; }
       const svi = Object.keys(d.env.intfs).find(n=>n.startsWith("Vlan") && d.env.intfs[n].ip && !d.env.intfs[n].shut);
       if (!svi) return {ok:false};
-      return ping(B, sviNode(d, svi), ip);
+      const res = ping(B, sviNode(d, svi), ip); markPing(B, d.id+">"+ip, res.ok); return res;
     },
     mac: () => Object.values(B.mac[d.id]||{}).filter(e=>e.port.startsWith("po") || linkUpAt(B, d.id+":"+e.port)).map(e=>({vlan:e.vlan, mac:e.mac, type: (()=>{ const pp = !e.port.startsWith("po") && d.ports.find(q=>q.id===e.port), ii = pp && d.env.intfs[pp.ios]; return ii && ii.psec && (ii.psecMacs||[]).some(m=>m.mac===e.mac) ? "STATIC" : "DYNAMIC"; })(), port: e.port.startsWith("po") ? "Po"+e.port.slice(2) : shortIf(d.ports.find(p=>p.id===e.port).ios)})).sort((a,b)=>a.vlan-b.vlan||a.port.localeCompare(b.port)),
     clearMac: () => { B.mac[d.id] = {}; },
@@ -1437,7 +1440,7 @@ function makeHooks(B, d){
     stp: v => { const S = l2State(B), x = S.stp[d.id] && S.stp[d.id][+v]; if (!x || !x.on) return null;
       const name = lp => lpIosName(d, lp);
       const ports = x.lps.map(l=>{ const r = x.roles[l.lp] || {role:"Desg", state:"FWD"}, inf = x.info[l.lp]; const i = lpIntf(d, l.lp);
-        const edge = inf.edge && (i.stp && i.stp.portfast || (d.env.pfDefault && lpOp(d, l.lp)==="access"));
+        const edge = inf.edge && ((i.stp && (i.stp.portfast==="trunk" || (i.stp.portfast && lpOp(d, l.lp)!=="trunk"))) || (d.env.pfDefault && lpOp(d, l.lp)==="access"));
         return {name: name(l.lp), role: r.role, state: r.state, cost: inf.cost, prio: `${inf.pid.prio}.${inf.pid.num}`, type: r.inc ? `P2p *${r.inc===true ? "ROOT" : r.inc}_Inc` : edge ? "P2p Edge" : "P2p"}; })
         .sort((a,b)=>a.name.localeCompare(b.name, undefined, {numeric:true}));
       return { isRoot: x.isRoot, root: x.root, bridge: x.bridge, rootCost: x.rootCost, rootPort: x.rootLp ? name(x.rootLp) : null, rootPortNum: x.rootLp ? x.info[x.rootLp].pid.num : 0, ports }; },
@@ -1567,7 +1570,7 @@ function pcExec(B, d, line){
     const noRoute6 = `\nTracing route to ${ip} over a maximum of 30 hops\n\n  1  Transmit error: code 1231.\n\nTrace complete.`;
     if (!media) return t[0].toLowerCase()==="ping" ? `\nPinging ${ip} with 32 bytes of data:\n` + [...Array(4)].map(()=>"PING: transmit failed. General failure.").join("\n") : noRoute6;
     if (t[0].toLowerCase()==="tracert"){ const r = trace6(B, d, ip); B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: r.ok}); if (r.kind==="general") return noRoute6; return winTraceText(r, ip); }
-    const res = ping6(B, d, ip); B.pinged[d.id+">"+ip] = res.ok;
+    const res = ping6(B, d, ip); markPing(B, d.id+">"+ip, res.ok);
     const shown = window.IP6.isLL(ip) ? ip + "%4" : ip;   // Windows names the zone (interface index) of a link-local target
     const head = `\nPinging ${shown} with 32 bytes of data:\n`, stat = n => `\n\nPing statistics for ${shown}:\n    Packets: Sent = 4, Received = ${n}, Lost = ${4-n} (${(4-n)*25}% loss),`;
     if (res.ok) return head + [...Array(4)].map(()=>`Reply from ${shown}: time<1ms`).join("\n") + stat(4) + RTT;
@@ -1580,7 +1583,7 @@ function pcExec(B, d, line){
   if (t[0].toLowerCase()==="tracert"){
     const ip = t[t.length-1]; if (t.length<2 || ipToInt(ip)==null) return `Unable to resolve target system name ${t[1]||""}.`;
     if (!media || !d.ip) return "\nTransmit error: code 1231.";   // no link / no address
-    const r = trace(B, hostNode(d), ip); B.pinged[d.id+">"+ip] = r.ok; B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: r.ok});
+    const r = trace(B, hostNode(d), ip); markPing(B, d.id+">"+ip, r.ok); B.traced = Object.assign(B.traced||{}, {[d.id+">"+ip]: r.ok});
     if (r.kind==="unreach" && !r.hops.length) return `\nTracing route to ${ip} over a maximum of 30 hops\n\n  1  ${d.ip}  reports: Destination host unreachable.\n\nTrace complete.`;
     return winTraceText(r, ip);
   }
@@ -1588,7 +1591,7 @@ function pcExec(B, d, line){
     const ip = t[1]; if (!ip || ipToInt(ip)==null) return "Ping request could not find host "+(ip||"")+". Please check the name and try again.";
     let res;
     if (!media || !d.ip) res = {ok:false, kind:"general"}; else res = ping(B, hostNode(d), ip);
-    B.pinged[d.id+">"+ip] = res.ok;
+    markPing(B, d.id+">"+ip, res.ok);
     const head = `\nPinging ${ip} with 32 bytes of data:\n`;
     const stat = n => `\n\nPing statistics for ${ip}:\n    Packets: Sent = 4, Received = ${n}, Lost = ${4-n} (${(4-n)*25}% loss),`;
     const ttl = res.ttl || 128;
@@ -1641,7 +1644,9 @@ function act(B, a){
   const [op, ...x] = a; let r = {ok:true, msg:""};
   B_ctx.B = B; B._greLast = 0;
   if (op==="plug"){ r = plug(B, x[0], x[1], x[2]); if (r.ok) for (const ref of [x[1], x[2]]){ const pd = P(B, ref); if (pd && !pd.dev.env && pd.dev.dhcp) pd.dev.released = false; } }
-  else if (op==="unplug"){ const c = cableAt(B, x[0]); if (!c) r = {ok:false, msg:"Nothing plugged in there."}; else { B.cables = B.cables.filter(y=>y!==c); if (CABLES[c.type].kind==="console" && B.console) B.console = null; r = {ok:true, msg:"Cable unplugged."}; } }
+  else if (op==="unplug"){ const c = cableAt(B, x[0]); if (!c) r = {ok:false, msg:"Nothing plugged in there."}; else { B.cables = B.cables.filter(y=>y!==c); if (CABLES[c.type].kind==="console" && B.console) B.console = null;
+      if (CABLES[c.type].kind!=="console") for (const end of [c.a, c.b]){ const hd = P(B, end).dev; if (hd && !hd.env){ B.arp[hd.id] = {}; if (B.nd) B.nd[hd.id] = {}; } }
+      r = {ok:true, msg:"Cable unplugged."}; } }
   else if (op==="insert"){ const p = P(B, x[0]); if (!p || p.port.type!=="sfp") r = {ok:false, msg:"Transceivers go into an SFP cage."}; else if (p.port.sfp) r = {ok:false, msg:"There's already a module in that cage — remove it first."}; else { p.port.sfp = x[1]; r = {ok:true, msg:`Inserted ${SFPS[x[1]].short} into ${portName(p)}.`}; } }
   else if (op==="remove"){ const p = P(B, x[0]); if (!p || !p.port.sfp) r = {ok:false, msg:"No module there."}; else if (cableAt(B, x[0])) r = {ok:false, msg:"Unplug the fibre before pulling the transceiver."}; else { p.port.sfp = null; r = {ok:true, msg:"Module removed."}; } }
   else if (op==="flip"){ const c = cableAt(B, x[0]); if (!c || CABLES[c.type].kind!=="fibre") r = {ok:false, msg:"Only duplex fibre connectors have a Tx/Rx polarity to flip."}; else { c.swapped = !c.swapped; r = {ok:true, msg:"Flipped the LC duplex connector (Tx↔Rx) at this end."}; } }
@@ -1685,7 +1690,7 @@ function act(B, a){
   else if (op==="pc"){ B.frames = []; const dv = B.devs[x[0]], o0 = pcExec(B, dv, x[1]);
     const wifiNic = dv && dv.kind==="laptop" && (dv.wifiAt || (dv.wifi && !cableAt(B, dv.id + ":eth")));
     r = {ok:true, out: wifiNic && typeof o0==="string" ? o0.replace("Ethernet adapter Ethernet:", "Wireless LAN adapter Wi-Fi:").replace("Intel(R) Ethernet Connection I219-LM", "Intel(R) Wi-Fi 6E AX211 160MHz").split("renewing interface Ethernet").join("renewing interface Wi-Fi").split("releasing interface Ethernet").join("releasing interface Wi-Fi") : o0}; }
-  else if (op==="power"){ const d = B.devs[x[0]]; d.on = x[1]!==false; if (!d.on && B.mac[d.id]) B.mac[d.id] = {}; r = {ok:true, msg:`${d.label} powered ${d.on?"on":"off"}.`}; }
+  else if (op==="power"){ const d = B.devs[x[0]]; d.on = x[1]!==false; if (!d.on && B.mac[d.id]) B.mac[d.id] = {}; if (!d.on){ B.arp[d.id] = {}; if (B.nd) B.nd[d.id] = {}; } r = {ok:true, msg:`${d.label} powered ${d.on?"on":"off"}.`}; }
   else if (op==="console"){ r = openConsole(B, x[0], x[1]||{}); }
   else if (op==="term"){ B.frames = []; r = {ok:true, out: termExec(B, x[0])}; }
   else if (op==="cli"){ B.frames = []; const d = B.devs[x[0]]; r = {ok:true, out: d && d.env ? d.env.exec(x[1]) : "(no CLI on this device)"}; }
@@ -2104,6 +2109,7 @@ window.Bench = { create, act, mount, addDevice, removeDevice, exportTopology, de
   cableType: (B, ref) => { const c = cableAt(B, ref); return c ? c.type : null; },
   consoleOk: (B, dev) => !!(B.console && B.console.good && (!dev || B.console.target===dev)),
   pinged: (B, from, ip) => B.pinged[from+">"+ip]===true,
+  pingedNow: (B, from, ip, vrf) => { const k = from+">"+(vrf ? vrf+":" : "")+ip; return B.pinged[k]===true && !!B.pingSig && B.pingSig[k]===l3Sig(B); },
   // IP services (Module 7+)
   leased: (B, pc) => { const d = B.devs[pc]; return d && d.dhcp && d.ip && d.lease ? d.ip : null; },
   snoopBound: (B, sw, mac) => { const d = B.devs[sw]; return !!(d && d.env && d.env.snoopBind && Object.values(d.env.snoopBind).some(b=>!mac || b.mac===mac)); },
